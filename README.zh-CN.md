@@ -46,7 +46,7 @@
 
 ## 下载
 
-到 [Releases](https://github.com/Kami958/WhoShitsonMyC/releases) 下载 `WhoShitsOnMyC.exe`
+到 [Releases](https://github.com/Kami958/WhoShitsonMyC/releases) 下载 `WhoShitsOnMyC-v*.exe`
 
 | 项目 | 说明 |
 | --- | --- |
@@ -125,7 +125,7 @@ python app.py
 python -m pytest tests/ -q
 
 pip install pyinstaller
-python build.py   # → dist/WhoShitsOnMyC.exe
+python build.py   # → dist/WhoShitsOnMyC-v{version}.exe
 ```
 
 `requirements.txt` 里是运行和测试用的依赖。只有要打 exe 时才需要装 PyInstaller

@@ -78,7 +78,10 @@ def test_set_scan_workers_clamps_out_of_range():
     assert set_scan_workers(999) == 32     # 上限收拢到 32
 
 
-def test_compress_snapshots_defaults_off():
+def test_compress_snapshots_defaults_on():
+    # 其它用例可能改过该会话开关，先拨回默认再断言。
+    set_compress_snapshots(True)
+    assert get_compress_snapshots() is True
+    assert set_compress_snapshots(False) is False
     assert get_compress_snapshots() is False
     assert set_compress_snapshots(True) is True
-    assert get_compress_snapshots() is True

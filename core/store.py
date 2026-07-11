@@ -93,8 +93,8 @@ def default_scan_workers() -> int:
 # 当前会话的扫描线程数。只存在于内存中，进程退出即丢弃，不写任何配置文件。
 _scan_workers = default_scan_workers()
 
-# 扫描完成后是否把 ``.db`` 压成 ``.dbz``。默认关闭（优先对比速度）。
-_compress_snapshots = False
+# 扫描完成后是否把 ``.db`` 压成 ``.dbz``。默认开启，少占磁盘。
+_compress_snapshots = True
 
 
 def get_scan_workers() -> int:
@@ -113,7 +113,7 @@ def set_scan_workers(n: int) -> int:
 
 
 def get_compress_snapshots() -> bool:
-    """返回是否在扫描完成后压缩快照（默认 False）。"""
+    """返回是否在扫描完成后压缩快照（默认 True）。"""
     return _compress_snapshots
 
 

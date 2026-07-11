@@ -46,7 +46,7 @@ Instead of hunting junk by feel every time, scan once while space still looks fi
 
 ## Download
 
-Get `WhoShitsOnMyC.exe` from [Releases](https://github.com/Kami958/WhoShitsonMyC/releases)
+Get `WhoShitsOnMyC-v*.exe` from [Releases](https://github.com/Kami958/WhoShitsonMyC/releases)
 
 | Item | Detail |
 | --- | --- |
@@ -125,7 +125,7 @@ python app.py
 python -m pytest tests/ -q
 
 pip install pyinstaller
-python build.py   # → dist/WhoShitsOnMyC.exe
+python build.py   # → dist/WhoShitsOnMyC-v{version}.exe
 ```
 
 `requirements.txt` covers runtime and tests. Install PyInstaller only when you need the `.exe`
