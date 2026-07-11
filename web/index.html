@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WhoShitsOnMyC</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="layout">
+    <!-- 左侧栏：新建扫描 + 快照列表 -->
+    <aside class="sidebar">
+      <div class="side-head">
+        <button id="newScanBtn" class="btn-primary" data-i18n="newScan">＋ 新建扫描</button>
+      </div>
+      <div class="side-section">
+        <div class="side-group">
+          <span data-i18n="snapRecords">快照记录</span>
+          <select id="snapSortSel" class="sort-sel snap-sort" data-i18n-title="snapSortTitle" title="快照排序">
+            <option value="time-desc" data-i18n="snapSortTimeDesc">时间 新→旧</option>
+            <option value="time-asc" data-i18n="snapSortTimeAsc">时间 旧→新</option>
+            <option value="name-asc" data-i18n="snapSortNameAsc">路径 A→Z</option>
+            <option value="name-desc" data-i18n="snapSortNameDesc">路径 Z→A</option>
+          </select>
+        </div>
+        <div id="snapshotList" class="snapshot-list"></div>
+      </div>
+      <div class="side-foot">
+        <button id="openDirBtn" class="btn-plain" data-i18n="openDir" data-i18n-title="openDirTitle" title="在资源管理器中打开快照存放目录">打开快照文件夹</button>
+        <label class="worker-row" data-i18n-title="workersTitle" title="扫描用的并行线程数，机械硬盘建议 1，SSD 可加大"><span data-i18n="workers">扫描线程数</span>
+          <select id="workerSel" class="sort-sel worker-sel"></select>
+        </label>
+        <label class="worker-row compress-row" data-i18n-title="compressTitle" title="扫描完成后压缩快照以节省磁盘；对比时再解压">
+          <span data-i18n="compress">压缩快照</span>
+          <input id="compressChk" type="checkbox" />
+        </label>
+        <div class="foot-btns">
+          <button id="langToggle" class="btn-plain" data-i18n-title="langTitle" title="切换语言 / Switch language">中 / EN</button>
+          <button id="themeToggle" class="btn-plain" data-i18n-title="themeTitle" title="切换暗色/浅色">🌙 主题</button>
+          <button id="githubBtn" class="btn-plain github-btn" data-i18n-title="githubStarTitle" title="在 GitHub 上 Star 本项目">
+            <svg class="github-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+              <path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
+            </svg>
+            <span data-i18n="githubStar">Star</span>
+          </button>
+        </div>
+      </div>
+    </aside>
+
+    <!-- 主区 -->
+    <main class="main">
+      <!-- 对比选择条 -->
+      <div class="comparebar">
+        <div class="pick" id="pickOld">
+          <div class="pick-inner">
+            <span class="pick-label old-c" data-i18n="pickOldLabel">基准（较早的快照）</span>
+            <span class="pick-value" data-role="old-value" data-i18n="pickPlaceholder">点击选择…</span>
+          </div>
+          <span class="caret">▾</span>
+        </div>
+        <button id="swapBtn" class="btn-plain swap" data-i18n-title="swapTitle" title="交换基准与当前" disabled>⇄</button>
+        <div class="pick" id="pickNew">
+          <div class="pick-inner">
+            <span class="pick-label new-c" data-i18n="pickNewLabel">当前（较新的快照）</span>
+            <span class="pick-value" data-role="new-value" data-i18n="pickPlaceholder">点击选择…</span>
+          </div>
+          <span class="caret">▾</span>
+        </div>
+        <button id="compareBtn" class="btn-primary compact" data-i18n="compare" disabled>对比</button>
+<!--        <button id="clearPickBtn" class="btn-plain" title="清空基准与当前的选择" disabled>清空</button>-->
+        <button id="clearPickBtn" class="btn-primary compact" data-i18n="clearPick" data-i18n-title="clearPickTitle" title="清空基准与当前的选择" disabled>清空</button>
+      </div>
+
+      <!-- 概览 + 过滤 -->
+      <div id="summaryBar" class="summary-bar hidden">
+        <span class="summary-caption" data-i18n="totalChange">总变化</span>
+        <span id="summaryDelta" class="summary-delta"></span>
+        <span class="spacer"></span>
+        <select id="barBaseSel" class="sort-sel" data-i18n-title="barBaseTitle" title="占比条的长度基准">
+          <option value="global" data-i18n="barBaseGlobal">条长基准：顶层最大项</option>
+          <option value="sibling" data-i18n="barBaseSibling">条长基准：同级最大项</option>
+        </select>
+        <select id="sortSel" class="sort-sel" data-i18n-title="sortSelTitle" title="排序方式">
+          <option value="delta-desc" data-i18n="sortDeltaDesc">按变化幅度（绝对值）</option>
+          <option value="pct-desc" data-i18n="sortPctDesc">按变化幅度（百分比）</option>
+          <option value="name-asc" data-i18n="sortNameAsc">按名称 A→Z</option>
+          <option value="name-desc" data-i18n="sortNameDesc">按名称 Z→A</option>
+          <option value="mtime-desc" data-i18n="sortMtimeDesc">按修改时间 新→旧</option>
+        </select>
+        <select id="filterSel" class="sort-sel" data-i18n-title="filterTitle" title="筛选变化方向">
+          <option value="all" selected data-i18n="filterAll">全部变化</option>
+          <option value="grew" data-i18n="filterGrew">只看变大 ▲</option>
+          <option value="shrank" data-i18n="filterShrank">只看变小 ▼</option>
+        </select>
+      </div>
+
+      <!-- 跳过目录警告 -->
+      <div id="skipWarn" class="skip-warn hidden"></div>
+
+      <!-- 变化树 / 空态 -->
+      <div id="treeWrap" class="tree-wrap">
+        <div id="emptyState" class="empty-state">
+          <p class="empty-title" data-i18n="emptyTitle">磁盘空间对比</p>
+          <p class="empty-hint" data-i18n="emptyHint">新建扫描以留存基准，隔段时间对同一目录再扫一次，选择两份快照进行对比，即可定位空间去向。</p>
+        </div>
+        <div id="tree" class="tree"></div>
+      </div>
+    </main>
+  </div>
+
+  <!-- 快照选择下拉 -->
+  <div id="dropdown" class="dropdown hidden"></div>
+
+  <!-- 树节点右键菜单 -->
+  <div id="ctxMenu" class="ctx-menu hidden">
+    <div class="ctx-item" data-cmd="reveal" data-i18n="ctxReveal">📂 在资源管理器中打开</div>
+    <div class="ctx-item" data-cmd="copy" data-i18n="ctxCopy">📋 复制完整路径</div>
+  </div>
+
+  <!-- 扫描进度遮罩 -->
+  <div id="scanOverlay" class="overlay hidden">
+    <div class="scan-card">
+      <div class="scan-spinner"></div>
+      <div class="scan-title" data-i18n="scanning">正在扫描…</div>
+      <div id="scanFiles" class="scan-files" data-i18n="scanFilesInit">已扫描 0 个文件</div>
+      <div id="scanCurrent" class="scan-current"></div>
+      <button id="cancelScanBtn" class="btn-ghost" data-i18n="cancel">取消</button>
+    </div>
+  </div>
+
+  <!-- Toast 提示 -->
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

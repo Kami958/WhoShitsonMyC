@@ -1,0 +1,8 @@
+# 运行依赖
+pywebview>=5.0
+
+# 开发/测试依赖
+pytest>=8.0
+
+# 打包（可选，仅打 exe 时需要）
+# pyinstaller>=6.0

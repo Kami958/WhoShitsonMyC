@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+.venv/
+venv/
+env/
+
+# 测试 / 工具缓存
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# 打包产物（由 build.py / PyInstaller 生成）
+*.spec
+*.spec.bak
+
+# WebView2 固定版本运行时（体积大，不入库；完整版打包时本地放置）
+webview2_runtime/
+
+# 本地快照与解压缓存（运行时数据）
+*.db
+*.dbz
+snapshots/
+cache/
+
+# IDE / 编辑器
+.idea/
+.vscode/
+*.swp
+*~
+
+# 系统杂项
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 本地 / 会话产物
+.claude/
+.superpowers/
