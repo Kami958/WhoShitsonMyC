@@ -861,27 +861,28 @@ async function changeCompress(enabled) {
 
 // ---- 主题 ----
 
-async function syncTitlebarTheme() {
-  // 原生标题栏归系统画；Win10 启动时常粘在默认暗色，要等 set_theme + 后端强制重绘。
+function syncTitlebarTheme() {
+  // 原生标题栏归系统画。不 await：界面先可点，主题在后台跟上。
+  // 后端对相同主题会 short-circuit，启动连打也不贵。
   const dark = document.documentElement.dataset.theme === "dark";
   try {
     if (state.api && state.api.set_theme) {
-      await state.api.set_theme(dark ? "dark" : "light");
+      state.api.set_theme(dark ? "dark" : "light");
     }
   } catch (e) {}
 }
 
-async function applyThemeButton() {
+function applyThemeButton() {
   const dark = document.documentElement.dataset.theme === "dark";
   $("#themeToggle").textContent = dark ? t("themeDark") : t("themeLight");
-  await syncTitlebarTheme();
+  syncTitlebarTheme();
 }
 
-async function toggleTheme() {
+function toggleTheme() {
   const html = document.documentElement;
   html.dataset.theme = html.dataset.theme === "dark" ? "light" : "dark";
   try { localStorage.setItem("theme", html.dataset.theme); } catch (e) {}
-  await applyThemeButton();
+  applyThemeButton();
 }
 
 function restoreThemePreference() {
@@ -893,12 +894,10 @@ function restoreThemePreference() {
   } catch (e) {}
 }
 
-/** 启动时多刷几次标题栏，对齐 localStorage 主题（修 Win10 粘默认暗色）。 */
+/** 启动时再补一次即可；后端有延迟重绘，不必前端连打四次。 */
 function scheduleTitlebarSync() {
   syncTitlebarTheme();
-  setTimeout(() => { syncTitlebarTheme(); }, 80);
-  setTimeout(() => { syncTitlebarTheme(); }, 250);
-  setTimeout(() => { syncTitlebarTheme(); }, 600);
+  setTimeout(() => { syncTitlebarTheme(); }, 200);
 }
 
 const GITHUB_URL = "https://github.com/Kami958/WhoShitsonMyC";
@@ -987,8 +986,7 @@ function wireEvents() {
 
 function boot() {
   state.api = window.pywebview.api;
-  // 主题尽量最先同步：否则 Win10 标题栏会一直停在启动时的默认暗色，
-  // 直到用户最大化才被迫刷新。
+  // 主题尽早 fire-and-forget；列表/设置不互相 await，并行拉，首屏更快可点。
   restoreThemePreference();
   wireEvents();
   scheduleTitlebarSync();

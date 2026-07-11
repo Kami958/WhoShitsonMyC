@@ -35,18 +35,18 @@ Instead of hunting junk by feel every time, scan once while space still looks fi
 ## Features
 
 - **Time-based comparison**: earlier snapshot as **Base**, later as **Current** — see how space changed over that period
-- **Expandable change tree**: expand only the levels you care about; no need to open the whole tree at once, so large directories stay smooth
+- **Expandable change tree**: expand only the levels you care about; large directories stay smooth
 - **Easy colors**: red = grew / added, green = shrank / removed, amber = no permission / incomparable
 - **Sort and filter**: by delta, percent change, name, or modification time; show only growth or only shrink
-- **Multi-threaded scan**: scan multiple folders in parallel; prefer 1 thread on HDDs, raise it on SSDs for speed
-- **Optional snapshot compression**: save as `.dbz` to use less disk; decompress when comparing
+- **Multi-threaded scan**: prefer 1 thread on HDDs; raise it on SSDs for speed
+- **Snapshot compression**: finished scans are compressed to `.dbz` by default to use less disk; decompress when comparing
 - **Single executable**: one `.exe`, no background service, no registry writes
 - **Chinese / English UI, dark / light theme**: follows system language by default; switch anytime
-- **Explorer integration**: right-click a row to open it in File Explorer or copy the full path
+- **Explorer integration**: right-click a row to open its location, or copy the full path
 
 ## Download
 
-Get `WhoShitsOnMyC.exe` from [Releases](https://github.com/Kami958/WhoShitsonMyC/releases)
+Get `WhoShitsOnMyC-v*.exe` from [Releases](https://github.com/Kami958/WhoShitsonMyC/releases)
 
 | Item | Detail |
 | --- | --- |
@@ -55,21 +55,19 @@ Get `WhoShitsOnMyC.exe` from [Releases](https://github.com/Kami958/WhoShitsonMyC
 
 ## Quick start
 
-**Run as Administrator when you can.** Scanning system folders like `C:\Windows` hits far fewer permission walls that way
+**Run as Administrator when you can.** Scanning system folders hits far fewer permission walls that way
 
 1. After a cleanup, or while space still looks fine, click **＋ New scan**, pick a folder (for example `C:\`), and keep a baseline
 2. When space is eaten again, scan the **same** folder once more
 3. Set the earlier one as **Base**, the later as **Current**, then click **Compare**
 4. Expand the change tree and follow the red / green markers to what grew
-5. Right-click a row to open it in File Explorer, or copy the full path
+5. Right-click a row to open its location, or copy the full path
 
 Sidebar options:
 
 - **Scan threads**: how many workers scan the disk in parallel. Prefer 1 on HDDs; raise it on SSDs for speed
-- **Compress snapshots**: save finished scans as `.dbz` to use less disk; decompress when comparing
+- **Compress snapshots**: save finished scans as `.dbz` to use less disk; decompress when comparing (on by default)
 - **Language / theme**: Chinese or English; dark or light
-
-> Both snapshots must cover the same folder. Two scans of `C:\` can be compared; `C:\` against `D:\` cannot
 
 ## Data & uninstall
 
@@ -80,7 +78,7 @@ Sidebar options:
 | Snapshots (`.db` / `.dbz`) | `%LOCALAPPDATA%\WhoShitsOnMyC\snapshots\` |
 | Decompress cache | `%LOCALAPPDATA%\WhoShitsOnMyC\cache\` |
 
-If you want the history gone too, delete the data folder first, then the `.exe`
+All snapshot data lives in the data folder. Delete that folder, then delete the `.exe`
 
 Paste this into File Explorer’s address bar to open the data folder:
 
@@ -97,19 +95,16 @@ Remove-Item -Recurse -Force "$env:LOCALAPPDATA\WhoShitsOnMyC" -ErrorAction Silen
 ## FAQ
 
 **Why can the scanned total exceed “This PC” used space?**  
-Places like `C:\Windows\WinSxS` have many hard links, so the same file can be counted more than once. Sizes here are logical, not cluster-aligned physical usage. The **delta between two scans of the same folder** is still solid for finding what grew
-
-**Can two different folders be compared?**  
-No. Both sides must be the same folder
+Places like `C:\Windows\WinSxS` have many hard links, so the same file can be counted more than once. Sizes here are logical, not cluster-aligned physical usage. The **delta between two scans** is still solid
 
 **What does “Incomparable” mean?**  
-One side had no permission or a read error, so data is incomplete. The app will not invent a size change
+That side was incomplete (often no permission), so no change can be computed
 
 **The app says WebView2 is missing.**  
 Install the [WebView2 Evergreen package](https://developer.microsoft.com/microsoft-edge/webview2/) once, then reopen the app
 
 **Are settings saved?**  
-No — they are gone when you close the app. Only snapshots stay in the data folder above
+No — they are gone when you close the app. Only snapshots stay in the data folder
 
 ---
 
@@ -125,7 +120,7 @@ python app.py
 python -m pytest tests/ -q
 
 pip install pyinstaller
-python build.py   # → dist/WhoShitsOnMyC.exe
+python build.py   # → dist/WhoShitsOnMyC-v{version}.exe
 ```
 
 `requirements.txt` covers runtime and tests. Install PyInstaller only when you need the `.exe`
@@ -146,8 +141,13 @@ core/               Core logic (no UI)
 web/                Frontend HTML / CSS / JS
 tests/              Unit tests
 assets/screenshots/ UI screenshots
+version.py          App version
 ```
 
 ## License
 
 [MIT](LICENSE)
+
+## Friendly links
+
+- [LINUX DO](https://linux.do/)

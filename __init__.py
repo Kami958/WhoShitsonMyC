@@ -11,6 +11,7 @@
       differ.py     两份快照对比、生成变化树
     app.py      pywebview 桥接层（连接前端与核心引擎）
     web/        HTML/CSS/JS 前端界面
+    version.py  版本号（唯一来源）
 """
 
-__version__ = "0.1.0"
+from version import __version__ as __version__  # noqa: PLC0414

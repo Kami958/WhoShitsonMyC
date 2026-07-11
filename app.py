@@ -25,6 +25,7 @@ from core.differ import Diff, DiffError
 from core.scanner import ScanCancelled, scan_to_snapshot
 from core.snapshot import SnapshotError
 from core import i18n, store
+from version import __version__ as APP_VERSION
 
 # 资源根目录：PyInstaller --onefile 会把打包数据解到 sys._MEIPASS；
 # 未打包时就是本文件所在目录。web/ 与 logo.ico 都属于打包资源。
@@ -54,6 +55,9 @@ class Api:
         # pywebview 会按 AppsUseLightTheme 重刷标题栏，Win10 上经常把我们刚设的盖掉。
         self._titlebar_dark: bool = True
         self._titlebar_hooked: bool = False
+        # 上次已成功刷到标题栏的主题；相同主题的重复 set_theme 直接跳过，加快启动。
+        self._titlebar_applied: bool | None = None
+        self._titlebar_refresh_gen: int = 0
 
     # ---- 生命周期 -------------------------------------------------------
 
@@ -113,18 +117,21 @@ class Api:
     # ---- 设置 -----------------------------------------------------------
 
     def get_settings(self) -> dict:
-        """返回当前设置与环境信息（存放目录、扫描线程数、是否压缩、CPU 核数、界面语言）。"""
+        """返回当前设置与环境信息（版本、存放目录、扫描线程数、是否压缩、CPU 核数、界面语言、是否管理员）。"""
         return {
+            "version": APP_VERSION,
             "snapshot_dir": store.default_snapshot_dir(),
             "scan_workers": store.get_scan_workers(),
             "compress_snapshots": store.get_compress_snapshots(),
             "cpu_count": os.cpu_count() or 2,
             "lang": i18n.get_lang(),
+            "is_admin": _is_admin(),
         }
 
     def set_language(self, lang: str) -> dict:
         """由前端在启动/手动切换时调用，同步后端报错文案的语言。"""
         i18n.set_lang(lang)
+        self._refresh_window_title()
         return {"ok": True, "lang": i18n.get_lang()}
 
     def set_scan_workers(self, n: int) -> dict:
@@ -168,13 +175,20 @@ class Api:
         return {"ok": True}
 
     def set_theme(self, theme: str) -> dict:
-        """前端切换主题时同步窗口标题栏的明暗（仅 Windows 有效）。"""
-        self._titlebar_dark = theme == "dark"
+        """前端切换主题时同步窗口标题栏的明暗（仅 Windows 有效）。
+
+        启动阶段前端可能连打几次；主题没变就立刻返回，避免反复 DWM/尺寸微扰拖慢首屏。
+        """
+        dark = theme == "dark"
         self._hook_titlebar_theme()
-        # Win10：属性写了也不立刻画，需要 UI 线程 + 尺寸微扰/延迟再刷。
-        self._apply_titlebar(self._titlebar_dark, force_nudge=True)
-        self._schedule_titlebar_refresh()
-        return {"ok": True}
+        # 已成功刷成同一主题：直接返回，避免启动阶段重复 DWM/尺寸微扰。
+        if self._titlebar_applied is not None and self._titlebar_applied == dark:
+            self._titlebar_dark = dark
+            return {"ok": True, "theme": "dark" if dark else "light", "skipped": True}
+        self._titlebar_dark = dark
+        self._apply_titlebar(dark, force_nudge=True)
+        self._schedule_titlebar_refresh(delays_ms=(80, 280))
+        return {"ok": True, "theme": "dark" if dark else "light"}
 
     def _hook_titlebar_theme(self) -> None:
         """接管 pywebview 的标题栏主题逻辑，改跟应用主题走。
@@ -231,18 +245,21 @@ class Api:
         except Exception:  # noqa: BLE001
             pass
 
-    def _schedule_titlebar_refresh(self) -> None:
-        """启动/切主题后延迟再刷几次。
+    def _schedule_titlebar_refresh(
+        self, delays_ms: tuple[int, ...] = (100, 320)
+    ) -> None:
+        """启动/切主题后延迟再刷（默认 2 次，够修 Win10，又不太拖首屏）。
 
-        Win10 上 DWM 常在窗口布局稳定后才认属性；前端 boot 时窗口刚出来，
-        一次写入经常被忽略，要等到最大化才「碰巧」生效。延迟 + 微扰尺寸补上。
+        每次调度递增 generation，旧 timer 回调自动作废，避免 shown/loaded/set_theme
+        叠在一起把 UI 线程打满。
         """
         if os.name != "nt":
             return
         form = getattr(self._window, "native", None) if self._window else None
         if form is None:
             return
-        delays_ms = (30, 120, 350)
+        self._titlebar_refresh_gen += 1
+        gen = self._titlebar_refresh_gen
         try:
             import System.Windows.Forms as WinForms  # type: ignore
 
@@ -250,12 +267,14 @@ class Api:
                 timer = WinForms.Timer()
                 timer.Interval = int(ms)
 
-                def _tick(sender, _e, t=timer):  # noqa: ANN001
+                def _tick(sender, _e, t=timer, g=gen):  # noqa: ANN001
                     try:
                         t.Stop()
                         t.Dispose()
                     except Exception:  # noqa: BLE001
                         pass
+                    if g != self._titlebar_refresh_gen:
+                        return
                     self._apply_titlebar_hwnd(
                         self._titlebar_dark, force_nudge=True
                     )
@@ -263,11 +282,12 @@ class Api:
                 timer.Tick += _tick
                 timer.Start()
         except Exception:  # noqa: BLE001
-            # 无 pythonnet 时退回线程延迟。
-            def _later(delay: float) -> None:
+            def _later(delay: float, g: int = gen) -> None:
                 import time
 
                 time.sleep(delay)
+                if g != self._titlebar_refresh_gen:
+                    return
                 self._run_on_ui(
                     lambda: self._apply_titlebar_hwnd(
                         self._titlebar_dark, force_nudge=True
@@ -415,6 +435,7 @@ class Api:
                             None,
                             RDW_INVALIDATE | RDW_FRAME | RDW_UPDATENOW,
                         )
+            self._titlebar_applied = bool(dark)
         except Exception:  # noqa: BLE001 - 装饰性功能，失败不影响使用
             pass
 
@@ -443,6 +464,19 @@ class Api:
         except Exception:  # noqa: BLE001 - 图标是锦上添花，失败不影响使用
             pass
 
+    def _refresh_window_title(self) -> None:
+        """按当前语言与是否管理员刷新窗口标题栏文案。"""
+        title = _window_title()
+        if self._window is None:
+            return
+        try:
+            self._window.set_title(title)
+        except Exception:  # noqa: BLE001
+            try:
+                self._window.title = title
+            except Exception:  # noqa: BLE001
+                pass
+
     def _hwnd(self) -> int:
         """尽力取到顶层窗口句柄：先问 pywebview 原生对象，再按标题兜底。"""
         try:
@@ -466,7 +500,13 @@ class Api:
         try:
             import ctypes
 
-            return ctypes.windll.user32.FindWindowW(None, "WhoShitsOnMyC") or 0
+            # 标题会带管理员状态后缀，优先精确匹配当前标题，再回退到程序名。
+            user32 = ctypes.windll.user32
+            for title in (_window_title(), "WhoShitsOnMyC"):
+                hwnd = user32.FindWindowW(None, title)
+                if hwnd:
+                    return hwnd
+            return 0
         except Exception:  # noqa: BLE001
             return 0
 
@@ -670,6 +710,33 @@ class Api:
         }
 
 
+def _is_admin() -> bool:
+    """当前进程是否以管理员权限运行（仅 Windows 有意义；其它平台视为 True，不提示）。"""
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _window_title() -> str:
+    """窗口标题：程序名 + 管理员状态 + 版本号（状态文案随界面语言）。
+
+    非管理员时在状态后附加「推荐以管理员启动」提示，方便一眼看见。
+    """
+    if _is_admin():
+        mode = i18n.t("管理员", "Administrator")
+    else:
+        mode = i18n.t(
+            "非管理员（推荐以管理员启动）",
+            "Not Administrator (run as Administrator recommended)",
+        )
+    return f"WhoShitsOnMyC — {mode} · v{APP_VERSION}"
+
+
 def _centered_xy(width: int, height: int) -> tuple[int | None, int | None]:
     """算出让窗口落在主屏正中的左上角坐标；非 Windows 返回 (None, None)。"""
     if os.name != "nt":
@@ -828,7 +895,7 @@ def main() -> None:
     width, height = 1100, 720
     x, y = _centered_xy(width, height)
     window = webview.create_window(
-        title="WhoShitsOnMyC",
+        title=_window_title(),
         url=os.path.join(_WEB_DIR, "index.html"),
         js_api=api,
         width=width,
@@ -839,14 +906,14 @@ def main() -> None:
         background_color="#0f1116",
     )
     api.set_window(window)
-    # 窗口一出现：先接管 pywebview 的系统主题刷栏 + 挂图标。
-    # 不要在这里死锁默认暗色——前端 boot 会立刻 set_theme 成 localStorage 里的主题。
-    # 这里只 hook，并用当前偏好刷一次；真正校准靠前端 + 延迟重刷。
+    # 窗口一出现：hook 标题栏主题 + 图标 + 轻量上色。
+    # 真正按 localStorage 校准主题由前端 set_theme 完成；这里少做事，加快首屏。
     def _on_shown() -> None:
+        api._refresh_window_title()
         api._hook_titlebar_theme()
         api._apply_icon(_ICON_PATH)
+        # 不 force_nudge：避免启动瞬间抖窗口；后续 set_theme / 延迟刷新补上。
         api._apply_titlebar(api._titlebar_dark, force_nudge=False)
-        api._schedule_titlebar_refresh()
 
     try:
         window.events.shown += _on_shown
@@ -854,16 +921,16 @@ def main() -> None:
         pass
     try:
         window.events.restored += lambda: api._apply_titlebar(
-            api._titlebar_dark, force_nudge=True
+            api._titlebar_dark, force_nudge=False
         )
     except Exception:  # noqa: BLE001
         pass
     try:
-        # 页面加载完前端已 set_theme 后，再钉一次（修启动时标题栏粘在默认色）。
+        # 页面就绪后再钉一次（前端多半已 set_theme）；只调度少量延迟刷新。
         def _on_loaded() -> None:
             api._hook_titlebar_theme()
-            api._apply_titlebar(api._titlebar_dark, force_nudge=True)
-            api._schedule_titlebar_refresh()
+            api._apply_titlebar(api._titlebar_dark, force_nudge=False)
+            api._schedule_titlebar_refresh(delays_ms=(120,))
 
         window.events.loaded += _on_loaded
     except Exception:  # noqa: BLE001
