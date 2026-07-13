@@ -1,19 +1,62 @@
-"""快照存储管理测试。"""
+"""快照存储管理与应用设置测试。"""
 
 import os
 
+import pytest
+
 from core.models import Entry, SnapshotMeta
 from core.snapshot import write_snapshot
+from core import store
+from core.snapshot import SnapshotError
 from core.store import (
+    apply_settings,
+    builtin_snapshot_dir,
+    create_snapshot_folder,
     default_scan_workers,
+    default_snapshot_dir,
     delete_snapshot,
+    delete_snapshot_folder,
     get_compress_snapshots,
+    get_lang,
     get_scan_workers,
+    get_snapshot_dir_configured,
+    get_theme,
+    get_use_mft,
+    list_snapshot_folders,
     list_snapshots,
+    move_snapshot_to_folder,
     new_snapshot_path,
+    rename_snapshot_folder,
+    reset_settings_to_defaults,
+    sanitize_folder_name,
     set_compress_snapshots,
+    set_lang,
+    set_note,
     set_scan_workers,
+    set_snapshot_dir,
+    set_theme,
+    set_use_mft,
+    settings_path,
+    snapshot_content_key,
+    snapshot_info,
+    _apply_loaded,
+    _load_settings_yaml,
+    _write_settings_yaml,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_settings(tmp_path, monkeypatch):
+    """所有用例把应用数据根指到 tmp，避免读写真实 settings.yaml。"""
+    monkeypatch.setattr(store, "_app_base_dir", lambda: str(tmp_path))
+    store._data_wiped = False
+    store._use_mft = True
+    store._compress_snapshots = True
+    store._scan_workers = store.default_scan_workers()
+    store._lang = "en"
+    store._theme = "light"
+    store._snapshot_dir = ""
+    yield
 
 
 def _write(db, root, total, when):
@@ -61,27 +104,486 @@ def test_delete_snapshot(tmp_path):
     delete_snapshot(db)  # 再删不存在的不报错
 
 
-def test_scan_workers_defaults_to_all_cores():
-    """默认线程数是 max(1, CPU 核数)，未设置时即返回该默认。"""
-    assert default_scan_workers() == max(1, os.cpu_count() or 1)
-    assert get_scan_workers() == default_scan_workers()
+def test_sanitize_folder_name():
+    assert sanitize_folder_name("") == ""
+    assert sanitize_folder_name("  工作  ") == "工作"
+    with pytest.raises(ValueError):
+        sanitize_folder_name("a/b")
+    with pytest.raises(ValueError):
+        sanitize_folder_name("..")
+    with pytest.raises(ValueError):
+        sanitize_folder_name("a:b")
+
+
+def test_list_snapshots_includes_one_level_folder(tmp_path):
+    _write(os.path.join(tmp_path, "root.db"), "C:\\", 10, when=1.0)
+    sub = tmp_path / "归档"
+    sub.mkdir()
+    _write(str(sub / "in_folder.db"), "D:\\", 20, when=2.0)
+    deeper = sub / "nested"
+    deeper.mkdir()
+    _write(str(deeper / "too_deep.db"), "E:\\", 30, when=3.0)
+
+    infos = list_snapshots(str(tmp_path))
+    paths = {os.path.basename(i.path): i for i in infos}
+    assert set(paths) == {"root.db", "in_folder.db"}
+    assert paths["root.db"].folder == ""
+    assert paths["in_folder.db"].folder == "归档"
+    assert "folder" in paths["in_folder.db"].to_dict()
+
+
+def test_create_move_rename_delete_folder(tmp_path):
+    db = os.path.join(tmp_path, "x.db")
+    _write(db, "C:\\", 100, when=1.0)
+
+    name = create_snapshot_folder("Games", out_dir=str(tmp_path))
+    assert name == "Games"
+    assert "Games" in list_snapshot_folders(str(tmp_path))
+
+    new_path = move_snapshot_to_folder(db, "Games", out_dir=str(tmp_path))
+    assert os.path.isfile(new_path)
+    assert os.path.basename(os.path.dirname(new_path)) == "Games"
+    info = snapshot_info(new_path, base_dir=str(tmp_path))
+    assert info.folder == "Games"
+
+    renamed = rename_snapshot_folder("Games", "游戏", out_dir=str(tmp_path))
+    assert renamed == "游戏"
+    assert not os.path.isdir(os.path.join(tmp_path, "Games"))
+    infos = list_snapshots(str(tmp_path))
+    assert len(infos) == 1
+    assert infos[0].folder == "游戏"
+
+    # 非空不能删
+    with pytest.raises(OSError):
+        delete_snapshot_folder("游戏", out_dir=str(tmp_path), force=False)
+
+    back = move_snapshot_to_folder(infos[0].path, "", out_dir=str(tmp_path))
+    assert os.path.dirname(back) == str(tmp_path) or os.path.samefile(
+        os.path.dirname(back), str(tmp_path)
+    )
+    # 移空后空夹应被清掉
+    assert "游戏" not in list_snapshot_folders(str(tmp_path))
+
+    create_snapshot_folder("空夹", out_dir=str(tmp_path))
+    delete_snapshot_folder("空夹", out_dir=str(tmp_path))
+    assert "空夹" not in list_snapshot_folders(str(tmp_path))
+
+
+def test_snapshot_info_reads_external_path(tmp_path):
+    """用户把快照挪到别处后，仍可按绝对路径读摘要。"""
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    db = other / "moved.db"
+    _write(str(db), "D:\\Games", 4096, when=42.0)
+    info = snapshot_info(str(db))
+    assert info.root == "D:\\Games"
+    assert info.total_size == 4096
+    assert info.scanned_at == 42.0
+    assert info.path == os.path.abspath(str(db))
+
+
+def test_snapshot_info_rejects_non_snapshot(tmp_path):
+    bad = tmp_path / "note.txt"
+    bad.write_text("nope", encoding="utf-8")
+    with pytest.raises(SnapshotError):
+        snapshot_info(str(bad))
+
+
+def test_snapshot_content_key_stable_across_paths(tmp_path):
+    """复制到另一路径后 content_key 相同（导入去重依据）。"""
+    a = tmp_path / "a.db"
+    bdir = tmp_path / "other"
+    bdir.mkdir()
+    b = bdir / "b.db"
+    _write(str(a), "C:\\", 1000, when=12.5)
+    _write(str(b), "C:\\", 1000, when=12.5)
+    ia, ib = snapshot_info(str(a),), snapshot_info(str(b))
+    assert ia.content_key == ib.content_key
+    assert ia.content_key == snapshot_content_key("C:\\", 12.5, 1000, 0, 0)
+    assert "content_key" in ia.to_dict()
+
+    # 不同扫描时间 → 不同指纹
+    c = tmp_path / "c.db"
+    _write(str(c), "C:\\", 1000, when=99.0)
+    assert snapshot_info(str(c)).content_key != ia.content_key
+
+
+def test_snapshot_note_in_file(tmp_path):
+    """备注写入快照文件本身；复制文件后新路径也带备注。"""
+    import shutil
+
+    a = tmp_path / "a.db"
+    b = tmp_path / "copy.db"
+    _write(str(a), "E:\\Data", 500, when=7.0)
+    assert set_note(str(a), "  weekly backup  ") == "weekly backup"
+    assert snapshot_info(str(a)).note == "weekly backup"
+    assert snapshot_info(str(a)).to_dict()["note"] == "weekly backup"
+    shutil.copy2(str(a), str(b))
+    assert snapshot_info(str(b)).note == "weekly backup"
+    assert set_note(str(a), "") == ""
+    assert snapshot_info(str(a)).note == ""
+    # 清除 a 不影响已复制的 b
+    assert snapshot_info(str(b)).note == "weekly backup"
+
+
+def test_scan_workers_default_is_positive_and_clamped():
+    """默认线程数：HDD→1，SSD/未知→CPU 核数。"""
+    d = default_scan_workers()
+    assert d >= 1
+    assert d <= max(1, os.cpu_count() or 1)
+    assert isinstance(d, int)
 
 
 def test_set_and_get_scan_workers_roundtrip():
-    """设置只在内存中生效：设了能读回，不涉及任何配置文件。"""
     assert set_scan_workers(4) == 4
     assert get_scan_workers() == 4
 
 
 def test_set_scan_workers_clamps_out_of_range():
-    assert set_scan_workers(0) == 1        # 下限收拢到 1
-    assert set_scan_workers(999) == 32     # 上限收拢到 32
+    assert set_scan_workers(0) == 1
+    assert set_scan_workers(999) == 128
 
 
 def test_compress_snapshots_defaults_on():
-    # 其它用例可能改过该会话开关，先拨回默认再断言。
     set_compress_snapshots(True)
     assert get_compress_snapshots() is True
     assert set_compress_snapshots(False) is False
     assert get_compress_snapshots() is False
     assert set_compress_snapshots(True) is True
+
+
+def test_use_mft_defaults_on():
+    assert get_use_mft() is True
+    assert set_use_mft(False) is False
+    assert get_use_mft() is False
+    set_use_mft(True)
+
+
+def test_yaml_roundtrip_helpers(tmp_path):
+    path = str(tmp_path / "settings.yaml")
+    custom = str(tmp_path / "snaps")
+    data = {
+        "scan_workers": 6,
+        "compress_snapshots": False,
+        "use_mft": True,
+        "lang": "zh",
+        "theme": "light",
+        "snapshot_dir": custom,
+    }
+    _write_settings_yaml(path, data)
+    # 新格式：顶层 common: 节；不再写 persist
+    raw = open(path, encoding="utf-8").read()
+    assert "common:" in raw
+    assert "persist" not in raw
+    assert "\n  scan_workers:" in raw or "\n  scan_workers: " in raw
+    loaded = _load_settings_yaml(path)
+    assert "persist" not in loaded
+    assert loaded["scan_workers"] == 6
+    assert loaded["compress_snapshots"] is False
+    assert loaded["use_mft"] is True
+    assert loaded["lang"] == "zh"
+    assert loaded["theme"] == "light"
+    assert loaded["snapshot_dir"] == os.path.abspath(custom)
+
+
+def test_yaml_loads_legacy_flat_format(tmp_path):
+    """旧版顶层扁平 YAML 仍可读取；persist 键可解析但不影响行为。"""
+    path = str(tmp_path / "settings.yaml")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(
+            "persist: true\n"
+            "scan_workers: 4\n"
+            "compress_snapshots: false\n"
+            "use_mft: true\n"
+            "lang: en\n"
+            "theme: dark\n"
+            "snapshot_dir: ''\n"
+        )
+    loaded = _load_settings_yaml(path)
+    assert loaded.get("persist") is True
+    assert loaded.get("scan_workers") == 4
+    assert loaded.get("compress_snapshots") is False
+    assert loaded.get("use_mft") is True
+
+
+def test_wipe_app_data_delete_and_settings_only(tmp_path, monkeypatch):
+    """卸载清理：删掉整个应用数据文件夹 / 仅删 settings.yaml。"""
+    from core.store import wipe_app_data
+
+    app_base = tmp_path / "WhoShitsOnMyC"
+    app_base.mkdir()
+    monkeypatch.setattr(store, "_app_base_dir_path", lambda: str(app_base))
+    monkeypatch.setattr(store, "_app_base_dir", lambda: str(app_base))
+
+    snaps = app_base / "snapshots"
+    snaps.mkdir()
+    (snaps / "a.db").write_bytes(b"x")
+    conf = app_base / "settings.yaml"
+    conf.write_text("common:\n  scan_workers: 4\n", encoding="utf-8")
+
+    r = wipe_app_data(delete_data=True)
+    assert r["ok"] is True
+    assert r["deleted_data"] is True
+    assert not app_base.exists()  # 整个 WhoShitsOnMyC 文件夹去掉
+
+    # 仅删配置：目录本身保留
+    app_base.mkdir()
+    conf.write_text("common:\n  scan_workers: 4\n", encoding="utf-8")
+    (app_base / "keep.me").write_text("y", encoding="utf-8")
+    r2 = wipe_app_data(delete_data=False)
+    assert r2["ok"] is True
+    assert r2["deleted_data"] is False
+    assert not conf.exists()
+    assert (app_base / "keep.me").is_file()
+    assert app_base.is_dir()
+
+
+def test_wipe_app_data_leaves_custom_snapshot_dir(tmp_path, monkeypatch):
+    """勾选删数据时：删掉应用数据根文件夹，不碰外部自定义快照目录。"""
+    from core.store import wipe_app_data
+
+    app_base = tmp_path / "appdata"
+    app_base.mkdir()
+    monkeypatch.setattr(store, "_app_base_dir_path", lambda: str(app_base))
+    monkeypatch.setattr(store, "_app_base_dir", lambda: str(app_base))
+
+    custom = tmp_path / "elsewhere_snaps"
+    custom.mkdir()
+    (custom / "keep.txt").write_text("safe", encoding="utf-8")
+    (custom / "x.db").write_bytes(b"db")
+    (custom / "y.dbz").write_bytes(b"dbz")
+    store._snapshot_dir = str(custom)
+
+    snaps = app_base / "snapshots"
+    snaps.mkdir()
+    (snaps / "builtin.db").write_bytes(b"b")
+
+    r = wipe_app_data(delete_data=True)
+    assert r["ok"] is True
+    assert not app_base.exists()
+    # 自定义目录完整保留
+    assert custom.is_dir()
+    assert (custom / "x.db").is_file()
+    assert (custom / "y.dbz").is_file()
+    assert (custom / "keep.txt").read_text(encoding="utf-8") == "safe"
+    assert store.get_snapshot_dir_configured() == ""
+
+
+def test_wipe_does_not_recreate_via_base_path(tmp_path, monkeypatch):
+    """wipe 使用 path 版 API，不会因 makedirs 把目录又建出来。"""
+    from core.store import wipe_app_data
+
+    app_base = tmp_path / "WhoShitsOnMyC"
+    app_base.mkdir()
+    (app_base / "settings.yaml").write_text(
+        "common:\n  scan_workers: 4\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(store, "_app_base_dir_path", lambda: str(app_base))
+
+    def boom_create():
+        raise AssertionError("_app_base_dir should not be called during wipe")
+
+    monkeypatch.setattr(store, "_app_base_dir", boom_create)
+    r = wipe_app_data(delete_data=True)
+    assert r["ok"] is True
+    assert not app_base.exists()
+
+
+def test_wipe_blocks_makedirs_after_delete(tmp_path, monkeypatch):
+    """删数据后 _app_base_dir / builtin_snapshot_dir 不再重建目录。"""
+    from core.store import wipe_app_data
+
+    app_base = tmp_path / "WhoShitsOnMyC"
+    app_base.mkdir()
+    (app_base / "snapshots").mkdir()
+    (app_base / "settings.yaml").write_text(
+        "common:\n  scan_workers: 4\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(store, "_app_base_dir_path", lambda: str(app_base))
+    store._data_wiped = False
+
+    r = wipe_app_data(delete_data=True)
+    assert r["ok"] is True
+    assert not app_base.exists()
+    assert store._data_wiped is True
+
+    # 即便再调会创建的 API，也不应把空夹建回来
+    store._app_base_dir()
+    store.builtin_snapshot_dir()
+    assert not app_base.exists()
+    assert not (app_base / "snapshots").exists()
+
+
+def test_setters_auto_write_yaml(tmp_path):
+    """改设置后自动写 YAML；值未变不强制要求，变化必有文件。"""
+    path = settings_path()
+    assert path.startswith(str(tmp_path))
+    assert not os.path.isfile(path)
+
+    set_scan_workers(3)
+    set_compress_snapshots(False)
+    set_use_mft(True)
+    set_lang("zh")
+    set_theme("light")
+    custom = str(tmp_path / "my_snaps")
+    set_snapshot_dir(custom)
+
+    assert os.path.isfile(path)
+    loaded = _load_settings_yaml(path)
+    assert "persist" not in loaded
+    assert loaded.get("scan_workers") == 3
+    assert loaded.get("compress_snapshots") is False
+    assert loaded.get("use_mft") is True
+    assert loaded.get("lang") == "zh"
+    assert loaded.get("theme") == "light"
+    assert loaded.get("snapshot_dir") == os.path.abspath(custom)
+
+    set_scan_workers(7)
+    set_theme("dark")
+    loaded2 = _load_settings_yaml(path)
+    assert loaded2.get("scan_workers") == 7
+    assert loaded2.get("theme") == "dark"
+
+
+def test_reset_settings_to_defaults_deletes_yaml(tmp_path):
+    """恢复默认：删配置文件，内存回内置默认；不碰快照文件。"""
+    set_scan_workers(9)
+    set_compress_snapshots(False)
+    set_use_mft(True)
+    set_lang("en")
+    set_theme("light")
+    custom = str(tmp_path / "elsewhere")
+    set_snapshot_dir(custom)
+    path = settings_path()
+    assert os.path.isfile(path)
+
+    out = reset_settings_to_defaults(lang="zh")
+    assert not os.path.isfile(path)
+    assert out["scan_workers"] == default_scan_workers()
+    assert out["compress_snapshots"] is True
+    assert out["use_mft"] is True
+    assert out["theme"] == "light"
+    assert out["lang"] == "zh"
+    assert out["snapshot_dir_configured"] == ""
+    assert out["settings_file_exists"] is False
+    assert get_scan_workers() == default_scan_workers()
+    assert get_lang() == "zh"
+    assert get_theme() == "light"
+    assert get_snapshot_dir_configured() == ""
+
+
+def test_snapshot_dir_custom_and_reset(tmp_path):
+    builtin = builtin_snapshot_dir()
+    assert default_snapshot_dir() == builtin
+    assert get_snapshot_dir_configured() == ""
+
+    custom = str(tmp_path / "elsewhere")
+    effective = set_snapshot_dir(custom)
+    assert effective == os.path.abspath(custom)
+    assert os.path.isdir(effective)
+    assert default_snapshot_dir() == effective
+    # 新快照路径应落在自定义目录
+    p = new_snapshot_path("C:\\Games")
+    assert p.startswith(effective)
+
+    back = set_snapshot_dir("")
+    assert back == builtin
+    assert get_snapshot_dir_configured() == ""
+
+
+def test_apply_loaded_partial_keeps_missing_keys():
+    """有 yaml 内容就覆盖；未写的项保持默认；persist 忽略。"""
+    store._scan_workers = store.default_scan_workers()
+    store._compress_snapshots = True
+    store._use_mft = False
+    _apply_loaded(
+        {
+            "persist": False,  # 旧键，忽略
+            "scan_workers": 6,
+            "use_mft": True,
+        }
+    )
+    assert get_scan_workers() == 6
+    assert get_use_mft() is True
+    # compress 未出现 → 保持默认 True
+    assert get_compress_snapshots() is True
+
+
+def test_apply_settings_batch_always_writes(tmp_path):
+    """设置页「完成」：一次提交多项并写 yaml。"""
+    custom = str(tmp_path / "batch_snaps")
+    out = apply_settings(
+        {
+            "scan_workers": 5,
+            "compress_snapshots": False,
+            "use_mft": True,
+            "snapshot_dir": custom,
+            "persist_settings": False,  # 旧键忽略，仍写盘
+        }
+    )
+    assert out["scan_workers"] == 5
+    assert out["compress_snapshots"] is False
+    assert out["use_mft"] is True
+    assert "persist_settings" not in out
+    assert out["snapshot_dir_is_custom"] is True
+    assert out["settings_file_exists"] is True
+    path = settings_path()
+    assert os.path.isfile(path)
+    loaded = _load_settings_yaml(path)
+    assert loaded.get("scan_workers") == 5
+    assert loaded.get("compress_snapshots") is False
+    assert loaded.get("use_mft") is True
+    assert loaded.get("snapshot_dir") == os.path.abspath(custom)
+    assert "persist" not in loaded
+
+
+def test_apply_settings_migrates_snapshots(tmp_path):
+    """更改快照目录时把原目录 .db/.dbz 迁到新目录。"""
+    src = tmp_path / "src_snaps"
+    dst = tmp_path / "dst_snaps"
+    src.mkdir()
+    a = src / "a.db"
+    b = src / "b.dbz"
+    _write(str(a), "C:\\", 100, when=1.0)
+    b.write_bytes(b"pk\x03\x04fake")  # 非完整 zip 也算文件名命中迁移
+    # 非快照文件不应迁移
+    (src / "notes.txt").write_text("x", encoding="utf-8")
+
+    store._snapshot_dir = str(src)
+    events: list[dict] = []
+    out = apply_settings(
+        {"snapshot_dir": str(dst)},
+        progress=events.append,
+    )
+    assert out["snapshot_dir_changed"] is True
+    assert out["migrate"]["moved"] == 2
+    assert out["migrate"]["failed"] == 0
+    assert out["migrate"]["total"] == 2
+    assert not a.exists()
+    assert not b.exists()
+    assert (dst / "a.db").is_file()
+    assert (dst / "b.dbz").is_file()
+    assert (src / "notes.txt").is_file()
+    # progress：start + 每个文件一次
+    assert events and events[0]["status"] == "start" and events[0]["total"] == 2
+    assert len(events) == 3
+    assert events[-1]["done"] == 2 and events[-1]["moved"] == 2
+    assert os.path.isfile(settings_path())
+
+    # 目标已有同名 → 跳过
+    c = src / "c.db"
+    _write(str(c), "D:\\", 50, when=2.0)
+    (dst / "c.db").write_bytes(b"existing")
+    store._snapshot_dir = str(src)
+    out2 = apply_settings({"snapshot_dir": str(dst)})
+    assert out2["migrate"]["skipped"] >= 1
+    assert (dst / "c.db").read_bytes() == b"existing"
+    assert c.is_file()  # 跳过则源文件保留
+
+
+def test_apply_loaded_empty_keeps_defaults():
+    store._scan_workers = 5
+    store._use_mft = False
+    _apply_loaded({})
+    assert get_scan_workers() == 5
+    assert get_use_mft() is False

@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Iterable, Iterator
+from typing import NamedTuple
 
 from .i18n import t
 from .models import (
@@ -29,18 +30,74 @@ from .models import (
 _BATCH_SIZE = 10_000
 
 
+class EntryRow(NamedTuple):
+    """写入缓冲的一行，字段顺序与 SQLite ``entries`` 表完全一致。
+
+    为什么不用 :class:`Entry`（dataclass）做热路径：
+    - 扫描百万级条目时，少一次对象构造与属性拆箱
+    - ``NamedTuple`` 仍是 tuple，可直接交给 ``executemany``，无需再转
+
+    字段含义与 :class:`Entry` 对齐；``is_dir`` 用整数 0/1 以匹配表列类型。
+    构造请用 :meth:`file` / :meth:`directory` / :meth:`from_entry`，避免手写 0/1。
+    """
+
+    id: int
+    parent_id: int | None
+    name: str
+    size: int
+    is_dir: int  # 0=文件，1=目录（与 entries.is_dir 列一致）
+    mtime: int = 0
+
+    @staticmethod
+    def file(
+        id: int,
+        parent_id: int | None,
+        name: str,
+        size: int,
+        mtime: int = 0,
+    ) -> EntryRow:
+        """构造文件行（``is_dir=0``）。"""
+        return EntryRow(id, parent_id, name, size, 0, mtime)
+
+    @staticmethod
+    def directory(
+        id: int,
+        parent_id: int | None,
+        name: str,
+        size: int,
+        mtime: int = 0,
+    ) -> EntryRow:
+        """构造目录行（``is_dir=1``）。"""
+        return EntryRow(id, parent_id, name, size, 1, mtime)
+
+    @staticmethod
+    def from_entry(entry: Entry) -> EntryRow:
+        """从领域模型 :class:`Entry` 转换（测试 / MFT 等非热路径）。"""
+        return EntryRow(
+            entry.id,
+            entry.parent_id,
+            entry.name,
+            entry.size,
+            1 if entry.is_dir else 0,
+            entry.mtime,
+        )
+
+
 class SnapshotError(Exception):
     """快照读写相关错误（文件损坏、版本不符等）。"""
 
 
 class SnapshotWriter:
-    """把扫描产生的 :class:`Entry` 流式写入一个新的快照 ``.db`` 文件。
+    """把扫描产生的行流式写入一个新的快照 ``.db`` 文件。
+
+    热路径优先用 :meth:`add_row` / :meth:`add_rows`（:class:`EntryRow`）；
+    :meth:`add` / :meth:`add_many` 仍接受 :class:`Entry`，供测试与其它路径。
 
     典型用法::
 
         with SnapshotWriter(db_path, root="C:\\\\") as writer:
-            for entry in scan(...):
-                writer.add(entry)
+            writer.add_rows(file_rows)
+            writer.add_row(dir_row)
             writer.finalize(meta)
 
     写入期间应用了激进的 PRAGMA（``synchronous=OFF`` 等）以提速——
@@ -57,8 +114,10 @@ class SnapshotWriter:
         """
         self.db_path = db_path
         self.root = root
-        self._buffer: list[tuple[str, int, int, str | None, float]] = []
-        self._conn = sqlite3.connect(db_path)
+        self._buffer: list[EntryRow] = []
+        # check_same_thread=False：MFT 路径可用独立写线程 drain 队列
+        # （与 scandir「单线程写库」不同；所有公开方法仍须外部串行或单写线程）
+        self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._configure_for_fast_write()
         self._create_schema()
 
@@ -66,8 +125,10 @@ class SnapshotWriter:
         """设置加速写入的 PRAGMA。"""
         cur = self._conn.cursor()
         cur.execute("PRAGMA synchronous = OFF")
-        cur.execute("PRAGMA journal_mode = MEMORY")
+        # OFF 比 MEMORY 少一点日志开销；快照可重建，不必掉电安全
+        cur.execute("PRAGMA journal_mode = OFF")
         cur.execute("PRAGMA temp_store = MEMORY")
+        cur.execute("PRAGMA locking_mode = EXCLUSIVE")
         self._conn.commit()
 
     def _create_schema(self) -> None:
@@ -88,20 +149,41 @@ class SnapshotWriter:
         cur.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
         self._conn.commit()
 
-    def add(self, entry: Entry) -> None:
-        """缓冲一条记录，必要时 flush。"""
-        self._buffer.append(
-            (
-                entry.id,
-                entry.parent_id,
-                entry.name,
-                entry.size,
-                1 if entry.is_dir else 0,
-                entry.mtime,
-            )
-        )
+    def add_row(self, row: EntryRow) -> None:
+        """缓冲一行 :class:`EntryRow`，满批则 flush。"""
+        self._buffer.append(row)
         if len(self._buffer) >= _BATCH_SIZE:
             self._flush()
+
+    def add_rows(self, rows: list[EntryRow] | tuple[EntryRow, ...]) -> None:
+        """批量缓冲多行（扫描热路径：按目录一批文件）。
+
+        一次 ``extend`` 可能远超 ``_BATCH_SIZE``，超批时按块 ``executemany``，
+        避免缓冲区无限涨。
+        """
+        if not rows:
+            return
+        buf = self._buffer
+        buf.extend(rows)
+        if len(buf) >= _BATCH_SIZE:
+            while len(self._buffer) >= _BATCH_SIZE:
+                chunk = self._buffer[:_BATCH_SIZE]
+                del self._buffer[:_BATCH_SIZE]
+                self._conn.executemany(
+                    "INSERT INTO entries (id, parent_id, name, size, is_dir, mtime)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    chunk,
+                )
+
+    def add(self, entry: Entry) -> None:
+        """缓冲一条 :class:`Entry`（测试 / MFT 等兼容路径）。"""
+        self.add_row(EntryRow.from_entry(entry))
+
+    def add_many(self, entries: list[Entry] | tuple[Entry, ...]) -> None:
+        """批量缓冲多条 :class:`Entry`（内部转为 :class:`EntryRow`）。"""
+        if not entries:
+            return
+        self.add_rows([EntryRow.from_entry(e) for e in entries])
 
     def _flush(self) -> None:
         """把缓冲区批量写入数据库。"""
@@ -139,6 +221,7 @@ class SnapshotWriter:
             "dir_count": str(meta.dir_count),
             "skipped": json.dumps(meta.skipped, ensure_ascii=False),
             "format_version": str(meta.format_version),
+            "note": (meta.note or "").strip(),
         }
         self._conn.executemany(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
@@ -208,9 +291,40 @@ def read_meta(db_path: str) -> SnapshotMeta:
             dir_count=int(rows.get("dir_count", "0")),
             skipped=json.loads(rows.get("skipped", "[]")),
             format_version=version,
+            note=(rows.get("note") or "").strip(),
         )
     finally:
         conn.close()
+
+
+def write_meta_note(db_path: str, note: str) -> str:
+    """把备注写入未压缩 ``.db`` 的 meta 表；返回生效文本（空=清除）。
+
+    Raises:
+        SnapshotError: 无法打开或写入。
+    """
+    text = (note or "").strip()
+    try:
+        conn = sqlite3.connect(db_path)
+    except sqlite3.Error as exc:
+        raise SnapshotError(
+            t(f"无法打开快照文件：{db_path}（{exc}）",
+              f"Cannot open snapshot file: {db_path} ({exc})")
+        ) from exc
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+            ("note", text),
+        )
+        conn.commit()
+    except sqlite3.Error as exc:
+        raise SnapshotError(
+            t(f"写入备注失败：{db_path}（{exc}）",
+              f"Failed to write note: {db_path} ({exc})")
+        ) from exc
+    finally:
+        conn.close()
+    return text
 
 
 def open_readonly(db_path: str) -> sqlite3.Connection:

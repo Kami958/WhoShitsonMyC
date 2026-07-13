@@ -16,6 +16,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import traceback
 
 import webview  # pywebview
@@ -24,7 +25,9 @@ from core.compress import CompressError, compress_db, ensure_db_path
 from core.differ import Diff, DiffError
 from core.scanner import ScanCancelled, scan_to_snapshot
 from core.snapshot import SnapshotError
-from core import i18n, store
+from core.timing_probe import start_scan_timer
+from core import applog, i18n, store
+from titlebar import TitleBarTheme
 from version import __version__ as APP_VERSION
 
 # 资源根目录：PyInstaller --onefile 会把打包数据解到 sys._MEIPASS；
@@ -45,19 +48,19 @@ class Api:
         self._window: webview.Window | None = None
         self._scan_thread: threading.Thread | None = None
         self._cancel = threading.Event()
+        # 设置应用 / 快照目录迁移（后台线程，避免阻塞 JS bridge 导致进度画不出来）
+        self._settings_thread: threading.Thread | None = None
         # 当前对比会话，按需在多次下钻之间复用（避免每次重开连接）。
         # pywebview 的每次 JS-API 调用可能在不同线程执行，
         # SQLite 连接跨线程复用必须串行化，故加锁。
         self._diff: Diff | None = None
         self._diff_key: tuple[str, str] | None = None
         self._diff_lock = threading.Lock()
-        # 应用自己的标题栏明暗（默认暗色）。不能跟系统主题走：
-        # pywebview 会按 AppsUseLightTheme 重刷标题栏，Win10 上经常把我们刚设的盖掉。
-        self._titlebar_dark: bool = True
-        self._titlebar_hooked: bool = False
-        # 上次已成功刷到标题栏的主题；相同主题的重复 set_theme 直接跳过，加快启动。
-        self._titlebar_applied: bool | None = None
-        self._titlebar_refresh_gen: int = 0
+        # 标题栏主题（Windows 原生暗/浅色）；实现见 titlebar.py。
+        self._titlebar = TitleBarTheme(
+            get_window=lambda: self._window,
+            get_title_candidates=lambda: (_window_title(), "WhoShitsOnMyC"),
+        )
 
     # ---- 生命周期 -------------------------------------------------------
 
@@ -78,8 +81,109 @@ class Api:
     # ---- 快照列举 / 选择目录 -------------------------------------------
 
     def list_snapshots(self) -> list[dict]:
-        """返回默认目录下所有快照的摘要（新→旧）。"""
+        """返回默认目录（含一层归纳文件夹）下所有快照的摘要（新→旧）。"""
         return [i.to_dict() for i in store.list_snapshots()]
+
+    def list_snapshot_folders(self) -> list[str]:
+        """返回快照根下一层归纳文件夹名（按名称排序）。"""
+        return store.list_snapshot_folders()
+
+    def create_snapshot_folder(self, name: str) -> dict:
+        """在快照根下新建一层归纳文件夹。"""
+        try:
+            folder = store.create_snapshot_folder(str(name or ""))
+        except ValueError as exc:
+            return {"error": i18n.t(
+                f"文件夹名称无效：{exc}",
+                f"Invalid folder name: {exc}")}
+        except OSError as exc:
+            return {"error": i18n.t(
+                f"创建文件夹失败：{exc}",
+                f"Failed to create folder: {exc}")}
+        return {"ok": True, "folder": folder}
+
+    def move_snapshot_to_folder(self, path: str, folder: str = "") -> dict:
+        """把快照移入归纳文件夹；``folder`` 空串表示移回快照根。"""
+        with self._diff_lock:
+            if self._diff_key and path in self._diff_key:
+                self._close_diff()
+        try:
+            new_path = store.move_snapshot_to_folder(
+                str(path or ""), folder if folder is not None else ""
+            )
+        except ValueError as exc:
+            return {"error": str(exc)}
+        except store.StoreError as exc:
+            return {"error": str(exc)}
+        except SnapshotError as exc:
+            return {"error": str(exc)}
+        except OSError as exc:
+            return {"error": i18n.t(
+                f"移动失败：{exc}",
+                f"Move failed: {exc}")}
+        info = store.snapshot_info(new_path)
+        return {
+            "ok": True,
+            "path": new_path,
+            "folder": info.folder or "",
+        }
+
+    def rename_snapshot_folder(self, old_name: str, new_name: str) -> dict:
+        """重命名快照根下的一层归纳文件夹。"""
+        try:
+            name = store.rename_snapshot_folder(
+                str(old_name or ""), str(new_name or "")
+            )
+        except ValueError as exc:
+            return {"error": i18n.t(
+                f"文件夹名称无效：{exc}",
+                f"Invalid folder name: {exc}")}
+        except SnapshotError as exc:
+            return {"error": str(exc)}
+        except OSError as exc:
+            return {"error": i18n.t(
+                f"重命名失败：{exc}",
+                f"Rename failed: {exc}")}
+        return {"ok": True, "folder": name}
+
+    def delete_snapshot_folder(self, name: str, force: bool = False) -> dict:
+        """删除归纳文件夹；默认仅空夹，``force`` 时连同内含快照删除。"""
+        # 若对比会话持有夹内文件，先关
+        with self._diff_lock:
+            self._close_diff()
+        try:
+            store.delete_snapshot_folder(
+                str(name or ""), force=bool(force)
+            )
+        except ValueError as exc:
+            return {"error": str(exc)}
+        except SnapshotError as exc:
+            return {"error": str(exc)}
+        except OSError as exc:
+            return {"error": i18n.t(
+                f"删除文件夹失败：{exc}",
+                f"Failed to delete folder: {exc}")}
+        return {"ok": True}
+
+    def read_snapshot_infos(self, paths: list | None = None) -> dict:
+        """读取任意路径上的快照摘要（用于「从其它位置导入」）。
+
+        Returns:
+            ``{"items": [SnapshotInfo dict...], "errors": [{"path", "error"}]}``
+        """
+        items: list[dict] = []
+        errors: list[dict] = []
+        for raw in paths or []:
+            if not isinstance(raw, str) or not raw.strip():
+                continue
+            path = os.path.abspath(raw.strip())
+            try:
+                items.append(store.snapshot_info(path).to_dict())
+            except SnapshotError as exc:
+                errors.append({"path": path, "error": str(exc)})
+            except OSError as exc:
+                errors.append({"path": path, "error": str(exc)})
+        return {"items": items, "errors": errors}
 
     def choose_folder(self) -> dict:
         """弹出原生「选择文件夹」对话框，返回 ``{"path": ...}`` 或空。"""
@@ -96,11 +200,56 @@ class Api:
             return {"path": ""}
         return {"path": result[0]}
 
+    def choose_snapshot_files(self) -> dict:
+        """弹出原生「打开文件」对话框，多选 ``.db`` / ``.dbz``。
+
+        Returns:
+            ``{"paths": [...]}``；取消则为空列表。
+        """
+        if self._window is None:
+            return {"paths": []}
+        open_dialog = getattr(
+            getattr(webview, "FileDialog", None), "OPEN", None
+        )
+        if open_dialog is None:
+            open_dialog = getattr(webview, "OPEN_DIALOG", None)
+        if open_dialog is None:
+            return {"error": i18n.t(
+                "当前环境不支持文件选择对话框",
+                "File open dialog is not supported in this environment",
+            )}
+        file_types = (
+            "Snapshot files (*.db;*.dbz)",
+            "All files (*.*)",
+        )
+        try:
+            result = self._window.create_file_dialog(
+                open_dialog,
+                allow_multiple=True,
+                file_types=file_types,
+            )
+        except TypeError:
+            # 旧版 pywebview 参数名可能不同
+            try:
+                result = self._window.create_file_dialog(
+                    open_dialog, True, None, file_types
+                )
+            except Exception as exc:  # noqa: BLE001
+                return {"error": str(exc)}
+        except Exception as exc:  # noqa: BLE001
+            return {"error": str(exc)}
+        if not result:
+            return {"paths": []}
+        # result 可能是 tuple/list
+        paths = [str(p) for p in result if p]
+        return {"paths": paths}
+
     def delete_snapshot(self, path: str) -> dict:
         """删除一个快照文件。
 
         顺序很关键：**先**释放对比会话（它持有该文件的 sqlite 只读连接，
         Windows 上打开的句柄会让删除报 WinError 32），**再**删文件。
+        备注写在快照文件内，随文件一起删除。
         """
         with self._diff_lock:
             if self._diff_key and path in self._diff_key:
@@ -114,28 +263,160 @@ class Api:
             )}
         return {"ok": True}
 
+    def set_snapshot_note(self, path: str, note: str) -> dict:
+        """把备注写入快照文件本身（``.db`` meta / ``.dbz`` meta.json）。"""
+        try:
+            text = store.set_note(str(path or ""), note if note is not None else "")
+        except ValueError as exc:
+            return {"error": str(exc)}
+        except (OSError, SnapshotError, CompressError) as exc:
+            return {"error": i18n.t(
+                f"保存备注失败：{exc}", f"Failed to save note: {exc}")}
+        return {"ok": True, "note": text, "path": os.path.abspath(str(path or ""))}
+
+    # ---- 应用日志（内存；默认不落盘） ------------------------------------
+
+    def get_app_log(self, limit: int = 400) -> dict:
+        """返回进程内日志（旧→新）。不含扫描路径等隐私字段。"""
+        try:
+            n = int(limit)
+        except (TypeError, ValueError):
+            n = 400
+        n = max(1, min(n, 1024))
+        return {
+            "ok": True,
+            "entries": applog.get_entries(n),
+            "count": applog.count(),
+            "persisted": False,
+            "env": applog.get_env_summary(),
+        }
+
+    def clear_app_log(self) -> dict:
+        """清空内存日志。"""
+        n = applog.clear()
+        applog.info("Log cleared by user")
+        return {"ok": True, "cleared": n, "count": applog.count()}
+
+    def uninstall_app_data(self, delete_data: bool = True) -> dict:
+        """设置页「卸载」：清理应用数据目录（不含用户自定义快照路径）。
+
+        ``delete_data`` 默认 True：删除 ``%LOCALAPPDATA%\\WhoShitsOnMyC`` 下
+        全部内容。False 时仅删 settings.yaml。
+        **不**删除用户自选的外部快照目录，也**不**删除程序本身。
+        """
+        try:
+            result = store.wipe_app_data(delete_data=bool(delete_data))
+        except Exception as exc:  # noqa: BLE001
+            applog.exception("uninstall_app_data failed", exc)
+            return {"error": i18n.t(
+                f"卸载清理失败：{exc}", f"Uninstall cleanup failed: {exc}")}
+        if result.get("ok"):
+            applog.info(
+                f"Uninstall cleanup ok delete_data={bool(delete_data)} "
+                f"removed={len(result.get('removed') or [])}"
+            )
+        else:
+            applog.warn(
+                f"Uninstall cleanup partial errors={len(result.get('errors') or [])}"
+            )
+        out = {"ok": bool(result.get("ok")), **result}
+        return out
+
+    def quit_app(self) -> dict:
+        """卸载完成后关闭窗口并退出进程。"""
+        applog.info("quit_app requested")
+        win = self._window
+        if win is not None:
+            try:
+                win.destroy()
+            except Exception as exc:  # noqa: BLE001
+                applog.exception("quit_app window.destroy failed", exc)
+                return {"error": str(exc)}
+        return {"ok": True}
+
+    def export_app_log(self) -> dict:
+        """弹出「另存为」导出日志文本；取消则 cancelled。默认不自动写文件。"""
+        if self._window is None:
+            return {"error": i18n.t("窗口未就绪", "Window is not ready")}
+        save_dialog = getattr(
+            getattr(webview, "FileDialog", None), "SAVE", None
+        )
+        if save_dialog is None:
+            save_dialog = getattr(webview, "SAVE_DIALOG", None)
+        if save_dialog is None:
+            return {"error": i18n.t(
+                "当前环境不支持保存对话框",
+                "Save dialog is not supported in this environment",
+            )}
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        default_name = f"WhoShitsOnMyC-log-{stamp}.txt"
+        file_types = ("Text files (*.txt)", "All files (*.*)")
+        try:
+            result = self._window.create_file_dialog(
+                save_dialog,
+                allow_multiple=False,
+                save_filename=default_name,
+                file_types=file_types,
+            )
+        except TypeError:
+            try:
+                result = self._window.create_file_dialog(
+                    save_dialog, False, default_name, file_types
+                )
+            except Exception as exc:  # noqa: BLE001
+                applog.exception("export_app_log dialog failed", exc)
+                return {"error": str(exc)}
+        except Exception as exc:  # noqa: BLE001
+            applog.exception("export_app_log dialog failed", exc)
+            return {"error": str(exc)}
+        if not result:
+            return {"cancelled": True}
+        # pywebview 可能返回 str 或 list/tuple
+        if isinstance(result, (list, tuple)):
+            path = str(result[0]) if result else ""
+        else:
+            path = str(result)
+        if not path:
+            return {"cancelled": True}
+        if not path.lower().endswith(".txt"):
+            path = path + ".txt"
+        text = applog.format_export()
+        try:
+            with open(path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(text)
+        except OSError as exc:
+            applog.exception("export_app_log write failed", exc)
+            return {"error": i18n.t(
+                f"写入日志失败：{exc}", f"Failed to write log: {exc}")}
+        applog.info("Log exported")
+        return {"ok": True, "path": path, "bytes": len(text.encode("utf-8"))}
+
     # ---- 设置 -----------------------------------------------------------
 
     def get_settings(self) -> dict:
-        """返回当前设置与环境信息（版本、存放目录、扫描线程数、是否压缩、CPU 核数、界面语言、是否管理员）。"""
-        return {
-            "version": APP_VERSION,
-            "snapshot_dir": store.default_snapshot_dir(),
-            "scan_workers": store.get_scan_workers(),
-            "compress_snapshots": store.get_compress_snapshots(),
-            "cpu_count": os.cpu_count() or 2,
-            "lang": i18n.get_lang(),
-            "is_admin": _is_admin(),
-        }
+        """返回当前设置与环境信息。"""
+        d = store.settings_dict()
+        d.update(
+            {
+                "version": APP_VERSION,
+                "cpu_count": os.cpu_count() or 2,
+                "is_admin": _is_admin(),
+                "mft_platform_ok": os.name == "nt",
+                # 与 i18n 运行时保持一致（store.lang 为权威来源之一）
+                "lang": store.get_lang() or i18n.get_lang(),
+            }
+        )
+        return d
 
     def set_language(self, lang: str) -> dict:
-        """由前端在启动/手动切换时调用，同步后端报错文案的语言。"""
-        i18n.set_lang(lang)
+        """由前端在启动/手动切换时调用；同步 i18n 与 store（可写 YAML）。"""
+        code = store.set_lang(lang)
+        i18n.set_lang(code)
         self._refresh_window_title()
         return {"ok": True, "lang": i18n.get_lang()}
 
     def set_scan_workers(self, n: int) -> dict:
-        """设置本次会话的扫描线程数，下次扫描生效（不持久化，重启回默认）。"""
+        """设置扫描线程数，下次扫描生效；值变化时写 YAML。"""
         try:
             return {"ok": True, "scan_workers": store.set_scan_workers(n)}
         except (TypeError, ValueError) as exc:
@@ -143,14 +424,179 @@ class Api:
                 f"设置线程数失败：{exc}", f"Failed to set thread count: {exc}")}
 
     def set_compress_snapshots(self, enabled: bool) -> dict:
-        """设置扫描完成后是否压缩快照（``.db`` → ``.dbz``），仅本次会话。"""
+        """设置扫描完成后是否压缩快照（``.db`` → ``.dbz``）。"""
         return {
             "ok": True,
             "compress_snapshots": store.set_compress_snapshots(bool(enabled)),
         }
 
+    def set_use_mft(self, enabled: bool) -> dict:
+        """设置是否对盘符根 NTFS 尝试 MFT（通常需管理员；失败回退目录扫描）。"""
+        return {"ok": True, "use_mft": store.set_use_mft(bool(enabled))}
+
+    def reset_settings(self) -> dict:
+        """恢复默认设置并删除 ``settings.yaml``（不删除快照文件）。
+
+        语言回到冷启动默认（系统语言判定），主题 light，线程/压缩/MFT/目录回内置。
+        """
+        # 与无 yaml 冷启动一致：中文系统 → zh，否则 en
+        default_lang = _detect_lang()
+        try:
+            d = store.reset_settings_to_defaults(lang=default_lang)
+        except Exception as exc:  # noqa: BLE001
+            applog.exception("reset_settings failed", exc)
+            return {"error": i18n.t(
+                f"恢复默认失败：{exc}", f"Failed to restore defaults: {exc}")}
+        i18n.set_lang(store.get_lang())
+        try:
+            self._titlebar.set_theme(store.get_theme())
+        except Exception:  # noqa: BLE001
+            pass
+        self._refresh_window_title()
+        applog.info("Settings reset to defaults")
+        out = {"ok": True}
+        out.update(d)
+        out.update(
+            {
+                "version": APP_VERSION,
+                "cpu_count": os.cpu_count() or 2,
+                "is_admin": _is_admin(),
+                "mft_platform_ok": os.name == "nt",
+            }
+        )
+        return out
+
+    def apply_settings(self, payload: dict | None = None) -> dict:
+        """设置页点「完成」时统一提交：线程/压缩/MFT/目录一次写入并自动持久化。
+
+        在后台线程执行，立即返回 ``{"started": True}``。
+        目录变更时推送 ``migrate-progress``；结束时推送 ``settings-applied``
+        （含完整设置结果 / 错误；若有迁移还带 ``migrate`` 与 ``snapshot_dir_changed``）。
+        兼容旧事件名：迁移结束时也会再发 ``migrate-done``。
+        """
+        if self._settings_thread and self._settings_thread.is_alive():
+            return {"error": i18n.t(
+                "正在应用设置，请稍候",
+                "Settings are still being applied",
+            )}
+        body = dict(payload or {})
+        self._settings_thread = threading.Thread(
+            target=self._run_apply_settings, args=(body,), daemon=True
+        )
+        self._settings_thread.start()
+        return {"started": True}
+
+    def _run_apply_settings(self, payload: dict) -> None:
+        """后台应用设置；边迁移边推进度，结束推 settings-applied。"""
+        def on_progress(info: dict) -> None:
+            self._emit("migrate-progress", dict(info or {}))
+
+        try:
+            d = store.apply_settings(payload, progress=on_progress)
+        except OSError as exc:
+            applog.exception("apply_settings failed", exc)
+            self._emit(
+                "settings-applied",
+                {
+                    "ok": False,
+                    "error": i18n.t(
+                        f"应用设置失败：{exc}",
+                        f"Failed to apply settings: {exc}",
+                    ),
+                },
+            )
+            return
+        except (TypeError, ValueError) as exc:
+            applog.exception("apply_settings failed", exc)
+            self._emit(
+                "settings-applied",
+                {
+                    "ok": False,
+                    "error": i18n.t(
+                        f"应用设置失败：{exc}",
+                        f"Failed to apply settings: {exc}",
+                    ),
+                },
+            )
+            return
+        except Exception as exc:  # noqa: BLE001 — 终态必须回前端
+            applog.exception("apply_settings failed", exc)
+            self._emit(
+                "settings-applied",
+                {
+                    "ok": False,
+                    "error": i18n.t(
+                        f"应用设置失败：{exc}",
+                        f"Failed to apply settings: {exc}",
+                    ),
+                },
+            )
+            return
+
+        out = {"ok": True}
+        out.update(d)
+        if d.get("snapshot_dir_changed"):
+            mig = d.get("migrate") or {}
+            self._emit(
+                "migrate-done",
+                {
+                    "moved": int(mig.get("moved") or 0),
+                    "skipped": int(mig.get("skipped") or 0),
+                    "failed": int(mig.get("failed") or 0),
+                    "total": int(mig.get("total") or 0),
+                    "errors": list(mig.get("errors") or []),
+                    "snapshot_dir": d.get("snapshot_dir") or "",
+                },
+            )
+        self._emit("settings-applied", out)
+
+    def set_snapshot_dir(self, path: str = "") -> dict:
+        """设置默认快照存放目录；空串恢复内置路径。"""
+        try:
+            effective = store.set_snapshot_dir(path if path is not None else "")
+        except OSError as exc:
+            return {"error": i18n.t(
+                f"无法使用该目录：{exc}",
+                f"Cannot use that folder: {exc}",
+            )}
+        return {
+            "ok": True,
+            "snapshot_dir": effective,
+            "snapshot_dir_configured": store.get_snapshot_dir_configured(),
+            "snapshot_dir_builtin": store.builtin_snapshot_dir(),
+            "snapshot_dir_is_custom": bool(store.get_snapshot_dir_configured()),
+        }
+
+    def choose_snapshot_dir(self) -> dict:
+        """弹出文件夹选择框，设为默认快照目录。取消则不改。"""
+        picked = self.choose_folder()
+        path = (picked or {}).get("path") or ""
+        if not path:
+            return {"cancelled": True}
+        return self.set_snapshot_dir(path)
+
+    def pick_snapshot_dir(self) -> dict:
+        """仅弹出文件夹选择（不写入设置），供设置页草稿选用。"""
+        picked = self.choose_folder()
+        path = (picked or {}).get("path") or ""
+        if not path:
+            return {"cancelled": True}
+        abspath = os.path.abspath(path)
+        return {
+            "ok": True,
+            "path": abspath,
+            "snapshot_dir": abspath,
+            "snapshot_dir_configured": abspath,
+            "snapshot_dir_builtin": store.builtin_snapshot_dir(),
+            "snapshot_dir_is_custom": True,
+        }
+
+    def reset_snapshot_dir(self) -> dict:
+        """恢复内置默认快照目录。"""
+        return self.set_snapshot_dir("")
+
     def open_snapshot_dir(self) -> dict:
-        """在资源管理器中打开快照存放目录。"""
+        """在资源管理器中打开当前快照存放目录。"""
         path = store.default_snapshot_dir()
         try:
             os.startfile(path)  # noqa: S606 - 打开的是自己管理的目录
@@ -175,275 +621,20 @@ class Api:
         return {"ok": True}
 
     def set_theme(self, theme: str) -> dict:
-        """前端切换主题时同步窗口标题栏的明暗（仅 Windows 有效）。
-
-        启动阶段前端可能连打几次；主题没变就立刻返回，避免反复 DWM/尺寸微扰拖慢首屏。
-        """
-        dark = theme == "dark"
-        self._hook_titlebar_theme()
-        # 已成功刷成同一主题：直接返回，避免启动阶段重复 DWM/尺寸微扰。
-        if self._titlebar_applied is not None and self._titlebar_applied == dark:
-            self._titlebar_dark = dark
-            return {"ok": True, "theme": "dark" if dark else "light", "skipped": True}
-        self._titlebar_dark = dark
-        self._apply_titlebar(dark, force_nudge=True)
-        self._schedule_titlebar_refresh(delays_ms=(80, 280))
-        return {"ok": True, "theme": "dark" if dark else "light"}
-
-    def _hook_titlebar_theme(self) -> None:
-        """接管 pywebview 的标题栏主题逻辑，改跟应用主题走。
-
-        pywebview WinForms 后端在窗口创建时、以及系统「应用使用浅色」变化时，
-        会按注册表 AppsUseLightTheme 重刷标题栏。这和本程序自己的暗/浅切换
-        冲突。另外 Win10 上仅 SetWindowPos(FRAMECHANGED) 常常不换色，
-        用户一点最大化（真的改了客户区尺寸）才刷新——所以这里还挂上 Resize。
-        """
-        if os.name != "nt" or self._titlebar_hooked:
-            return
-        form = getattr(self._window, "native", None) if self._window else None
-        if form is None:
-            return
+        """前端切换主题：记入 store（可写 YAML）并同步标题栏。"""
+        code = store.set_theme(theme)
+        # 标题栏：dark/light
         try:
-            # 用实例属性盖掉类方法；UserPreferenceChanged 仍会调到这里。
-            form.update_title_bar_theme = (
-                lambda *a, **k: self._apply_titlebar(
-                    self._titlebar_dark, force_nudge=False
-                )
-            )
-            # 最大化/还原会改尺寸，借这次系统重绘把标题栏颜色钉牢。
-            form.Resize += (
-                lambda *a, **k: self._apply_titlebar_hwnd(
-                    self._titlebar_dark, force_nudge=False
-                )
-            )
-            self._titlebar_hooked = True
-        except Exception:  # noqa: BLE001 - 钩不上就只靠主动 set_theme
-            pass
-
-    def _run_on_ui(self, fn) -> None:
-        """把可调用对象丢到 WinForms UI 线程执行；没有窗口则直接跑。"""
-        form = getattr(self._window, "native", None) if self._window else None
-        if form is None:
-            try:
-                fn()
-            except Exception:  # noqa: BLE001
-                pass
-            return
-        try:
-            if getattr(form, "InvokeRequired", False):
-                try:
-                    from System import Action  # type: ignore
-
-                    form.BeginInvoke(Action(fn))
-                except Exception:  # noqa: BLE001
-                    form.BeginInvoke(fn)
-                return
+            self._titlebar.set_theme(code)
         except Exception:  # noqa: BLE001
             pass
-        try:
-            fn()
-        except Exception:  # noqa: BLE001
-            pass
-
-    def _schedule_titlebar_refresh(
-        self, delays_ms: tuple[int, ...] = (100, 320)
-    ) -> None:
-        """启动/切主题后延迟再刷（默认 2 次，够修 Win10，又不太拖首屏）。
-
-        每次调度递增 generation，旧 timer 回调自动作废，避免 shown/loaded/set_theme
-        叠在一起把 UI 线程打满。
-        """
-        if os.name != "nt":
-            return
-        form = getattr(self._window, "native", None) if self._window else None
-        if form is None:
-            return
-        self._titlebar_refresh_gen += 1
-        gen = self._titlebar_refresh_gen
-        try:
-            import System.Windows.Forms as WinForms  # type: ignore
-
-            for ms in delays_ms:
-                timer = WinForms.Timer()
-                timer.Interval = int(ms)
-
-                def _tick(sender, _e, t=timer, g=gen):  # noqa: ANN001
-                    try:
-                        t.Stop()
-                        t.Dispose()
-                    except Exception:  # noqa: BLE001
-                        pass
-                    if g != self._titlebar_refresh_gen:
-                        return
-                    self._apply_titlebar_hwnd(
-                        self._titlebar_dark, force_nudge=True
-                    )
-
-                timer.Tick += _tick
-                timer.Start()
-        except Exception:  # noqa: BLE001
-            def _later(delay: float, g: int = gen) -> None:
-                import time
-
-                time.sleep(delay)
-                if g != self._titlebar_refresh_gen:
-                    return
-                self._run_on_ui(
-                    lambda: self._apply_titlebar_hwnd(
-                        self._titlebar_dark, force_nudge=True
-                    )
-                )
-
-            for ms in delays_ms:
-                threading.Thread(
-                    target=_later, args=(ms / 1000.0,), daemon=True
-                ).start()
-
-    def _apply_titlebar(
-        self, dark: bool | None = None, *, force_nudge: bool = False
-    ) -> None:
-        """用 DWM 把原生标题栏刷成暗/亮色。"""
-        if os.name != "nt":
-            return
-        if dark is None:
-            dark = self._titlebar_dark
-        else:
-            self._titlebar_dark = bool(dark)
-
-        target = self._titlebar_dark
-        nudge = force_nudge
-        self._run_on_ui(
-            lambda: self._apply_titlebar_hwnd(target, force_nudge=nudge)
-        )
-
-    def _apply_titlebar_hwnd(
-        self, dark: bool, *, force_nudge: bool = False
-    ) -> None:
-        """对当前窗口句柄写入 DWM 暗色属性并强制标题栏重绘。
-
-        force_nudge：非最大化时对窗口宽做 +1/-1 像素抖动。Win10 上这和
-        「点最大化」一样会逼 DWM 重画标题栏；Resize 回调里不要开，防抖死循环。
-        """
-        hwnd = self._hwnd()
-        if not hwnd:
-            return
-        try:
-            import ctypes
-            from ctypes import wintypes
-
-            user32 = ctypes.windll.user32
-            value = ctypes.c_int(1 if dark else 0)
-            dwm = ctypes.windll.dwmapi
-            DwmSetWindowAttribute = dwm.DwmSetWindowAttribute
-            DwmSetWindowAttribute.argtypes = [
-                wintypes.HWND,
-                wintypes.DWORD,
-                ctypes.c_void_p,
-                wintypes.DWORD,
-            ]
-            # 19 = 旧 DWMWA_USE_IMMERSIVE_DARK_MODE（Win10 1809–1909）
-            # 20 = 现行编号（Win10 2004+ / Win11）
-            for attr in (20, 19):
-                DwmSetWindowAttribute(
-                    wintypes.HWND(hwnd),
-                    ctypes.c_uint(attr),
-                    ctypes.byref(value),
-                    ctypes.sizeof(value),
-                )
-
-            SWP_NOSIZE = 0x0001
-            SWP_NOMOVE = 0x0002
-            SWP_NOZORDER = 0x0004
-            SWP_NOACTIVATE = 0x0010
-            SWP_FRAMECHANGED = 0x0020
-            user32.SetWindowPos(
-                wintypes.HWND(hwnd),
-                None,
-                0,
-                0,
-                0,
-                0,
-                SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-            )
-
-            # 通知主题/非客户区变化（部分 Win10 构建只认这个）。
-            WM_THEMECHANGED = 0x031A
-            WM_NCACTIVATE = 0x0086
-            WM_NCPAINT = 0x0085
-            user32.SendMessageW(wintypes.HWND(hwnd), WM_THEMECHANGED, 0, 0)
-            # 先假失活再激活非客户区，逼标题栏重画，且不抢焦点。
-            user32.SendMessageW(wintypes.HWND(hwnd), WM_NCACTIVATE, 0, 0)
-            user32.SendMessageW(wintypes.HWND(hwnd), WM_NCACTIVATE, 1, 0)
-            user32.SendMessageW(wintypes.HWND(hwnd), WM_NCPAINT, 1, 0)
-
-            RDW_INVALIDATE = 0x0001
-            RDW_FRAME = 0x0400
-            RDW_UPDATENOW = 0x0100
-            RDW_ALLCHILDREN = 0x0080
-            user32.RedrawWindow(
-                wintypes.HWND(hwnd),
-                None,
-                None,
-                RDW_INVALIDATE | RDW_FRAME | RDW_UPDATENOW | RDW_ALLCHILDREN,
-            )
-
-            # 尺寸微扰：效果等同用户点一次最大化，是 Win10 上最靠谱的一招。
-            if force_nudge and not user32.IsZoomed(wintypes.HWND(hwnd)):
-                class RECT(ctypes.Structure):
-                    _fields_ = [
-                        ("left", ctypes.c_long),
-                        ("top", ctypes.c_long),
-                        ("right", ctypes.c_long),
-                        ("bottom", ctypes.c_long),
-                    ]
-
-                rect = RECT()
-                if user32.GetWindowRect(wintypes.HWND(hwnd), ctypes.byref(rect)):
-                    w = rect.right - rect.left
-                    h = rect.bottom - rect.top
-                    if w > 1 and h > 1:
-                        flags = SWP_NOZORDER | SWP_NOACTIVATE
-                        user32.SetWindowPos(
-                            wintypes.HWND(hwnd),
-                            None,
-                            rect.left,
-                            rect.top,
-                            w + 1,
-                            h,
-                            flags,
-                        )
-                        user32.SetWindowPos(
-                            wintypes.HWND(hwnd),
-                            None,
-                            rect.left,
-                            rect.top,
-                            w,
-                            h,
-                            flags | SWP_FRAMECHANGED,
-                        )
-                        # 微扰后再写一次属性，避免中间被系统主题盖掉。
-                        for attr in (20, 19):
-                            DwmSetWindowAttribute(
-                                wintypes.HWND(hwnd),
-                                ctypes.c_uint(attr),
-                                ctypes.byref(value),
-                                ctypes.sizeof(value),
-                            )
-                        user32.RedrawWindow(
-                            wintypes.HWND(hwnd),
-                            None,
-                            None,
-                            RDW_INVALIDATE | RDW_FRAME | RDW_UPDATENOW,
-                        )
-            self._titlebar_applied = bool(dark)
-        except Exception:  # noqa: BLE001 - 装饰性功能，失败不影响使用
-            pass
+        return {"ok": True, "theme": code}
 
     def _apply_icon(self, ico_path: str) -> None:
         """把窗口标题栏/任务栏图标设成指定的 .ico（仅 Windows）。"""
         if os.name != "nt" or not os.path.exists(ico_path):
             return
-        hwnd = self._hwnd()
+        hwnd = self._titlebar.hwnd()
         if not hwnd:
             return
         try:
@@ -477,39 +668,6 @@ class Api:
             except Exception:  # noqa: BLE001
                 pass
 
-    def _hwnd(self) -> int:
-        """尽力取到顶层窗口句柄：先问 pywebview 原生对象，再按标题兜底。"""
-        try:
-            native = getattr(self._window, "native", None)
-            handle = getattr(native, "Handle", None) if native is not None else None
-            if handle is not None:
-                # pywebview WinForms 用 ToInt32()；IntPtr 上也优先走它，兼容性更好。
-                for meth in ("ToInt32", "ToInt64"):
-                    fn = getattr(handle, meth, None)
-                    if callable(fn):
-                        try:
-                            return int(fn())
-                        except Exception:  # noqa: BLE001
-                            pass
-                try:
-                    return int(handle)
-                except Exception:  # noqa: BLE001
-                    pass
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            import ctypes
-
-            # 标题会带管理员状态后缀，优先精确匹配当前标题，再回退到程序名。
-            user32 = ctypes.windll.user32
-            for title in (_window_title(), "WhoShitsOnMyC"):
-                hwnd = user32.FindWindowW(None, title)
-                if hwnd:
-                    return hwnd
-            return 0
-        except Exception:  # noqa: BLE001
-            return 0
-
     def reveal_path(self, root: str, rel_path: str) -> dict:
         """在资源管理器中定位一个对比节点对应的真实路径。
 
@@ -534,7 +692,8 @@ class Api:
     def start_scan(self, root: str, follow_symlinks: bool = False) -> dict:
         """在后台线程扫描 ``root``，进度与结果通过事件推送。
 
-        事件：``scan-progress`` {files, current} / ``scan-done`` {snapshot} /
+        事件：``scan-progress`` {files, current} /
+        ``scan-done`` {snapshot, elapsed_s} /
         ``scan-error`` {message} / ``scan-cancelled`` {}。
 
         Returns:
@@ -548,6 +707,13 @@ class Api:
                 f"目录不存在：{root}", f"Folder does not exist: {root}")}
 
         self._cancel.clear()
+        # 不记录 root 路径（隐私）；只记并发度等元数据。
+        # workers 仅表示常规目录扫描线程数；MFT 解析进程数另按核/活量自推导。
+        applog.info(
+            f"Scan starting workers={store.get_scan_workers()} "
+            f"compress={store.get_compress_snapshots()} "
+            f"mft={store.get_use_mft()} follow_symlinks={bool(follow_symlinks)}"
+        )
         self._scan_thread = threading.Thread(
             target=self._run_scan, args=(root, follow_symlinks), daemon=True
         )
@@ -563,29 +729,74 @@ class Api:
         """后台线程体：执行扫描、回报进度、发终态事件。"""
         db_path = store.new_snapshot_path(root)
         final_path = db_path
+        workers = store.get_scan_workers()
+        do_compress = store.get_compress_snapshots()
+        # 整次扫描墙钟（含可选压缩），用于完成提示「用时」
+        t_wall0 = time.perf_counter()
+        # 开发期分段计时：exe 内 / 未开环境变量时为空操作，见 core.timing_probe。
+        timer = start_scan_timer(
+            root=root, workers=workers, compress_enabled=do_compress
+        )
+
+        # 扫描线程内再兜底节流一层（scanner 已节流；压缩阶段等直接 emit 不受影响）
+        _prog_lock = threading.Lock()
+        _last_emit = [0.0]
+        _PROG_GAP = 0.18
 
         def on_progress(files: int, current: str) -> None:
-            self._emit("scan-progress", {"files": files, "current": current})
+            now = time.perf_counter()
+            with _prog_lock:
+                if now - _last_emit[0] < _PROG_GAP:
+                    return
+                _last_emit[0] = now
+            self._emit(
+                "scan-progress",
+                {"files": int(files), "current": current or ""},
+            )
 
         try:
-            meta = scan_to_snapshot(
-                root,
-                db_path,
-                follow_symlinks=follow_symlinks,
-                progress=on_progress,
-                cancel=self._cancel.is_set,
-                workers=store.get_scan_workers(),
-            )
+            timer.span_start("scan_to_snapshot")
+            try:
+                meta = scan_to_snapshot(
+                    root,
+                    db_path,
+                    follow_symlinks=follow_symlinks,
+                    progress=on_progress,
+                    cancel=self._cancel.is_set,
+                    workers=workers,
+                    timer=timer,
+                )
+            finally:
+                timer.span_end("scan_to_snapshot")
+            try:
+                timer.set_meta(db_bytes=os.path.getsize(db_path))
+            except OSError:
+                pass
             # 扫完可选压缩：失败时保留 .db，不把整次扫描判失败。
-            if store.get_compress_snapshots():
+            if do_compress:
                 self._emit("scan-progress", {
                     "files": meta.file_count,
-                    "current": i18n.t("正在压缩快照…", "Compressing snapshot…"),
+                    "current": i18n.t("正在压缩快照", "Compressing snapshot"),
                 })
                 try:
-                    final_path = compress_db(db_path, meta)
+                    timer.span_start("compress")
+                    try:
+                        final_path = compress_db(db_path, meta)
+                    finally:
+                        timer.span_end("compress")
+                    try:
+                        if final_path.lower().endswith(".dbz"):
+                            timer.set_meta(dbz_bytes=os.path.getsize(final_path))
+                    except OSError:
+                        pass
                 except CompressError as exc:
                     traceback.print_exc()
+                    applog.exception(
+                        f"Snapshot compress failed (file_count={meta.file_count})",
+                        exc,
+                    )
+                    timer.finish(status="compress_failed")
+                    elapsed_s = max(0.0, time.perf_counter() - t_wall0)
                     self._emit(
                         "scan-done",
                         {
@@ -598,6 +809,7 @@ class Api:
                                 "skipped_count": len(meta.skipped),
                                 "compressed": False,
                             },
+                            "elapsed_s": round(elapsed_s, 2),
                             "warning": i18n.t(
                                 f"快照已保存，但压缩失败，已保留未压缩文件：{exc}",
                                 f"Snapshot saved, but compression failed; kept uncompressed file: {exc}",
@@ -607,12 +819,26 @@ class Api:
                     return
         except ScanCancelled:
             store.delete_snapshot(db_path)  # 丢弃不完整快照
+            timer.finish(status="cancelled")
+            applog.info("Scan cancelled")
             self._emit("scan-cancelled", {})
         except Exception as exc:  # noqa: BLE001 - 兜底，任何异常都不该让线程静默死掉
             store.delete_snapshot(db_path)
             traceback.print_exc()
+            # 不写扫描 root / 当前路径，避免隐私与日志膨胀
+            applog.exception("Scan failed", exc)
+            timer.finish(status="error")
             self._emit("scan-error", {"message": str(exc)})
         else:
+            timer.finish(status="ok")
+            elapsed_s = max(0.0, time.perf_counter() - t_wall0)
+            applog.info(
+                f"Scan done file_count={meta.file_count} "
+                f"total_size={meta.total_size} "
+                f"skipped={len(meta.skipped)} "
+                f"compressed={str(final_path).lower().endswith('.dbz')} "
+                f"elapsed_s={elapsed_s:.2f}"
+            )
             self._emit(
                 "scan-done",
                 {
@@ -624,7 +850,8 @@ class Api:
                         "file_count": meta.file_count,
                         "skipped_count": len(meta.skipped),
                         "compressed": final_path.lower().endswith(".dbz"),
-                    }
+                    },
+                    "elapsed_s": round(elapsed_s, 2),
                 },
             )
 
@@ -647,9 +874,11 @@ class Api:
                     "nodes": [n.to_dict() for n in nodes],
                 }
         except (DiffError, SnapshotError, CompressError) as exc:
+            applog.warn(f"Compare rejected: {exc}")
             return {"error": str(exc)}
         except Exception as exc:  # noqa: BLE001 - 任何异常都要回 JSON，不能让前端悬死
             traceback.print_exc()
+            applog.exception("Compare failed", exc)
             return {"error": i18n.t(f"对比失败：{exc}", f"Comparison failed: {exc}")}
 
     def get_children(self, old_path: str, new_path: str, parent: str) -> dict:
@@ -661,9 +890,11 @@ class Api:
                 nodes = self._diff.compare_children(parent)
                 return {"nodes": [n.to_dict() for n in nodes]}
         except (DiffError, SnapshotError, CompressError) as exc:
+            applog.warn(f"get_children rejected: {exc}")
             return {"error": str(exc)}
         except Exception as exc:  # noqa: BLE001 - 同上，兜底成 error 响应
             traceback.print_exc()
+            applog.exception("get_children failed", exc)
             return {"error": i18n.t(
                 f"读取子目录失败：{exc}", f"Failed to read subfolder: {exc}")}
 
@@ -883,9 +1114,16 @@ def _detect_lang() -> str:
 
 def main() -> None:
     """创建窗口并启动应用。"""
-    # 先按系统语言定界面语言，好让「缺少 WebView2」这类开窗前的弹窗已本地化；
-    # 前端起来后会再调 set_language 校准（含用户手动切换）。
-    i18n.set_lang(_detect_lang())
+    # 语言 / 主题：settings.yaml 显式写入则用它；语言缺省用系统语言。
+    # 标题栏默认跟 store 主题，避免先按 dark 刷再被前端纠正。
+    applog.note_startup(APP_VERSION)
+    _disk = store._load_settings_yaml(store.settings_path())  # noqa: SLF001
+    if "lang" in _disk:
+        i18n.set_lang(store.get_lang())
+    else:
+        detected = _detect_lang()
+        store._lang = detected  # noqa: SLF001 - 启动初始化，不触发 persist
+        i18n.set_lang(detected)
     # 优先用随包附带的固定版本运行时；没有再检测系统运行时，仍缺则引导安装。
     if not _wire_bundled_webview2() and not _webview2_installed():
         _warn_missing_webview2()
@@ -903,34 +1141,41 @@ def main() -> None:
         x=x,
         y=y,
         min_size=(820, 560),
-        background_color="#0f1116",
+        background_color=(
+            "#ffffff" if store.get_theme() == "light" else "#0f1116"
+        ),
     )
     api.set_window(window)
-    # 窗口一出现：hook 标题栏主题 + 图标 + 轻量上色。
-    # 真正按 localStorage 校准主题由前端 set_theme 完成；这里少做事，加快首屏。
+    # 窗口一出现：hook 标题栏 + 图标；主题跟 store（YAML 已加载）走。
+    # 前端 set_theme 再对齐一次；启动阶段勿用默认 dark 覆盖用户 light。
+    try:
+        api._titlebar.dark = store.get_theme() != "light"
+    except Exception:  # noqa: BLE001
+        pass
+
     def _on_shown() -> None:
         api._refresh_window_title()
-        api._hook_titlebar_theme()
+        api._titlebar.hook()
         api._apply_icon(_ICON_PATH)
         # 不 force_nudge：避免启动瞬间抖窗口；后续 set_theme / 延迟刷新补上。
-        api._apply_titlebar(api._titlebar_dark, force_nudge=False)
+        api._titlebar.apply(api._titlebar.dark, force_nudge=False)
 
     try:
         window.events.shown += _on_shown
     except Exception:  # noqa: BLE001
         pass
     try:
-        window.events.restored += lambda: api._apply_titlebar(
-            api._titlebar_dark, force_nudge=False
+        window.events.restored += lambda: api._titlebar.apply(
+            api._titlebar.dark, force_nudge=False
         )
     except Exception:  # noqa: BLE001
         pass
     try:
         # 页面就绪后再钉一次（前端多半已 set_theme）；只调度少量延迟刷新。
         def _on_loaded() -> None:
-            api._hook_titlebar_theme()
-            api._apply_titlebar(api._titlebar_dark, force_nudge=False)
-            api._schedule_titlebar_refresh(delays_ms=(120,))
+            api._titlebar.hook()
+            api._titlebar.apply(api._titlebar.dark, force_nudge=False)
+            api._titlebar.schedule_refresh(delays_ms=(120,))
 
         window.events.loaded += _on_loaded
     except Exception:  # noqa: BLE001
@@ -946,4 +1191,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # Windows + PyInstaller：多进程 spawn 子进程会重新执行本模块入口，
+    # freeze_support 让子进程走 worker 路径而非再起 GUI。
+    import multiprocessing
+
+    multiprocessing.freeze_support()
     main()

@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-theme="dark">
+<html lang="zh-CN" data-theme="light">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -15,10 +15,19 @@
       </div>
       <div class="side-section">
         <div class="side-group">
-          <span data-i18n="snapRecords">快照记录</span>
+          <div class="side-group-left">
+            <span data-i18n="snapRecords">快照记录</span>
+            <button id="newFolderBtn" class="btn-plain snap-tool side-folder-new" type="button" data-i18n-title="folderNewTitle" title="在快照目录下新建文件夹，用于归纳快照" aria-label="New folder">
+              <svg class="tool-icon folder-plus-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                <path fill="currentColor" d="M1.5 2.5A1.5 1.5 0 0 1 3 1h3.793a1.5 1.5 0 0 1 1.06.44l.707.707H13A1.5 1.5 0 0 1 14.5 3.5v1h-13v-2zm0 3h13v7A1.5 1.5 0 0 1 13 14H3a1.5 1.5 0 0 1-1.5-1.5v-7z"/>
+                <circle cx="12.2" cy="12.2" r="3.4" fill="var(--bg-side)"/>
+                <path fill="currentColor" d="M12.2 10.1a.55.55 0 0 1 .55.55v1h1a.55.55 0 1 1 0 1.1h-1v1a.55.55 0 1 1-1.1 0v-1h-1a.55.55 0 1 1 0-1.1h1v-1a.55.55 0 0 1 .55-.55z"/>
+              </svg>
+            </button>
+          </div>
           <select id="snapSortSel" class="sort-sel snap-sort" data-i18n-title="snapSortTitle" title="快照排序">
-            <option value="time-desc" data-i18n="snapSortTimeDesc">时间 新→旧</option>
-            <option value="time-asc" data-i18n="snapSortTimeAsc">时间 旧→新</option>
+            <option value="time-desc" data-i18n="snapSortTimeDesc">时间 ↓</option>
+            <option value="time-asc" data-i18n="snapSortTimeAsc">时间 ↑</option>
             <option value="name-asc" data-i18n="snapSortNameAsc">路径 A→Z</option>
             <option value="name-desc" data-i18n="snapSortNameDesc">路径 Z→A</option>
           </select>
@@ -26,14 +35,28 @@
         <div id="snapshotList" class="snapshot-list"></div>
       </div>
       <div class="side-foot">
-        <button id="openDirBtn" class="btn-plain" data-i18n="openDir" data-i18n-title="openDirTitle" title="在资源管理器中打开快照存放目录">打开快照文件夹</button>
-        <label class="worker-row" data-i18n-title="workersTitle" title="扫描用的并行线程数，机械硬盘建议 1，SSD 可加大"><span data-i18n="workers">扫描线程数</span>
-          <select id="workerSel" class="sort-sel worker-sel"></select>
-        </label>
-        <label class="worker-row compress-row" data-i18n-title="compressTitle" title="扫描完成后压缩快照以节省磁盘；对比时再解压">
-          <span data-i18n="compress">压缩快照</span>
-          <input id="compressChk" type="checkbox" checked />
-        </label>
+        <div class="snap-tools" role="toolbar" data-i18n-title="snapToolsTitle" title="快照目录与导入">
+          <button id="openDirBtn" class="btn-plain snap-tool" type="button" data-i18n-title="openDirTitle" title="打开快照存放目录" aria-label="Open folder">
+            <svg class="tool-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+              <path fill="currentColor" d="M1.5 2.5A1.5 1.5 0 0 1 3 1h3.793a1.5 1.5 0 0 1 1.06.44l.707.707H13A1.5 1.5 0 0 1 14.5 3.5v1h-13v-2zm0 3h13v7A1.5 1.5 0 0 1 13 14H3a1.5 1.5 0 0 1-1.5-1.5v-7z"/>
+            </svg>
+          </button>
+          <button id="refreshSnapsBtn" class="btn-plain snap-tool" type="button" data-i18n-title="refreshSnapsTitle" title="从默认目录刷新列表（保留手动导入的快照）" aria-label="Refresh">
+            <svg class="tool-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+              <path fill="currentColor" d="M8 2.5a5.5 5.5 0 1 0 5.27 7.02h-1.54A4 4 0 1 1 8 4v2.5l3.5-3L8 .5V2.5z"/>
+            </svg>
+          </button>
+          <button id="importSnapsBtn" class="btn-plain snap-tool" type="button" data-i18n-title="importSnapsTitle" title="从其它位置读取快照文件" aria-label="Import snapshots">
+            <svg class="tool-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+              <!-- 上传：箭头朝上 -->
+              <path fill="currentColor" d="M8 1.22a.75.75 0 0 1 .53.22l4.25 4.25a.75.75 0 1 1-1.06 1.06L8.75 3.81V12a.75.75 0 0 1-1.5 0V3.81L4.28 6.75a.75.75 0 0 1-1.06-1.06l4.25-4.25a.75.75 0 0 1 .53-.22zM2.75 13.5a.75.75 0 0 0 0 1.5h10.5a.75.75 0 0 0 0-1.5H2.75z"/>
+            </svg>
+          </button>
+        </div>
+        <button id="settingsBtn" class="btn-plain settings-side-btn" data-i18n-title="settingsTitle" title="扫描与持久化选项">
+          <span class="settings-side-icon" aria-hidden="true">⚙</span>
+          <span class="settings-side-label" data-i18n="settings">设置</span>
+        </button>
         <div class="foot-btns">
           <button id="langToggle" class="btn-plain" data-i18n-title="langTitle" title="切换语言 / Switch language">中 / EN</button>
           <button id="themeToggle" class="btn-plain" data-i18n-title="themeTitle" title="切换暗色/浅色">🌙 主题</button>
@@ -54,7 +77,7 @@
         <div class="pick" id="pickOld">
           <div class="pick-inner">
             <span class="pick-label old-c" data-i18n="pickOldLabel">基准（较早的快照）</span>
-            <span class="pick-value" data-role="old-value" data-i18n="pickPlaceholder">点击选择…</span>
+            <span class="pick-value" data-role="old-value" data-i18n="pickPlaceholder">点击选择</span>
           </div>
           <span class="caret">▾</span>
         </div>
@@ -62,7 +85,7 @@
         <div class="pick" id="pickNew">
           <div class="pick-inner">
             <span class="pick-label new-c" data-i18n="pickNewLabel">当前（较新的快照）</span>
-            <span class="pick-value" data-role="new-value" data-i18n="pickPlaceholder">点击选择…</span>
+            <span class="pick-value" data-role="new-value" data-i18n="pickPlaceholder">点击选择</span>
           </div>
           <span class="caret">▾</span>
         </div>
@@ -121,10 +144,209 @@
   <div id="scanOverlay" class="overlay hidden">
     <div class="scan-card">
       <div class="scan-spinner"></div>
-      <div class="scan-title" data-i18n="scanning">正在扫描…</div>
+      <div class="scan-title" data-i18n="scanning">正在扫描</div>
+      <div id="scanModeHint" class="scan-mode-hint hidden"></div>
       <div id="scanFiles" class="scan-files" data-i18n="scanFilesInit">已扫描 0 个文件</div>
-      <div id="scanCurrent" class="scan-current"></div>
+      <div id="scanElapsed" class="scan-elapsed" data-i18n="scanElapsedInit">已用时 0:00</div>
+      <div id="scanCurrent" class="scan-current" title=""></div>
       <button id="cancelScanBtn" class="btn-ghost" data-i18n="cancel">取消</button>
+    </div>
+  </div>
+
+  <!-- 快照迁移进度（设置改目录时） -->
+  <div id="migrateOverlay" class="overlay hidden">
+    <div class="scan-card migrate-card">
+      <div class="scan-spinner"></div>
+      <div class="scan-title" data-i18n="migrating">正在迁移快照</div>
+      <div id="migrateCount" class="scan-files">0 / 0</div>
+      <div id="migrateCurrent" class="scan-current" title=""></div>
+    </div>
+  </div>
+
+  <!-- 备注编辑（应用内对话框，避免 window.prompt 显示本地服务地址） -->
+  <div id="noteOverlay" class="overlay hidden">
+    <div class="note-card" role="dialog" aria-modal="true" aria-labelledby="noteDialogTitle">
+      <div class="note-head">
+        <h2 id="noteDialogTitle" class="note-title" data-i18n="noteEdit">备注</h2>
+        <button id="noteCloseBtn" class="btn-plain settings-close" type="button" data-i18n-title="settingsClose" title="关闭">✕</button>
+      </div>
+      <p id="noteDialogHint" class="note-hint"></p>
+      <textarea id="noteInput" class="note-input" rows="3" maxlength="200" data-i18n-placeholder="notePlaceholder" placeholder="添加备注"></textarea>
+      <div class="note-foot">
+        <span class="note-foot-spacer"></span>
+        <button id="noteCancelBtn" class="btn-plain" type="button" data-i18n="cancel">取消</button>
+        <button id="noteSaveBtn" class="btn-primary compact" type="button" data-i18n="noteSave">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 文件夹：新建 / 重命名 / 移动目标选择 -->
+  <div id="folderOverlay" class="overlay hidden">
+    <div class="note-card folder-card" role="dialog" aria-modal="true" aria-labelledby="folderDialogTitle">
+      <div class="note-head">
+        <h2 id="folderDialogTitle" class="note-title" data-i18n="folderDialogCreateTitle">新建文件夹</h2>
+        <button id="folderCloseBtn" class="btn-plain settings-close" type="button" data-i18n-title="settingsClose" title="关闭">✕</button>
+      </div>
+      <p id="folderDialogHint" class="note-hint"></p>
+      <div id="folderNameRow">
+        <input id="folderNameInput" class="note-input folder-name-input" type="text" maxlength="64" data-i18n-placeholder="folderNamePlaceholder" placeholder="文件夹名称" />
+      </div>
+      <div id="folderPickList" class="folder-pick-list hidden"></div>
+      <div class="note-foot">
+        <span class="note-foot-spacer"></span>
+        <button id="folderCancelBtn" class="btn-plain" type="button" data-i18n="cancel">取消</button>
+        <button id="folderSaveBtn" class="btn-primary compact" type="button" data-i18n="folderSave">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 设置面板（页签结构，便于后续新增设置页；可拖右下角调整大小） -->
+  <div id="settingsOverlay" class="overlay hidden">
+    <div class="settings-card" role="dialog" aria-modal="true" aria-labelledby="settingsTitleEl">
+      <div class="settings-head">
+        <h2 id="settingsTitleEl" class="settings-title" data-i18n="settings">设置</h2>
+        <div class="settings-head-right">
+          <button id="settingsCloseBtn" class="btn-plain settings-close" data-i18n-title="settingsClose" title="关闭">✕</button>
+        </div>
+      </div>
+      <div class="settings-tabs" role="tablist" aria-label="Settings tabs">
+        <button type="button" class="settings-tab active" role="tab" aria-selected="true" data-settings-tab="general" data-i18n="settingsTabGeneral">通用</button>
+        <button type="button" class="settings-tab" role="tab" aria-selected="false" data-settings-tab="log" data-i18n="settingsTabLog">日志</button>
+      </div>
+      <div class="settings-body">
+        <div class="settings-pane active" data-settings-pane="general" role="tabpanel">
+          <div class="settings-field">
+            <div class="settings-row">
+              <span class="settings-label">
+                <label for="workerSel" data-i18n="workers">扫描线程数</label>
+                <button type="button" class="settings-q" data-help="workers" data-i18n-title="workersTitle" title="扫描用的并行线程数，机械硬盘建议 1，SSD 可加大" aria-label="?">?</button>
+              </span>
+              <select id="workerSel" class="sort-sel worker-sel"></select>
+            </div>
+            <p class="settings-help-panel hidden" data-help-panel="workers" data-i18n="workersTitle">扫描用的并行线程数，机械硬盘建议 1，SSD 可加大</p>
+          </div>
+          <div class="settings-field">
+            <div class="settings-row">
+              <span class="settings-label">
+                <label for="compressChk" data-i18n="compress">压缩快照</label>
+                <button type="button" class="settings-q" data-help="compress" data-i18n-title="compressTitle" title="扫描完成后压缩快照以节省磁盘；对比时再解压" aria-label="?">?</button>
+              </span>
+              <input id="compressChk" type="checkbox" checked />
+            </div>
+            <p class="settings-help-panel hidden" data-help-panel="compress" data-i18n="compressTitle">扫描完成后压缩快照以节省磁盘；对比时再解压</p>
+          </div>
+          <div class="settings-field">
+            <div class="settings-row">
+              <span class="settings-label">
+                <label for="mftChk" data-i18n="mft">尝试 MFT 扫描</label>
+                <button type="button" class="settings-q" data-help="mft" data-i18n-title="mftTitle" title="盘符根 + NTFS 时读 MFT 构建快照，需要管理员。解析进程数按 CPU 与数据量自动决定，与上方扫描线程数无关。非管理员或失败时自动回退常规扫描，默认开" aria-label="?">?</button>
+              </span>
+              <input id="mftChk" type="checkbox" />
+            </div>
+            <p class="settings-help-panel hidden" data-help-panel="mft" data-i18n="mftHint">仅 Windows 盘符根 + NTFS，需要管理员。非管理员时勾选仍可保留，扫描会回退常规目录扫描。解析用多进程，不占用上方扫描线程设置</p>
+          </div>
+          <div class="settings-field">
+            <div class="settings-row">
+              <span class="settings-label">
+                <span data-i18n="snapDir">快照存放目录</span>
+                <button type="button" class="settings-q" data-help="snapDir" data-i18n-title="snapDirTitle" title="新建扫描写入的目录；更改后点完成会把原目录中的快照迁到新目录（同名已存在则跳过）" aria-label="?">?</button>
+              </span>
+              <div class="settings-row-actions">
+                <button id="snapDirChooseBtn" class="btn-plain compact" type="button" data-i18n="snapDirChoose">更改</button>
+                <button id="snapDirResetBtn" class="btn-plain compact" type="button" data-i18n="snapDirReset">恢复默认</button>
+                <button id="snapDirOpenBtn" class="btn-plain compact" type="button" data-i18n="snapDirOpen">打开</button>
+              </div>
+            </div>
+            <p id="snapDirPathLine" class="settings-hint settings-path snap-dir-path"></p>
+            <p class="settings-help-panel hidden" data-help-panel="snapDir" data-i18n="snapDirTitle">新建扫描写入的目录；更改后点完成会把原目录中的快照迁到新目录（同名已存在则跳过）</p>
+          </div>
+          <p class="settings-hint settings-auto-save-hint" data-i18n="settingsAutoSaveHint">修改后点「完成」会自动保存，语言与主题切换会立即保存</p>
+          <div class="settings-field settings-danger-zone">
+            <div class="settings-row">
+              <span class="settings-label">
+                <span data-i18n="uninstall">卸载</span>
+                <button type="button" class="settings-q" data-help="uninstall" data-i18n-title="uninstallTitle" title="清理工具在本机留下的配置文件与快照（不包含您自定义的快照存放位置）" aria-label="?">?</button>
+              </span>
+              <button id="uninstallBtn" class="btn-danger compact" type="button" data-i18n="uninstallBtn">卸载</button>
+            </div>
+            <p class="settings-help-panel hidden" data-help-panel="uninstall" data-i18n="uninstallTitle">清理工具在本机留下的配置文件与快照（不包含您自定义的快照存放位置）</p>
+          </div>
+        </div>
+        <div class="settings-pane hidden" data-settings-pane="log" role="tabpanel">
+          <p class="settings-hint log-privacy-hint" data-i18n="logPrivacyHint">日志默认不保存，仅存在于软件本次运行中，可使用导出功能将日志输出</p>
+          <p class="settings-hint log-privacy-hint" data-i18n="logPrivacyNote">隐私说明：导出的日志文件通常不会包含您的隐私信息，并已对相关信息进行脱敏，若担心隐私问题可根据源码自行判断</p>
+          <div class="log-toolbar">
+            <span id="logCountLabel" class="settings-hint log-count">0</span>
+            <div class="settings-row-actions">
+              <button id="logRefreshBtn" class="btn-plain compact" type="button" data-i18n="logRefresh">刷新</button>
+              <button id="logClearBtn" class="btn-plain compact" type="button" data-i18n="logClear">清空</button>
+              <button id="logExportBtn" class="btn-primary compact" type="button" data-i18n="logExport">导出</button>
+            </div>
+          </div>
+          <pre id="logView" class="log-view" aria-live="polite"></pre>
+        </div>
+      </div>
+      <div class="settings-foot">
+        <button id="resetSettingsBtn" class="btn-plain compact" type="button" data-i18n="resetSettingsBtn" data-i18n-title="resetSettingsTitle" title="删除配置并恢复默认">恢复默认</button>
+        <span class="settings-foot-spacer"></span>
+        <button id="settingsDoneBtn" class="btn-primary compact" data-i18n="settingsDone">完成</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 卸载确认：点「卸载」后弹出，再勾选是否删数据并确认 -->
+  <div id="uninstallOverlay" class="overlay hidden">
+    <div class="uninstall-card" role="dialog" aria-modal="true" aria-labelledby="uninstallDialogTitle">
+      <div class="note-head">
+        <h2 id="uninstallDialogTitle" class="note-title" data-i18n="uninstallDialogTitle">卸载</h2>
+        <button id="uninstallDialogCloseBtn" class="btn-plain settings-close" type="button" data-i18n-title="settingsClose" title="关闭">✕</button>
+      </div>
+      <label class="settings-check-row uninstall-dialog-check" for="uninstallDeleteDataChk">
+        <input id="uninstallDeleteDataChk" type="checkbox" checked />
+        <span data-i18n="uninstallDeleteData">同时删除数据文件夹（快照与设置）</span>
+      </label>
+      <div class="note-foot">
+        <span class="note-foot-spacer"></span>
+        <button id="uninstallCancelBtn" class="btn-plain" type="button" data-i18n="cancel">取消</button>
+        <button id="uninstallConfirmBtn" class="btn-danger compact" type="button" data-i18n="uninstallConfirm">确认卸载</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 卸载完成：提示后确认退出程序 -->
+  <div id="uninstallDoneOverlay" class="overlay hidden">
+    <div class="uninstall-card" role="dialog" aria-modal="true" aria-labelledby="uninstallDoneTitle">
+      <div class="note-head">
+        <h2 id="uninstallDoneTitle" class="note-title" data-i18n="uninstallDoneTitle">卸载完成</h2>
+      </div>
+      <p class="note-hint" data-i18n="uninstallDoneBody">数据已清除，关闭程序后可直接删除程序</p>
+      <div class="note-foot">
+        <span class="note-foot-spacer"></span>
+        <button id="uninstallDoneOkBtn" class="btn-primary compact" type="button" data-i18n="uninstallDoneOk">确认</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 导入结果：重复/失败明细（不自动消失，需点关闭） -->
+  <div id="importOverlay" class="overlay hidden">
+    <div class="import-card" role="dialog" aria-modal="true" aria-labelledby="importDialogTitle">
+      <div class="note-head">
+        <h2 id="importDialogTitle" class="note-title" data-i18n="importResultTitle">导入结果</h2>
+        <button id="importCloseBtn" class="btn-plain settings-close" type="button" data-i18n-title="settingsClose" title="关闭">✕</button>
+      </div>
+      <p id="importSummary" class="note-hint"></p>
+      <div id="importDupBlock" class="import-block hidden">
+        <div class="import-block-title" data-i18n="importDupHeading">已存在（未重复加入）</div>
+        <ul id="importDupList" class="import-list"></ul>
+      </div>
+      <div id="importFailBlock" class="import-block hidden">
+        <div class="import-block-title" data-i18n="importFailHeading">无法读取</div>
+        <ul id="importFailList" class="import-list"></ul>
+      </div>
+      <div class="note-foot">
+        <span class="note-foot-spacer"></span>
+        <button id="importOkBtn" class="btn-primary compact" type="button" data-i18n="importResultOk">知道了</button>
+      </div>
     </div>
   </div>
 

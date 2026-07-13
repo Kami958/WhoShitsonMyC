@@ -5,7 +5,7 @@
 <div align="center">
   <img src="logo.png" width="72" alt="WhoShitsOnMyC" />
   <h1>WhoShitsOnMyC</h1>
-  <p><strong>Cleaned C: and free space vanished again days later? Record it, then find out what ate the space</strong></p>
+  <p><strong>Just cleaned your C: drive — and free space mysteriously vanished again a few days later? Take a snapshot, then find out what ate the space</strong></p>
 </div>
 
 
@@ -20,97 +20,98 @@
 
 ## Why this exists
 
-You clean the C drive with a cleanup tool and things stay quiet for a while. Then one day a large chunk of space is gone, and you have no idea where the new junk came from. Open the cleanup tool again and you still get a list of “maybe deletable” items — more guessing. **You never know who snuck back and took a dump after last time**
+You clean up C: with a disk cleaner and everything stays fine for a while. Then one day a huge chunk of free space is gone, and you have no idea where the new junk came from. Open the cleaner again and it’s still the same “maybe safe to delete” list — more guessing. **You never know who snuck back and took a dump after the last cleanup**
 
-**WhoShitsOnMyC** is built for exactly that
+**WhoShitsOnMyC** is built for that exact problem
 
 > **Compared with last time, what changed?**
 
-Instead of hunting junk by feel every time, scan once while space still looks fine and keep a baseline. When space is eaten again, scan the same place once more. Side by side, you can see what grew and what newly showed up
+Instead of hunting junk by gut feeling every time, scan once while space still looks normal to get an older snapshot, then scan again after usage grows to get a newer one.
+**Compare the snapshots and you can see at a glance what grew and what showed up new**
 
 <p align="center">
   <img src="assets/screenshots/ui-en.jpg" alt="WhoShitsOnMyC — English UI" width="900" />
 </p>
 
-## Features
-
-- **Time-based comparison**: earlier snapshot as **Base**, later as **Current** — see how space changed over that period
-- **Expandable change tree**: expand only the levels you care about; large directories stay smooth
-- **Easy colors**: red = grew / added, green = shrank / removed, amber = no permission / incomparable
-- **Sort and filter**: by delta, percent change, name, or modification time; show only growth or only shrink
-- **Multi-threaded scan**: prefer 1 thread on HDDs; raise it on SSDs for speed
-- **Snapshot compression**: finished scans are compressed to `.dbz` by default to use less disk; decompress when comparing
-- **Single executable**: one `.exe`, no background service, no registry writes
-- **Chinese / English UI, dark / light theme**: follows system language by default; switch anytime
-- **Explorer integration**: right-click a row to open its location, or copy the full path
-
 ## Download
 
-Get `WhoShitsOnMyC-v*.exe` from [Releases](https://github.com/Kami958/WhoShitsonMyC/releases)
+Grab a build from [Releases](https://github.com/Kami958/WhoShitsonMyC/releases)
 
-| Item | Detail |
+| Requirement | Notes |
 | --- | --- |
 | OS | Windows 10 / 11 |
-| WebView2 | The UI needs [Microsoft Edge WebView2](https://developer.microsoft.com/microsoft-edge/webview2/). Windows 11 and most Windows 10 installs already have it. If missing, the app prompts you and opens the download page — install the Evergreen package once, then reopen the app |
+| WebView2 | The UI needs [Microsoft Edge WebView2](https://developer.microsoft.com/microsoft-edge/webview2/). **Windows 11 and most Windows 10 PCs already have it.** If it’s missing, the app will tell you and open the download page — install the Evergreen runtime, then start the app again |
 
-## Quick start
+## Quick start (recommended: run as administrator)
 
-**Run as Administrator when you can.** Scanning system folders hits far fewer permission walls that way
 
-1. After a cleanup, or while space still looks fine, click **＋ New scan**, pick a folder (for example `C:\`), and keep a baseline
-2. When space is eaten again, scan the **same** folder once more
-3. Set the earlier one as **Base**, the later as **Current**, then click **Compare**
-4. Expand the change tree and follow the red / green markers to what grew
-5. Right-click a row to open its location, or copy the full path
+1. **Run as administrator** — faster drive-root scans, and some hidden paths become readable
+2. Click **＋ New scan**, pick a folder such as `C:\`. When the scan finishes, you get a snapshot
+3. When free space is eaten again, scan the **same** folder once more
+4. Set the older snapshot as **Base**, the newer one as **Current**, then click **Compare**
+5. Results show up below: red means growth, green means shrink
 
-Sidebar options:
+At the bottom of the sidebar you can also:
 
-- **Scan threads**: how many workers scan the disk in parallel. Prefer 1 on HDDs; raise it on SSDs for speed
-- **Compress snapshots**: save finished scans as `.dbz` to use less disk; decompress when comparing (on by default)
-- **Language / theme**: Chinese or English; dark or light
+- **Open / refresh / import snapshots**: open the current snapshot folder, refresh the list, or import snapshots from elsewhere
+- **Settings**: adjust scan threads, snapshot compression, MFT attempt, snapshot folder, and more
+- **Language / theme**: switch between Chinese and English, dark and light
 
 ## Data & uninstall
 
-> Yes, we also left a bit of 💩~ under your C drive
+### What data files we leave behind
 
-| Content | Location |
+> Yes — we left a little 💩 on your C: drive too
+
+Config files and default snapshots created by the app live here by default:
+
+`%LOCALAPPDATA%\WhoShitsOnMyC`
+
+Paste that path into File Explorer’s address bar and press Enter to open it
+
+| What | Where |
 | --- | --- |
-| Snapshots (`.db` / `.dbz`) | `%LOCALAPPDATA%\WhoShitsOnMyC\snapshots\` |
-| Decompress cache | `%LOCALAPPDATA%\WhoShitsOnMyC\cache\` |
+| Snapshots | By default in the `snapshots` folder under the path above; you can change this to another location in Settings |
+| Settings | Stored as a config file in the same folder; saved after you change options and click **Done** |
 
-All snapshot data lives in the data folder. Delete that folder, then delete the `.exe`
+### How to uninstall WhoShitsOnMyC?
 
-Paste this into File Explorer’s address bar to open the data folder:
+**Open Settings → General, click the red Uninstall, then confirm in the dialog whether to delete data and finish cleanup**
 
-```text
-%LOCALAPPDATA%\WhoShitsOnMyC
-```
-
-Or delete it with PowerShell:
-
-```powershell
-Remove-Item -Recurse -Force "$env:LOCALAPPDATA\WhoShitsOnMyC" -ErrorAction SilentlyContinue
-```
+- When data deletion is on, the app clears config and snapshots under the default data folder
+- **If you migrated the snapshot folder, that migrated location still needs to be deleted manually!**
+- After cleanup, delete the exe yourself
 
 ## FAQ
 
-**Why can the scanned total exceed “This PC” used space?**  
-Places like `C:\Windows\WinSxS` have many hard links, so the same file can be counted more than once. Sizes here are logical, not cluster-aligned physical usage. The **delta between two scans** is still solid
+**Q: Why does scanning take so long?**  
+**A: Scan time mainly depends on how many files sit under the path you chose, and on your machine**
 
-**What does “Incomparable” mean?**  
-That side was incomplete (often no permission), so no change can be computed
+> Ballpark: volume-root scan of ~1M files on an M.2 SSD with MFT on is often around the low-teens of seconds (machine and cold/warm cache vary)
 
-**The app says WebView2 is missing.**  
-Install the [WebView2 Evergreen package](https://developer.microsoft.com/microsoft-edge/webview2/) once, then reopen the app
+- If the scan path is on a hard disk drive, set the scan thread count to **1** in Settings
 
-**Are settings saved?**  
-No — they are gone when you close the app. Only snapshots stay in the data folder
+- **When scanning a drive root** (e.g. `C:\`, `D:\`), turning **Try MFT scan** on or off in Settings may help (administrator required)
+- Still stuck? Open an issue
+
+**Q: Why do two scans in a row show a large size difference?**
+
+**A:** Common cases:
+
+1. The two scans ran under different elevation modes (**non-admin vs admin**); some paths need administrator rights to read
+2. Other software really wrote data between the two scans — check the compare tree for details
+
+**Q: Why does the compare tree show “Incomparable”?**  
+**A:** Some paths may not have been scanned fully — often because of permissions — so they cannot take part in the compare
+
+**Q: The app says WebView2 is missing**  
+**A:** Install the [WebView2 Evergreen runtime](https://developer.microsoft.com/microsoft-edge/webview2/), then start the app again
+
+
 
 ---
 
 ## Build from source
-
-For developers
 
 Requires **Python 3.10+**
 
@@ -120,34 +121,17 @@ python app.py
 python -m pytest tests/ -q
 
 pip install pyinstaller
-python build.py   # → dist/WhoShitsOnMyC-v{version}.exe
+python build.py
 ```
 
-`requirements.txt` covers runtime and tests. Install PyInstaller only when you need the `.exe`
+## Developers
 
-## Project layout
-
-```text
-app.py              Window + bridge (pywebview, JS API, WebView2 check)
-build.py            Packaging script
-core/               Core logic (no UI)
-  models.py           Data models and change kinds
-  scanner.py          Multi-threaded scan
-  snapshot.py         SQLite snapshot I/O
-  differ.py           Layer-by-layer compare
-  compress.py         .db ↔ .dbz
-  store.py            Snapshot storage and session settings
-  i18n.py             Backend message language
-web/                Frontend HTML / CSS / JS
-tests/              Unit tests
-assets/screenshots/ UI screenshots
-version.py          App version
-```
+For project layout and internals, see the [developer docs](assets/docs/Designed.md)
 
 ## License
 
 [MIT](LICENSE)
 
-## Friendly links
+## Links
 
-- [LINUX DO](https://linux.do/)
+[LINUX DO](https://linux.do/)

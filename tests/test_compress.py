@@ -60,22 +60,18 @@ def test_compress_and_read_meta_without_full_extract(tmp_path):
     assert loaded.skipped == ["locked"]
 
 
-def test_ensure_db_path_extracts_on_demand(tmp_path, monkeypatch):
+def test_ensure_db_path_extracts_on_demand(tmp_path):
     db = os.path.join(tmp_path, "s.db")
     meta = _write_sample(db)
     dbz = compress_db(db, meta)
 
-    cache = os.path.join(tmp_path, "cache")
-    monkeypatch.setattr("core.compress.cache_dir", lambda: (
-        os.makedirs(cache, exist_ok=True) or cache
-    ))
-
     out1 = ensure_db_path(dbz)
     assert out1.endswith(".db")
     assert os.path.isfile(out1)
-    # 二次调用应命中缓存（同路径）
+    # 不落应用 cache 目录；二次调用应命中本进程会话登记
     out2 = ensure_db_path(dbz)
     assert out1 == out2
+    assert "WhoShitsOnMyC" not in out1.replace("\\", "/").split("/") or "cache" not in out1.lower()
 
     # 解出的库可读
     from core.snapshot import children_of, open_readonly
@@ -107,12 +103,7 @@ def test_list_snapshots_includes_dbz(tmp_path):
     assert infos[1].compressed is False
 
 
-def test_diff_via_ensure_db_path(tmp_path, monkeypatch):
-    cache = os.path.join(tmp_path, "cache")
-    monkeypatch.setattr("core.compress.cache_dir", lambda: (
-        os.makedirs(cache, exist_ok=True) or cache
-    ))
-
+def test_diff_via_ensure_db_path(tmp_path):
     old_db = os.path.join(tmp_path, "old.db")
     new_db = os.path.join(tmp_path, "new.db")
     _write_sample(old_db, when=1.0)
@@ -145,6 +136,24 @@ def test_delete_snapshot_removes_dbz(tmp_path):
     assert os.path.exists(dbz)
     delete_snapshot(dbz)
     assert not os.path.exists(dbz)
+
+
+def test_note_roundtrip_db_and_dbz(tmp_path):
+    """备注进文件：.db meta 与 .dbz meta.json 均可读写。"""
+    from core.compress import write_snapshot_note
+    from core.store import set_note, snapshot_info
+
+    db = os.path.join(tmp_path, "n.db")
+    meta = _write_sample(db)
+    assert write_snapshot_note(db, "hello") == "hello"
+    assert read_meta_any(db).note == "hello"
+    assert snapshot_info(db).note == "hello"
+
+    dbz = compress_db(db, read_meta_any(db))
+    assert read_meta_any(dbz).note == "hello"
+    assert set_note(dbz, "  after zip  ") == "after zip"
+    assert snapshot_info(dbz).note == "after zip"
+    assert read_meta_any(dbz).note == "after zip"
 
 
 def test_compress_setting_roundtrip():

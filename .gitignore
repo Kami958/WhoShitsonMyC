@@ -45,3 +45,8 @@ desktop.ini
 # 本地 / 会话产物
 .claude/
 .superpowers/
+
+# 开发期扫描计时日志（WSMC_SCAN_TIMING_LOG）
+dict/scan-timing.jsonl
+*.scan-timing.jsonl
+/claude.md

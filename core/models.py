@@ -40,7 +40,7 @@ class Entry:
 
 @dataclass(slots=True)
 class SnapshotMeta:
-    """一份快照的元信息（对应 SQLite ``meta`` 表）。
+    """一份快照的元信息（对应 SQLite ``meta`` 表 / ``.dbz`` 内 ``meta.json``）。
 
     Attributes:
         root: 扫描根的绝对路径（如 ``C:\\`` 或 ``D:\\Games``）。
@@ -51,6 +51,7 @@ class SnapshotMeta:
         skipped: 扫描时因无权限或出错而跳过的目录（相对路径）列表。
             对比时用于诚实标记「一侧缺数据、不可比较」。
         format_version: 快照格式版本号。
+        note: 用户备注（写在快照文件内，随文件移动/复制）。
     """
 
     root: str
@@ -60,6 +61,7 @@ class SnapshotMeta:
     dir_count: int = 0
     skipped: list[str] = field(default_factory=list)
     format_version: int = SNAPSHOT_FORMAT_VERSION
+    note: str = ""
 
 
 class ChangeKind(enum.Enum):

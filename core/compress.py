@@ -2,24 +2,27 @@
 
 ``.dbz`` 是一个 zip 包，内含：
 
-- ``meta.json``：快照元信息，列举时只读这一份，不必解压整库；
+- ``meta.json``：快照元信息（含备注），列举时只读这一份，不必解压整库；
 - ``data.db``：原始 SQLite 快照。
 
 设计取舍：扫描始终先写出完整 ``.db``（保证可立刻校验），开启压缩后
-再压成 ``.dbz`` 并删掉 ``.db``。对比时才把 ``.dbz`` 解到缓存目录；
+再压成 ``.dbz`` 并删掉 ``.db``。对比时把 ``.dbz`` 解到**进程内临时文件**
+（仅内存侧登记，不落应用数据目录的 cache/）；进程退出即丢弃。
 列表 / 删除 / 选择路径始终指向用户可见的 ``.db`` 或 ``.dbz`` 文件。
 """
 
 from __future__ import annotations
 
-import hashlib
+import atexit
 import json
 import os
+import tempfile
+import threading
 import zipfile
 
 from .i18n import t
 from .models import SnapshotMeta
-from .snapshot import SnapshotError, read_meta
+from .snapshot import SnapshotError, read_meta, write_meta_note
 
 # zip 内固定成员名。
 _META_MEMBER = "meta.json"
@@ -27,6 +30,12 @@ _DATA_MEMBER = "data.db"
 
 # 压缩后的扩展名（小写比较）。
 DBZ_SUFFIX = ".dbz"
+
+# 进程内解压登记：abspath(dbz) → (temp_db_path, mtime, size)
+# 不写 %LOCALAPPDATA%\...\cache；软件关闭后系统清临时文件。
+_session_lock = threading.Lock()
+_session_db: dict[str, tuple[str, float, int]] = {}
+_atexit_registered = False
 
 
 class CompressError(Exception):
@@ -55,6 +64,7 @@ def _meta_to_json(meta: SnapshotMeta) -> str:
             "dir_count": meta.dir_count,
             "skipped": meta.skipped,
             "format_version": meta.format_version,
+            "note": (meta.note or "").strip(),
         },
         ensure_ascii=False,
         separators=(",", ":"),
@@ -78,6 +88,7 @@ def _meta_from_json(text: str) -> SnapshotMeta:
             dir_count=int(data.get("dir_count", 0)),
             skipped=list(data.get("skipped") or []),
             format_version=int(data.get("format_version", 0)),
+            note=str(data.get("note") or "").strip(),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise SnapshotError(
@@ -176,32 +187,33 @@ def read_meta_any(path: str) -> SnapshotMeta:
     return read_meta(path)
 
 
-def cache_dir() -> str:
-    """返回压缩快照解压缓存目录（必要时创建）。"""
-    # 与 store 的数据根同级策略：放在应用数据目录下的 cache/。
-    if os.name == "nt":
-        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-    else:
-        base = os.environ.get(
-            "XDG_DATA_HOME", os.path.join(os.path.expanduser("~"), ".local", "share")
-        )
-    path = os.path.join(base, "WhoShitsOnMyC", "cache")
-    os.makedirs(path, exist_ok=True)
-    return path
+def _register_atexit_once() -> None:
+    global _atexit_registered
+    if _atexit_registered:
+        return
+    atexit.register(clear_session_cache)
+    _atexit_registered = True
 
 
-def _cache_key(dbz_path: str) -> str:
-    """由压缩文件路径 + 体积 + mtime 生成缓存文件名（内容变了会 miss）。"""
-    st = os.stat(dbz_path)
-    raw = f"{os.path.abspath(dbz_path)}|{st.st_size}|{int(st.st_mtime)}"
-    return hashlib.sha1(raw.encode("utf-8")).hexdigest() + ".db"
+def clear_session_cache() -> None:
+    """删除本进程解压出的全部临时 ``.db``（退出时自动调用）。"""
+    with _session_lock:
+        items = list(_session_db.values())
+        _session_db.clear()
+    for temp_path, _, _ in items:
+        try:
+            if os.path.isfile(temp_path):
+                os.remove(temp_path)
+        except OSError:
+            pass
 
 
 def ensure_db_path(path: str) -> str:
     """保证返回可直接给 SQLite / Diff 使用的 ``.db`` 路径。
 
     - 普通 ``.db``：原样返回；
-    - ``.dbz``：解压 ``data.db`` 到缓存（命中缓存则复用），返回缓存路径。
+    - ``.dbz``：解压 ``data.db`` 到**系统临时文件**，仅本进程登记复用；
+      **不**写入应用数据目录下的 cache/。软件关闭后临时文件丢弃。
 
     Raises:
         SnapshotError / CompressError: 解压失败或成员缺失。
@@ -213,15 +225,41 @@ def ensure_db_path(path: str) -> str:
             t(f"压缩快照不存在：{path}", f"Compressed snapshot not found: {path}")
         )
 
-    out = os.path.join(cache_dir(), _cache_key(path))
-    if os.path.isfile(out) and os.path.getsize(out) > 0:
-        return out
-
-    tmp = out + ".partial"
+    abspath = os.path.abspath(path)
     try:
-        if os.path.exists(tmp):
-            os.remove(tmp)
-        with zipfile.ZipFile(path, "r") as zf:
+        st = os.stat(abspath)
+        mtime = float(st.st_mtime)
+        size = int(st.st_size)
+    except OSError as exc:
+        raise CompressError(
+            t(f"无法读取压缩快照：{path}（{exc}）",
+              f"Cannot stat compressed snapshot: {path} ({exc})")
+        ) from exc
+
+    with _session_lock:
+        hit = _session_db.get(abspath)
+        if hit is not None:
+            temp_path, hit_mtime, hit_size = hit
+            if (
+                hit_mtime == mtime
+                and hit_size == size
+                and os.path.isfile(temp_path)
+                and os.path.getsize(temp_path) > 0
+            ):
+                return temp_path
+            # 失效：删旧临时文件
+            try:
+                if os.path.isfile(temp_path):
+                    os.remove(temp_path)
+            except OSError:
+                pass
+            _session_db.pop(abspath, None)
+
+    # 解到系统临时目录（不进 WhoShitsOnMyC/cache）
+    fd, temp_path = tempfile.mkstemp(prefix="wsmc_", suffix=".db")
+    os.close(fd)
+    try:
+        with zipfile.ZipFile(abspath, "r") as zf:
             try:
                 info = zf.getinfo(_DATA_MEMBER)
             except KeyError as exc:
@@ -229,39 +267,123 @@ def ensure_db_path(path: str) -> str:
                     t(f"压缩快照缺少 data.db：{path}",
                       f"Compressed snapshot is missing data.db: {path}")
                 ) from exc
-            with zf.open(info, "r") as src, open(tmp, "wb") as dst:
+            with zf.open(info, "r") as src, open(temp_path, "wb") as dst:
                 while True:
                     chunk = src.read(1024 * 1024)
                     if not chunk:
                         break
                     dst.write(chunk)
-        if os.path.exists(out):
-            os.remove(out)
-        os.replace(tmp, out)
+        if os.path.getsize(temp_path) <= 0:
+            raise CompressError(
+                t(f"解压快照结果为空：{path}",
+                  f"Decompressed snapshot is empty: {path}")
+            )
+    except (OSError, zipfile.BadZipFile, SnapshotError, CompressError) as exc:
+        try:
+            if os.path.isfile(temp_path):
+                os.remove(temp_path)
+        except OSError:
+            pass
+        if isinstance(exc, (SnapshotError, CompressError)):
+            raise
+        raise CompressError(
+            t(f"解压快照失败：{exc}", f"Failed to decompress snapshot: {exc}")
+        ) from exc
+
+    with _session_lock:
+        # 并发时可能已有别的线程解好了：保留先到者，删自己的副本
+        existing = _session_db.get(abspath)
+        if existing is not None:
+            other, om, osz = existing
+            if (
+                om == mtime
+                and osz == size
+                and os.path.isfile(other)
+                and os.path.getsize(other) > 0
+            ):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+                return other
+        _session_db[abspath] = (temp_path, mtime, size)
+        _register_atexit_once()
+    return temp_path
+
+
+def drop_cache_for(path: str) -> None:
+    """丢弃某压缩快照在本进程内的临时解压文件（若有）。非压缩路径忽略。"""
+    if not is_compressed_path(path):
+        return
+    abspath = os.path.abspath(path)
+    with _session_lock:
+        hit = _session_db.pop(abspath, None)
+    if not hit:
+        return
+    temp_path = hit[0]
+    try:
+        if os.path.isfile(temp_path):
+            os.remove(temp_path)
+    except OSError:
+        pass
+
+
+def update_dbz_note(dbz_path: str, note: str) -> str:
+    """更新 ``.dbz`` 内 ``meta.json`` 的 note 字段；返回生效文本。
+
+    只重写 zip 内 meta 与 data（从原包复制 data.db），不改扫描内容。
+    """
+    text = (note or "").strip()
+    if not os.path.isfile(dbz_path):
+        raise CompressError(
+            t(f"压缩快照不存在：{dbz_path}",
+              f"Compressed snapshot not found: {dbz_path}")
+        )
+    try:
+        with zipfile.ZipFile(dbz_path, "r") as zf:
+            try:
+                meta_raw = zf.read(_META_MEMBER)
+            except KeyError as exc:
+                raise SnapshotError(
+                    t(f"压缩快照缺少 meta.json：{dbz_path}",
+                      f"Compressed snapshot is missing meta.json: {dbz_path}")
+                ) from exc
+            try:
+                data_raw = zf.read(_DATA_MEMBER)
+            except KeyError as exc:
+                raise SnapshotError(
+                    t(f"压缩快照缺少 data.db：{dbz_path}",
+                      f"Compressed snapshot is missing data.db: {dbz_path}")
+                ) from exc
+        meta = _meta_from_json(meta_raw.decode("utf-8"))
+        meta.note = text
+        tmp = dbz_path + ".note-partial"
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        with zipfile.ZipFile(
+            tmp, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6
+        ) as zf:
+            zf.writestr(_META_MEMBER, _meta_to_json(meta))
+            zf.writestr(_DATA_MEMBER, data_raw)
+        os.replace(tmp, dbz_path)
     except (OSError, zipfile.BadZipFile) as exc:
         try:
+            tmp = dbz_path + ".note-partial"
             if os.path.exists(tmp):
                 os.remove(tmp)
         except OSError:
             pass
         raise CompressError(
-            t(f"解压快照失败：{exc}", f"Failed to decompress snapshot: {exc}")
+            t(f"写入备注失败：{exc}", f"Failed to write note: {exc}")
         ) from exc
-    return out
+    # 备注变了不改变 data.db 内容，但 mtime 变了 → 清会话解压登记
+    drop_cache_for(dbz_path)
+    return text
 
 
-def drop_cache_for(path: str) -> None:
-    """删除某压缩快照对应的解压缓存（若有）。非压缩路径忽略。"""
-    if not is_compressed_path(path) or not os.path.isfile(path):
-        # 文件已删时仍尝试按常见缓存名清扫太难；只在文件还在时精确删。
-        # 删除时文件可能仍在：调用方应在 os.remove 之前调用本函数。
-        if not is_compressed_path(path):
-            return
-    try:
-        if os.path.isfile(path):
-            key = _cache_key(path)
-            cache_path = os.path.join(cache_dir(), key)
-            if os.path.isfile(cache_path):
-                os.remove(cache_path)
-    except OSError:
-        pass
+def write_snapshot_note(path: str, note: str) -> str:
+    """把备注写入快照文件本身（``.db`` meta 表或 ``.dbz`` meta.json）。"""
+    path = os.path.abspath(path)
+    if is_compressed_path(path):
+        return update_dbz_note(path, note)
+    return write_meta_note(path, note)
