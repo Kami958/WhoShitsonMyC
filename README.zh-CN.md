@@ -30,7 +30,7 @@
 **通过对比快照，谁在涨、谁新冒出来，一眼就能看出来**
 
 <p align="center">
-  <img src="assets/screenshots/ui-zh.jpg" alt="WhoShitsOnMyC 中文界面" width="900" />
+  <img src="assets/screenshots/zh-ui.png" alt="WhoShitsOnMyC 中文界面" width="900" />
 </p>
 ## 下载
 

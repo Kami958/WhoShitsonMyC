@@ -30,7 +30,7 @@ Instead of hunting junk by gut feeling every time, scan once while space still l
 **Compare the snapshots and you can see at a glance what grew and what showed up new**
 
 <p align="center">
-  <img src="assets/screenshots/ui-en.jpg" alt="WhoShitsOnMyC — English UI" width="900" />
+  <img src="assets/screenshots/en-ui.png" alt="WhoShitsOnMyC — English UI" width="900" />
 </p>
 
 ## Download
