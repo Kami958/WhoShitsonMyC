@@ -290,8 +290,116 @@ def _parse_bool(raw: str) -> bool | None:
 
 def _yaml_quote(val: str) -> str:
     """简单双引号转义，供路径/字符串写入 YAML。"""
-    s = str(val).replace("\\", "\\\\").replace('"', '\\"')
+    s = (
+        str(val)
+        .replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .replace("\n", "\\n")
+    )
     return f'"{s}"'
+
+
+def _yaml_unquote(val: str) -> str:
+    """去掉一层引号并还原常见转义。"""
+    s = (val or "").strip()
+    if len(s) >= 2 and (
+        (s[0] == s[-1] == '"') or (s[0] == s[-1] == "'")
+    ):
+        s = s[1:-1]
+    return (
+        s.replace("\\n", "\n")
+        .replace('\\"', '"')
+        .replace("\\\\", "\\")
+    )
+
+
+def _normalize_model_options(raw) -> list[str]:
+    """模型 id 列表：接受 list，或逗号/换行分隔字符串。"""
+    items: list = []
+    if isinstance(raw, list):
+        items = raw
+    elif raw is None:
+        items = []
+    else:
+        text = str(raw).replace("\r\n", "\n").replace("\r", "\n")
+        if "," in text and "\n" not in text.strip():
+            items = text.split(",")
+        else:
+            items = re.split(r"[\n,]+", text)
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        s = str(item or "").strip()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+        if len(out) >= 500:
+            break
+    return out
+
+
+def _model_options_to_yaml(opts: list[str]) -> str:
+    return ",".join(_normalize_model_options(opts))
+
+
+def _default_enabled_tools() -> list[str]:
+    """默认启用的 tool 名（与 modules.ai.tools 目录一致）。"""
+    try:
+        from modules.ai.tools import default_enabled_tools
+
+        return list(default_enabled_tools())
+    except Exception:
+        return ["propose_pending_delete"]
+
+
+def _normalize_enabled_tools(raw, *, legacy_tools_enabled=None) -> list[str]:
+    """收成合法已启用 tool 列表。
+
+    - ``raw`` 为 list/逗号串时按目录过滤
+    - ``raw is None`` 且 ``legacy_tools_enabled is False`` → 空列表
+    - ``raw is None`` 否则 → 默认全部目录 tool
+    """
+    try:
+        from modules.ai.tools import normalize_enabled_tools, default_enabled_tools
+    except Exception:
+        # 极早期导入失败时的兜底
+        if raw is None:
+            if legacy_tools_enabled is False:
+                return []
+            return ["propose_pending_delete"]
+        if isinstance(raw, str):
+            return [p.strip() for p in raw.replace(";", ",").split(",") if p.strip()]
+        if isinstance(raw, (list, tuple)):
+            return [str(x).strip() for x in raw if str(x or "").strip()]
+        return []
+
+    if raw is None:
+        if legacy_tools_enabled is False:
+            return []
+        return list(default_enabled_tools())
+    return list(normalize_enabled_tools(raw))
+
+
+def _enabled_tools_to_yaml(names: list[str]) -> str:
+    return ",".join(_normalize_enabled_tools(names if names is not None else []))
+
+
+def _normalize_delete_blacklist(raw) -> list[dict[str, str]]:
+    """删除黑名单：委托 core.fs_delete，避免 store 膨胀正则细节。"""
+    from core.fs_delete import normalize_delete_blacklist
+
+    return normalize_delete_blacklist(raw)
+
+
+def _delete_blacklist_to_yaml(entries: list) -> str:
+    """序列化为 JSON 字符串，供 mini-YAML 标量写入。"""
+    import json
+
+    data = _normalize_delete_blacklist(entries)
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
 
 
 def _normalize_theme(raw: str) -> str:
@@ -312,62 +420,108 @@ def _normalize_snapshot_dir(raw: str | None) -> str:
     return os.path.abspath(os.path.expanduser(s))
 
 
-_KNOWN_SETTING_KEYS = frozenset(
-    {
-        "persist",
-        "scan_workers",
-        "compress_snapshots",
-        "use_mft",
-        "lang",
-        "theme",
-        "snapshot_dir",
-    }
-)
+_AI_DEFAULTS: dict = {
+    "enabled": False,
+    "base_url": "https://api.openai.com/v1",
+    "model": "",
+    "api_key": "",
+    "extra_prompt": "",
+    "consented": False,
+    "model_options": [],
+    # AI 清理：从起点往下展开的最大层数（seed 为 0）
+    "cleanup_max_depth": 3,
+    # 用户启用的 tool 名列表（逗号 YAML）；空列表 = 不注入任何 tool
+    "enabled_tools": None,  # None = 默认启用目录内全部 tool
+}
+
+# 清理深度允许范围（防手滑）
+_AI_CLEANUP_DEPTH_MIN, _AI_CLEANUP_DEPTH_MAX = 1, 8
 
 
-def _parse_setting_pair(key: str, val: str, out: dict) -> None:
-    """把一行 key/value 写入 ``out``（仅识别已知键）。"""
-    key = (key or "").strip()
-    if key not in _KNOWN_SETTING_KEYS:
+def _normalize_cleanup_max_depth(val, default: int | None = None) -> int:
+    """收成合法清理深度；失败用 default 或内置默认。"""
+    fb = (
+        int(_AI_DEFAULTS["cleanup_max_depth"])
+        if default is None
+        else int(default)
+    )
+    n = _as_int(val, None)
+    if n is None:
+        return fb
+    if n < _AI_CLEANUP_DEPTH_MIN:
+        return _AI_CLEANUP_DEPTH_MIN
+    if n > _AI_CLEANUP_DEPTH_MAX:
+        return _AI_CLEANUP_DEPTH_MAX
+    return n
+
+
+def _as_bool(val, default: bool | None = None) -> bool | None:
+    """把配置值收成 bool；无法识别时返回 default。
+
+    注意：不能用内置 ``bool("false")``（非空字符串恒为 True）。
+    """
+    if isinstance(val, bool):
+        return val
+    if val is None:
+        return default
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        return bool(val)
+    parsed = _parse_bool(str(val))
+    return default if parsed is None else parsed
+
+
+def _as_int(val, default: int | None = None) -> int | None:
+    """把配置值收成 int；失败返回 default。"""
+    if isinstance(val, bool):
+        return default
+    if isinstance(val, int):
+        return val
+    if val is None:
+        return default
+    try:
+        return int(str(val).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_str(val, default: str = "") -> str:
+    if val is None:
+        return default
+    return str(val)
+
+
+def _put_raw_pair(out: dict, key: str, val: str) -> None:
+    """解析层：任意 key 都收下，值统一去引号后的字符串。"""
+    k = (key or "").strip()
+    if not k:
         return
-    val = (val or "").strip()
-    if len(val) >= 2 and (
-        (val[0] == val[-1] == '"') or (val[0] == val[-1] == "'")
-    ):
-        inner = val[1:-1]
-        val = inner.replace('\\"', '"').replace("\\\\", "\\")
-    if key == "scan_workers":
-        try:
-            out[key] = int(val)
-        except ValueError:
-            pass
-    elif key in ("compress_snapshots", "use_mft", "persist"):
-        b = _parse_bool(val)
-        if b is not None:
-            out[key] = b
-    elif key == "lang":
-        out[key] = _normalize_lang(val)
-    elif key == "theme":
-        out[key] = _normalize_theme(val)
-    elif key == "snapshot_dir":
-        out[key] = _normalize_snapshot_dir(val)
+    out[k] = _yaml_unquote((val or "").strip())
 
 
 def _load_settings_yaml(path: str) -> dict:
-    """读 settings.yaml。
+    """读 settings.yaml，尽量原样收下键值。
 
-    支持两种形态（结果都是**扁平** dict，供 :func:`_apply_loaded` 使用）::
+    支持::
 
-        # 新：按页签分节
+        # 按节（common / ai 都是同级顶层节）
         common:
-          persist: true
           scan_workers: 4
+        ai:
+          enabled: false
+        future_tab:
+          foo: bar
 
-        # 旧：顶层扁平（兼容）
-        persist: true
+        # 旧：顶层扁平（无节名）
         scan_workers: 4
 
-    忽略注释与空行。失败返回空 dict。
+    规则：
+    - 忽略注释与空行
+    - 值一律先当字符串（去引号）；类型转换在 :func:`_apply_loaded` 里做
+    - 每个顶层节整段进 ``out[节名]`` 子 dict（``common`` 与 ``ai`` 同等对待）
+    - 旧扁平键留在顶层；:func:`_apply_loaded` 会把它们当作 common 读
+    - 未知键 / 未知节都会保留
+
+    失败或文件不存在返回空 dict。
     """
     out: dict = {}
     try:
@@ -376,7 +530,6 @@ def _load_settings_yaml(path: str) -> dict:
     except OSError:
         return out
 
-    # 当前节：None = 顶层扁平；"common" = 通用设置页
     section: str | None = None
     for raw in text.splitlines():
         if not raw.strip() or raw.lstrip().startswith("#"):
@@ -390,38 +543,65 @@ def _load_settings_yaml(path: str) -> dict:
         key = key.strip()
         val = rest.strip()
         if indent == 0 and not val and key:
-            # 顶层节名，如 common:
             section = key.lower()
+            out.setdefault(section, {})
+            if not isinstance(out[section], dict):
+                out[section] = {}
             continue
         if indent == 0 and val:
             # 旧扁平：顶层 key: value
             section = None
-            _parse_setting_pair(key, val, out)
+            _put_raw_pair(out, key, val)
             continue
         if indent > 0:
-            # 节内键：目前只认 common
-            if section == "common" or section is None:
-                _parse_setting_pair(key, val, out)
+            if section is None:
+                _put_raw_pair(out, key, val)
+            else:
+                body = out.setdefault(section, {})
+                if not isinstance(body, dict):
+                    body = {}
+                    out[section] = body
+                _put_raw_pair(body, key, val)
     return out
 
 
 def _write_settings_yaml(path: str, data: dict) -> None:
-    """写 settings.yaml（``common:`` 顶层节，对应设置页「通用」）。"""
+    """写 settings.yaml（只序列化程序管理的字段）。
+
+    解析层会保留未知键，但写回由程序覆盖整文件——扩展新设置时在这里补一行即可。
+    """
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
     snap = data.get("snapshot_dir") or ""
+    ai = data.get("ai") if isinstance(data.get("ai"), dict) else {}
+    base_url = (ai.get("base_url") or _AI_DEFAULTS["base_url"]).strip() or _AI_DEFAULTS[
+        "base_url"
+    ]
     lines = [
         "# WhoShitsOnMyC settings — auto-written when settings change",
-        "# Sections map to settings tabs (common = 通用).",
+        "# Sections map to settings tabs (common = 通用, ai = AI).",
         "# Missing keys use built-in defaults on load.",
         "common:",
         f"  scan_workers: {int(data['scan_workers'])}",
         f"  compress_snapshots: {'true' if data.get('compress_snapshots') else 'false'}",
         f"  use_mft: {'true' if data.get('use_mft') else 'false'}",
+        f"  search_memory_index: {'true' if data.get('search_memory_index', True) else 'false'}",
+        f"  log_sanitize: {'true' if data.get('log_sanitize', True) else 'false'}",
         f"  lang: {_normalize_lang(data.get('lang', 'en'))}",
         f"  theme: {_normalize_theme(data.get('theme', 'light'))}",
         f"  snapshot_dir: {_yaml_quote(snap)}",
+        f"  delete_blacklist: {_yaml_quote(_delete_blacklist_to_yaml(data.get('delete_blacklist') or []))}",
+        "ai:",
+        f"  enabled: {'true' if _as_bool(ai.get('enabled'), False) else 'false'}",
+        f"  base_url: {_yaml_quote(base_url)}",
+        f"  model: {_yaml_quote(str(ai.get('model') or ''))}",
+        f"  api_key: {_yaml_quote(str(ai.get('api_key') or ''))}",
+        f"  extra_prompt: {_yaml_quote(str(ai.get('extra_prompt') or ''))}",
+        f"  consented: {'true' if _as_bool(ai.get('consented'), False) else 'false'}",
+        f"  model_options: {_yaml_quote(_model_options_to_yaml(ai.get('model_options') or []))}",
+        f"  cleanup_max_depth: {int(_normalize_cleanup_max_depth(ai.get('cleanup_max_depth')))}",
+        f"  enabled_tools: {_yaml_quote(_enabled_tools_to_yaml(ai.get('enabled_tools') if ai.get('enabled_tools') is not None else _default_enabled_tools()))}",
         "",
     ]
     tmp = path + ".tmp"
@@ -444,35 +624,146 @@ def _delete_settings_yaml() -> None:
 _scan_workers = default_scan_workers()
 _compress_snapshots = True
 _use_mft = True  # 默认开：盘符根 + NTFS 优先 MFT，失败回退 scandir
+_search_memory_index = True  # 默认开：打开搜索时预热内存索引
+_log_sanitize = True  # 默认开：写入应用日志时脱敏绝对路径
+# None = YAML 未写明该键（可用环境变量兜底）；True/False = 用户/文件显式设定
+_log_sanitize_explicit: bool | None = None
 _lang = "en"  # 启动时 app 会按系统语言再设；YAML 优先覆盖
 _theme = "light"
 # 自定义快照目录；空串 = 使用 builtin_snapshot_dir()
 _snapshot_dir = ""
+# AI 设置（与通用设置同文件 settings.yaml 的 ai: 节）
+_ai_enabled = False
+_ai_base_url = str(_AI_DEFAULTS["base_url"])
+_ai_model = ""
+_ai_api_key = ""
+_ai_extra_prompt = ""
+_ai_consented = False
+_ai_model_options: list[str] = []
+_ai_cleanup_max_depth = int(_AI_DEFAULTS["cleanup_max_depth"])
+_ai_enabled_tools: list[str] = list(_default_enabled_tools())
+# 删除黑名单：[{path, mode}]，mode=exact|prefix|regex
+_delete_blacklist: list[dict[str, str]] = []
+
+
+def _ai_payload() -> dict:
+    """当前 AI 设置（写 YAML / 模块共用）。"""
+    base = (_ai_base_url or "").strip() or _AI_DEFAULTS["base_url"]
+    return {
+        "enabled": bool(_ai_enabled),
+        "base_url": base,
+        "model": (_ai_model or "").strip(),
+        "api_key": _ai_api_key or "",
+        "extra_prompt": _ai_extra_prompt or "",
+        "consented": bool(_ai_consented),
+        "model_options": list(_ai_model_options or []),
+        "cleanup_max_depth": int(_ai_cleanup_max_depth),
+        "enabled_tools": list(_ai_enabled_tools or []),
+    }
+
+
+def _apply_ai_loaded(raw: dict | None) -> None:
+    """用 YAML 里的 ai 节覆盖内存 AI 设置（类型转换在此完成）。"""
+    global _ai_enabled, _ai_base_url, _ai_model, _ai_api_key
+    global _ai_extra_prompt, _ai_consented, _ai_model_options
+    global _ai_cleanup_max_depth, _ai_enabled_tools
+    if not isinstance(raw, dict) or not raw:
+        return
+    if "enabled" in raw:
+        b = _as_bool(raw.get("enabled"))
+        if b is not None:
+            _ai_enabled = b
+    if "base_url" in raw:
+        base = _as_str(raw.get("base_url")).strip()
+        _ai_base_url = base or _AI_DEFAULTS["base_url"]
+    if "model" in raw:
+        _ai_model = _as_str(raw.get("model")).strip()
+    if "api_key" in raw:
+        _ai_api_key = _as_str(raw.get("api_key"))
+    if "extra_prompt" in raw:
+        _ai_extra_prompt = _as_str(raw.get("extra_prompt"))
+    if "consented" in raw:
+        b = _as_bool(raw.get("consented"))
+        if b is not None:
+            _ai_consented = b
+    if "model_options" in raw:
+        _ai_model_options = _normalize_model_options(raw.get("model_options"))
+    if "cleanup_max_depth" in raw:
+        _ai_cleanup_max_depth = _normalize_cleanup_max_depth(
+            raw.get("cleanup_max_depth")
+        )
+    # enabled_tools 优先；旧 tools_enabled=false 映射为空列表
+    if "enabled_tools" in raw:
+        _ai_enabled_tools = _normalize_enabled_tools(raw.get("enabled_tools"))
+    elif "tools_enabled" in raw:
+        legacy = _as_bool(raw.get("tools_enabled"))
+        if legacy is False:
+            _ai_enabled_tools = []
+        elif legacy is True:
+            _ai_enabled_tools = list(_default_enabled_tools())
+
+
+def _common_view(data: dict) -> dict:
+    """取出通用设置视图：优先 ``common`` 节，再并入旧顶层扁平键。"""
+    common: dict = {}
+    if isinstance(data.get("common"), dict):
+        common.update(data["common"])
+    for k, v in data.items():
+        if k == "common" or isinstance(v, dict):
+            continue
+        # 旧扁平键：节里没有时才用顶层
+        if k not in common:
+            common[k] = v
+    return common
 
 
 def _apply_loaded(data: dict) -> None:
     """用 YAML 字典覆盖内存设置。
 
     - 文件不存在 / 空 dict：全部保持调用前的默认值。
-    - 文件存在：只覆盖出现的键；未写的项继续用默认（或调用前已设值）。
+    - 通用字段读 ``common`` 节；旧扁平顶层键同样生效。
+    - AI 字段读 ``ai`` 节。
+    - 只消费程序认识的键；未知键/节保留在解析结果里但不使用。
     - 旧文件中的 ``persist`` 键忽略（已不再使用手动持久化开关）。
     """
-    global _scan_workers, _compress_snapshots, _use_mft
-    global _lang, _theme, _snapshot_dir
+    global _scan_workers, _compress_snapshots, _use_mft, _search_memory_index
+    global _log_sanitize, _log_sanitize_explicit
+    global _lang, _theme, _snapshot_dir, _delete_blacklist
     if not data:
         return
-    if "scan_workers" in data:
-        _scan_workers = _clamp_workers(data["scan_workers"])
-    if "compress_snapshots" in data:
-        _compress_snapshots = bool(data["compress_snapshots"])
-    if "use_mft" in data:
-        _use_mft = bool(data["use_mft"])
-    if "lang" in data:
-        _lang = _normalize_lang(data["lang"])
-    if "theme" in data:
-        _theme = _normalize_theme(data["theme"])
-    if "snapshot_dir" in data:
-        _snapshot_dir = _normalize_snapshot_dir(data["snapshot_dir"])
+    common = _common_view(data)
+    if "scan_workers" in common:
+        n = _as_int(common.get("scan_workers"))
+        if n is not None:
+            _scan_workers = _clamp_workers(n)
+    if "compress_snapshots" in common:
+        b = _as_bool(common.get("compress_snapshots"))
+        if b is not None:
+            _compress_snapshots = b
+    if "use_mft" in common:
+        b = _as_bool(common.get("use_mft"))
+        if b is not None:
+            _use_mft = b
+    if "search_memory_index" in common:
+        b = _as_bool(common.get("search_memory_index"))
+        if b is not None:
+            _search_memory_index = b
+    if "log_sanitize" in common:
+        b = _as_bool(common.get("log_sanitize"))
+        if b is not None:
+            _log_sanitize = b
+            _log_sanitize_explicit = b
+    if "lang" in common:
+        _lang = _normalize_lang(_as_str(common.get("lang"), "en"))
+    if "theme" in common:
+        _theme = _normalize_theme(_as_str(common.get("theme"), "light"))
+    if "snapshot_dir" in common:
+        _snapshot_dir = _normalize_snapshot_dir(_as_str(common.get("snapshot_dir"), ""))
+    if "delete_blacklist" in common:
+        # _put_raw_pair 已去引号，此处多为 JSON 字符串
+        _delete_blacklist = _normalize_delete_blacklist(common.get("delete_blacklist"))
+    if isinstance(data.get("ai"), dict):
+        _apply_ai_loaded(data.get("ai"))
 
 
 def _settings_payload() -> dict:
@@ -481,9 +772,13 @@ def _settings_payload() -> dict:
         "scan_workers": _scan_workers,
         "compress_snapshots": _compress_snapshots,
         "use_mft": _use_mft,
+        "search_memory_index": _search_memory_index,
+        "log_sanitize": _log_sanitize,
         "lang": _lang,
         "theme": _theme,
         "snapshot_dir": _snapshot_dir,
+        "delete_blacklist": list(_delete_blacklist or []),
+        "ai": _ai_payload(),
     }
 
 
@@ -548,6 +843,60 @@ def set_use_mft(enabled: bool) -> bool:
         _use_mft = new
         _persist()
     return _use_mft
+
+
+def get_search_memory_index() -> bool:
+    """是否在打开搜索时预热内存索引（默认 True）。"""
+    return _search_memory_index
+
+
+def set_search_memory_index(enabled: bool) -> bool:
+    """设置是否使用搜索内存索引；值变化时写 YAML。"""
+    global _search_memory_index
+    new = bool(enabled)
+    if new != _search_memory_index:
+        _search_memory_index = new
+        _persist()
+    return _search_memory_index
+
+
+def get_delete_blacklist() -> list[dict[str, str]]:
+    """删除黑名单副本：``[{path, mode}, ...]``。"""
+    return [dict(x) for x in (_delete_blacklist or [])]
+
+
+def set_delete_blacklist(entries) -> list[dict[str, str]]:
+    """规范化并写入删除黑名单；值变化时落盘。"""
+    global _delete_blacklist
+    new = _normalize_delete_blacklist(entries)
+    if new != list(_delete_blacklist or []):
+        _delete_blacklist = new
+        _persist()
+    return get_delete_blacklist()
+
+
+def get_log_sanitize() -> bool:
+    """写入应用日志时是否脱敏绝对路径（默认 True）。"""
+    return bool(_log_sanitize)
+
+
+def is_log_sanitize_explicit() -> bool:
+    """``settings.yaml`` / 设置页是否显式写过 ``log_sanitize``。
+
+    False 时启动可用环境变量 ``WSMC_LOG_SANITIZE`` 兜底。
+    """
+    return _log_sanitize_explicit is not None
+
+
+def set_log_sanitize(enabled: bool) -> bool:
+    """设置日志路径脱敏；值变化时写 YAML（此后视为显式设定）。"""
+    global _log_sanitize, _log_sanitize_explicit
+    new = bool(enabled)
+    if new != _log_sanitize or _log_sanitize_explicit is None:
+        _log_sanitize = new
+        _log_sanitize_explicit = new
+        _persist()
+    return _log_sanitize
 
 
 def get_lang() -> str:
@@ -799,10 +1148,13 @@ def apply_settings(
     ``progress`` 会在迁移过程中被调用（见 :func:`migrate_snapshots`）。
 
     可识别键：``scan_workers``、``compress_snapshots``、``use_mft``、
-    ``snapshot_dir``（空串=内置目录）。缺省键保持当前值。
+    ``search_memory_index``、``log_sanitize``、``snapshot_dir``（空串=内置目录）、
+    ``delete_blacklist``。
+    缺省键保持当前值。
     """
-    global _scan_workers, _compress_snapshots, _use_mft
-    global _snapshot_dir
+    global _scan_workers, _compress_snapshots, _use_mft, _search_memory_index
+    global _log_sanitize, _log_sanitize_explicit
+    global _snapshot_dir, _delete_blacklist
 
     if not isinstance(payload, dict):
         payload = {}
@@ -816,6 +1168,13 @@ def apply_settings(
         _compress_snapshots = bool(payload["compress_snapshots"])
     if "use_mft" in payload:
         _use_mft = bool(payload["use_mft"])
+    if "search_memory_index" in payload:
+        _search_memory_index = bool(payload["search_memory_index"])
+    if "log_sanitize" in payload:
+        _log_sanitize = bool(payload["log_sanitize"])
+        _log_sanitize_explicit = _log_sanitize
+    if "delete_blacklist" in payload:
+        _delete_blacklist = _normalize_delete_blacklist(payload.get("delete_blacklist"))
     if "snapshot_dir" in payload:
         raw = _normalize_snapshot_dir(payload.get("snapshot_dir"))
         if not raw:
@@ -854,17 +1213,94 @@ def reset_settings_to_defaults(*, lang: str | None = None) -> dict:
     不删除快照文件，仅清空自定义快照目录配置（回到内置目录）。
     ``lang`` 由调用方传入冷启动默认语言（系统语言）；省略则 ``en``。
     """
-    global _scan_workers, _compress_snapshots, _use_mft
-    global _lang, _theme, _snapshot_dir
+    global _scan_workers, _compress_snapshots, _use_mft, _search_memory_index
+    global _log_sanitize, _log_sanitize_explicit
+    global _lang, _theme, _snapshot_dir, _delete_blacklist
+    global _ai_enabled, _ai_base_url, _ai_model, _ai_api_key
+    global _ai_extra_prompt, _ai_consented, _ai_model_options
+    global _ai_cleanup_max_depth, _ai_enabled_tools
 
     _scan_workers = default_scan_workers()
     _compress_snapshots = True
     _use_mft = True
+    _search_memory_index = True
+    _log_sanitize = True
+    _log_sanitize_explicit = None
     _theme = "light"
     _snapshot_dir = ""
+    _delete_blacklist = []
     _lang = _normalize_lang(lang) if lang is not None else "en"
+    _ai_enabled = False
+    _ai_base_url = str(_AI_DEFAULTS["base_url"])
+    _ai_model = ""
+    _ai_api_key = ""
+    _ai_extra_prompt = ""
+    _ai_consented = False
+    _ai_model_options = []
+    _ai_cleanup_max_depth = int(_AI_DEFAULTS["cleanup_max_depth"])
+    _ai_enabled_tools = list(_default_enabled_tools())
     _delete_settings_yaml()
     return settings_dict()
+
+
+def get_ai_settings() -> dict:
+    """返回当前 AI 设置副本。"""
+    return _ai_payload()
+
+
+def set_ai_settings(payload: dict | None = None, **kwargs) -> dict:
+    """合并写入 AI 设置并落盘；返回最新副本。
+
+    - 缺省键保留原值
+    - ``api_key`` 空串且未带 ``clear_key`` 时保留原 key
+    - ``clear_key=True`` 且 key 为空时清空
+    """
+    global _ai_enabled, _ai_base_url, _ai_model, _ai_api_key
+    global _ai_extra_prompt, _ai_consented, _ai_model_options
+    global _ai_cleanup_max_depth, _ai_enabled_tools
+
+    body = dict(payload or {})
+    body.update(kwargs)
+
+    if "enabled" in body:
+        _ai_enabled = bool(body.get("enabled"))
+    if "base_url" in body and body.get("base_url") is not None:
+        base = str(body.get("base_url") or "").strip()
+        _ai_base_url = base or _AI_DEFAULTS["base_url"]
+    if "model" in body and body.get("model") is not None:
+        _ai_model = str(body.get("model") or "").strip()
+    if "extra_prompt" in body and body.get("extra_prompt") is not None:
+        _ai_extra_prompt = str(body.get("extra_prompt") or "")
+    if "consented" in body:
+        _ai_consented = bool(body.get("consented"))
+    if "model_options" in body and body.get("model_options") is not None:
+        _ai_model_options = _normalize_model_options(body.get("model_options"))
+    if "cleanup_max_depth" in body and body.get("cleanup_max_depth") is not None:
+        _ai_cleanup_max_depth = _normalize_cleanup_max_depth(
+            body.get("cleanup_max_depth"), default=_ai_cleanup_max_depth
+        )
+    if "enabled_tools" in body:
+        _ai_enabled_tools = _normalize_enabled_tools(body.get("enabled_tools"))
+    elif "tools_enabled" in body:
+        # 兼容旧客户端布尔开关
+        if bool(body.get("tools_enabled")):
+            _ai_enabled_tools = list(_default_enabled_tools())
+        else:
+            _ai_enabled_tools = []
+
+    if "api_key" in body:
+        key = body.get("api_key")
+        if key is None:
+            pass
+        else:
+            key_s = str(key).strip()
+            if key_s:
+                _ai_api_key = key_s
+            elif body.get("clear_key"):
+                _ai_api_key = ""
+
+    _persist()
+    return _ai_payload()
 
 
 def app_data_dir() -> str:
@@ -963,6 +1399,9 @@ def settings_dict() -> dict:
         "scan_workers": _scan_workers,
         "compress_snapshots": _compress_snapshots,
         "use_mft": _use_mft,
+        "search_memory_index": _search_memory_index,
+        "log_sanitize": bool(_log_sanitize),
+        "log_sanitize_explicit": _log_sanitize_explicit is not None,
         "settings_path": settings_path(),
         "settings_file_exists": os.path.isfile(settings_path()),
         "app_data_dir": app_data_dir(),
@@ -972,6 +1411,9 @@ def settings_dict() -> dict:
         "snapshot_dir_configured": _snapshot_dir,
         "snapshot_dir_builtin": builtin_snapshot_dir(),
         "snapshot_dir_is_custom": bool(_snapshot_dir),
+        "delete_blacklist": get_delete_blacklist(),
+        # AI 配置与通用设置同文件；模块层再决定是否暴露明文 key
+        "ai": _ai_payload(),
     }
 
 

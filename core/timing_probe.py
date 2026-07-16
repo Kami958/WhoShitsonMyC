@@ -4,8 +4,9 @@
 
 - 打包后的 exe（``sys.frozen``）→ 直接返回空实现；
 - 源码运行且未安装/未启用 ``dev.scan_timing`` → 空实现；
-- 源码 + ``WSMC_SCAN_TIMING=1`` → 使用 ``dev.scan_timing`` 真计时。
+- 源码 +（``applog`` DEBUG 或 ``WSMC_SCAN_TIMING=1``）→ ``dev.scan_timing`` 真计时。
 
+汇总经 ``applog`` 输出，与应用日志同一套等级体系。
 ``build.py`` 另有 ``--exclude-module dev``，正常不会把开发包打进 exe。
 """
 
@@ -56,7 +57,6 @@ def start_scan_timer(
         return _NULL
     try:
         from dev.scan_timing import start_timer  # type: ignore[import-not-found]
-    # 打包不会 dev 包因此必定报错，不会进入计时
     except ImportError:
         return _NULL
     return start_timer(

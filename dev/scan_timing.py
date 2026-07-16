@@ -1,18 +1,16 @@
-"""扫描分段计时（仅开发用）。
+"""扫描分段计时（开发用，输出并入 ``core.applog``）。
 
-启用方式（源码运行）::
+启用（源码；``sys.frozen`` exe 永远关）::
 
-    set WSMC_SCAN_TIMING=1
-    python app.py
+    $env:WSMC_LOG_LEVEL = "DEBUG"   # 推荐：日志 + 计时同一开关
+    # 或兼容旧习惯：
+    $env:WSMC_SCAN_TIMING = "1"
 
-可选把每次结果追加到 JSONL::
+可选 JSONL（机器读，与设置页缓冲独立）::
 
-    set WSMC_SCAN_TIMING_LOG=dict\\scan-timing.jsonl
+    $env:WSMC_SCAN_TIMING_LOG = "dict\\scan-timing.jsonl"
 
-关闭：不设环境变量，或设为 0。
-
-打包后的 exe：``sys.frozen`` 为真时一律禁用；``build.py`` 还会
-``--exclude-module dev``，正常不会打进包。
+``build.py --exclude-module dev``，正常不打进包。
 """
 
 from __future__ import annotations
@@ -25,25 +23,27 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from core import applog
+
 
 def is_enabled() -> bool:
     """是否启用扫描计时。
 
-    规则：
-    - PyInstaller 冻结环境（正式 exe）→ 永远 False；
-    - 否则看环境变量 ``WSMC_SCAN_TIMING`` 是否为 1/true/yes/on。
+    - 正式 exe → False
+    - ``WSMC_SCAN_TIMING`` 为真 → True（兼容）
+    - 否则与 applog 一致：门槛允许 DEBUG 时启用
     """
-    # 检查是否是打包的
     if getattr(sys, "frozen", False):
         return False
-    # 检查环境变量是否开启
     flag = os.environ.get("WSMC_SCAN_TIMING", "").strip().lower()
-    return flag in ("1", "true", "yes", "on")
+    if flag in ("1", "true", "yes", "on"):
+        return True
+    return applog.is_enabled("DEBUG")
 
 
 @dataclass
 class ScanTimer:
-    """一次扫描的分段计时器（线程安全的 mark）。"""
+    """一次扫描的分段计时器（线程安全）。"""
 
     root: str = ""
     workers: int = 0
@@ -56,7 +56,6 @@ class ScanTimer:
     _active_spans: dict[str, float] = field(default_factory=dict)
 
     def mark(self, name: str) -> None:
-        """记录一个绝对时间点（距 start 的秒数）。"""
         with self._lock:
             self._marks[name] = time.perf_counter() - self._t0
 
@@ -78,11 +77,9 @@ class ScanTimer:
             self._meta.update(kwargs)
 
     def finish(self, *, status: str = "ok") -> dict[str, Any]:
-        """结束并汇总；打印到 stderr，可选写 JSONL。返回报表 dict。"""
         total = time.perf_counter() - self._t0
         with self._lock:
             meta = dict(self._meta)
-            # MFT 等路径会在 set_meta(workers=…) 写入实际并发；优先用它
             workers_out = meta.get("workers", self.workers)
             report: dict[str, Any] = {
                 "status": status,
@@ -94,7 +91,6 @@ class ScanTimer:
                 "marks_s": {k: round(v, 4) for k, v in sorted(self._marks.items())},
                 "meta": meta,
             }
-            # 吞吐：files/s、entries/s（文件+目录），total_s>0 且有计数时写入
             if total > 0:
                 fc = meta.get("file_count")
                 dc = meta.get("dir_count")
@@ -112,8 +108,6 @@ class ScanTimer:
 
 
 class _NullTimer:
-    """禁用时的空实现，方法全是 no-op，避免业务代码分支爆炸。"""
-
     root: str = ""
     workers: int = 0
     compress_enabled: bool = False
@@ -143,7 +137,6 @@ def start_timer(
     workers: int = 0,
     compress_enabled: bool = False,
 ) -> ScanTimer | _NullTimer:
-    """若启用则返回真计时器，否则返回空实现。"""
     if not is_enabled():
         return _NULL
     return ScanTimer(
@@ -153,8 +146,7 @@ def start_timer(
     )
 
 
-def _emit_report(report: dict[str, Any]) -> None:
-    """stderr 人类可读一行摘要 + 可选 JSONL。"""
+def _format_summary(report: dict[str, Any]) -> str:
     spans = report.get("spans_s") or {}
     meta = report.get("meta") or {}
     parts = [
@@ -187,7 +179,6 @@ def _emit_report(report: dict[str, Any]) -> None:
         parts.append(f"files={meta['file_count']}")
     if "dir_count" in meta:
         parts.append(f"dirs={meta['dir_count']}")
-    # 吞吐：优先 files/s；有 entries/s 时一并打出
     if "files_per_s" in report:
         parts.append(f"files/s={report['files_per_s']}")
     if "entries_per_s" in report:
@@ -197,7 +188,22 @@ def _emit_report(report: dict[str, Any]) -> None:
     if "dbz_bytes" in meta:
         parts.append(f"dbz={meta['dbz_bytes']}B")
     parts.append(f"root={report.get('root')!r}")
-    print(" ".join(str(p) for p in parts), file=sys.stderr)
+    return " ".join(str(p) for p in parts)
+
+
+def _emit_report(report: dict[str, Any]) -> None:
+    """唯一出口：applog；可选 JSONL。"""
+    line = _format_summary(report)
+    status = str(report.get("status") or "ok")
+    if status in ("error", "compress_failed"):
+        applog.warn(line)
+    elif status == "cancelled":
+        applog.info(line)
+    elif applog.is_enabled("DEBUG"):
+        applog.debug(line)
+    else:
+        # 仅 WSMC_SCAN_TIMING=1 且门槛仍是 INFO 时，保证摘要可见
+        applog.info(line)
 
     log_path = os.environ.get("WSMC_SCAN_TIMING_LOG", "").strip()
     if not log_path:
@@ -210,4 +216,4 @@ def _emit_report(report: dict[str, Any]) -> None:
         with open(log_path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(report, ensure_ascii=False) + "\n")
     except OSError as exc:
-        print(f"[scan-timing] write log failed: {exc}", file=sys.stderr)
+        applog.warn(f"[scan-timing] write log failed: {exc}")

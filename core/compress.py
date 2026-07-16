@@ -208,6 +208,37 @@ def clear_session_cache() -> None:
             pass
 
 
+def is_session_cached(path: str) -> bool:
+    """``.dbz`` 是否已有本进程有效临时 ``.db``（可直接复用，无需再解压）。
+
+    非压缩路径视为已就绪（无需解压）。路径不存在 / 缓存失效返回 False。
+    """
+    if not path:
+        return False
+    if not is_compressed_path(path):
+        return True
+    if not os.path.isfile(path):
+        return False
+    abspath = os.path.abspath(path)
+    try:
+        st = os.stat(abspath)
+        mtime = float(st.st_mtime)
+        size = int(st.st_size)
+    except OSError:
+        return False
+    with _session_lock:
+        hit = _session_db.get(abspath)
+        if hit is None:
+            return False
+        temp_path, hit_mtime, hit_size = hit
+        return (
+            hit_mtime == mtime
+            and hit_size == size
+            and os.path.isfile(temp_path)
+            and os.path.getsize(temp_path) > 0
+        )
+
+
 def ensure_db_path(path: str) -> str:
     """保证返回可直接给 SQLite / Diff 使用的 ``.db`` 路径。
 

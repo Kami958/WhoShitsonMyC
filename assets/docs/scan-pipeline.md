@@ -139,7 +139,7 @@ newScan()
 | `tree` | 紧凑表直通建树；平铺 merge；栈 DFS 分 sid + 反向上卷；`on_batch` |
 | `scan` | 编排；异步写库线程；`gc.disable` 建树段；失败 `MftUnavailable` |
 
-计时（`WSMC_SCAN_TIMING=1`）：`mft_read` / `mft_parse` / `mft_parse_wait` / `mft_tree`（含 merge/bfs/agg/emit）/ `mft_write_join` / `drain_rows` / `finalize`；`backend=mft`。
+计时（`WSMC_LOG_LEVEL=DEBUG` 或 `WSMC_SCAN_TIMING=1`，经 applog）：`mft_read` / `mft_parse` / `mft_parse_wait` / `mft_tree`（含 merge/bfs/agg/emit）/ `mft_write_join` / `drain_rows` / `finalize`；`backend=mft`。
 
 ## `snapshot.py`
 
@@ -166,11 +166,13 @@ PRAGMA：`synchronous=OFF`, `journal_mode=MEMORY`, `temp_store=MEMORY`。
 - **Entry**：文件 size=自身；目录 size=聚合逻辑大小；`mtime` 秒  
 - **SnapshotMeta**：`format_version=3`，含 `note`；v1/v2 可列举、不可对比  
 
-## 开发计时（可选）
+## 开发计时（可选，并入 applog）
 
 - 入口：`core/timing_probe.py`（`sys.frozen` 或无 `dev` → 空操作）  
 - 实现：`dev/scan_timing.py`（`build.py --exclude-module dev`）  
-- 开启：`$env:WSMC_SCAN_TIMING=1`（可选 `WSMC_SCAN_TIMING_LOG`）  
+- 开启：日志门槛 DEBUG（`WSMC_LOG_LEVEL=DEBUG` / `WSMC_DEBUG=1`），或兼容 `$env:WSMC_SCAN_TIMING=1`  
+- 输出：经 `core.applog`（不再单独 print）；可选 `WSMC_SCAN_TIMING_LOG` JSONL  
+- 说明见 [Designed.md](Designed.md)「应用日志」  
 
 | 字段 | 含义 |
 |------|------|

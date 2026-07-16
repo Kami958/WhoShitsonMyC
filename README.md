@@ -1,11 +1,11 @@
 # WhoShitsOnMyC
 
-[English](README.md) | [中文](README.zh-CN.md)
+[中文](README.md) | [English](README.en.md)
 
 <div align="center">
   <img src="logo.png" width="72" alt="WhoShitsOnMyC" />
   <h1>WhoShitsOnMyC</h1>
-  <p><strong>Just cleaned your C: drive — and free space mysteriously vanished again a few days later? Take a snapshot, then find out what ate the space</strong></p>
+  <p><strong>C 盘刚清完，过几天又莫名少了一大截？用它记录找出这段时间到底是谁在吃空间</strong></p>
 </div>
 
 
@@ -18,120 +18,121 @@
 
 ---
 
-## Why this exists
+## 它解决什么问题
 
-You clean up C: with a disk cleaner and everything stays fine for a while. Then one day a huge chunk of free space is gone, and you have no idea where the new junk came from. Open the cleaner again and it’s still the same “maybe safe to delete” list — more guessing. **You never know who snuck back and took a dump after the last cleanup**
+用清理软件清完 C 盘，通常能安静一阵子。可某天空间突然少了一大截，新垃圾从哪来却完全没头绪。再打开清理软件，还是一堆「也许能删」的项目，只能继续瞎猜，**你永远不知道是谁在上次清理过后偷偷拉💩**
 
-**WhoShitsOnMyC** is built for that exact problem
+**WhoShitsOnMyC** 正是为此而生
 
-> **Compared with last time, what changed?**
+> **和上次比，谁变了？**
 
-Instead of hunting junk by gut feeling every time, scan once while space still looks normal to get an older snapshot, then scan again after usage grows to get a newer one.
-**Compare the snapshots and you can see at a glance what grew and what showed up new**
+与其每次都靠感觉找垃圾，不如在空间正常时先扫描得到一份旧快照，等空间增长后再扫一遍得到新快照
+**通过对比快照，谁在涨、谁新冒出来，一眼就能看出来**
 
 <p align="center">
-  <img src="assets/screenshots/en-ui.png" alt="WhoShitsOnMyC — English UI" width="900" />
+  <img src="assets/screenshots/zh-ui.png" alt="WhoShitsOnMyC 中文界面" width="900" />
 </p>
 
-## Download
+## 特点
 
-Grab a build from [Releases](https://github.com/Kami958/WhoShitsonMyC/releases)
+- **轻量单文件**：一个 exe 即可运行，无安装向导、无常驻服务
+- **完整卸载**：设置里一键清理本机数据；程序本体自行删除即可
+- **可选 AI**： **我们非常体会您的洁癖心理，不希望什么工具都无脑接入AI，我们完全理解您的需求只是一个朴实无华一个小工具，** 主线默认就是不含 AI 的轻量版；另提供含 AI 的实验版按需下载。当前的AI功能并未做完，只完成了大约10%的开发，请不要期待它能有多大帮助
 
-| Requirement | Notes |
+| 功能差异项目 | 默认版 | 含 AI |
+| --- | :---: | :---: |
+| 快照扫描 / 对比 / 搜索 | ✓ | ✓ |
+| 待删除（回收站 / 彻底删除） | ✓ | ✓ |
+| AI 对话、右键问 AI、提议加入待删除（实验，约 10%） | — | ✓ |
+| 体积 | 更小 | 较大 |
+
+## 快速上手
+
+1. **推荐以管理员身份运行**，不仅能在扫描根盘符的时候提升速度，还能扫描部分隐藏路径
+2. 点 **＋ 新建扫描**，选择一个目录，例如 `C:\`。扫描完成后，你会得到一份快照
+3. 当空间又被吃掉时，请对**同一个目录**再扫描一次
+4. 把较早的那份设为 **基准**，较新的设为 **当前**，然后点 **对比**
+5. 对比结果会显示在下方：红色表示增长，绿色表示缩小
+
+侧栏下方还可以：
+
+- **打开 / 刷新 / 导入快照**：打开当前快照目录、刷新列表，或从其它位置导入快照
+- **设置**：调整扫描线程、是否压缩快照、是否尝试 MFT、快照存放目录等
+- **语言 / 主题**：在中文与英文、暗色与浅色之间切换
+
+## 下载
+
+到 [Releases](https://github.com/Kami958/WhoShitsonMyC/releases) 下载
+
+| 项目依赖 | 说明 |
 | --- | --- |
-| OS | Windows 10 / 11 |
-| WebView2 | The UI needs [Microsoft Edge WebView2](https://developer.microsoft.com/microsoft-edge/webview2/). **Windows 11 and most Windows 10 PCs already have it.** If it’s missing, the app will tell you and open the download page — install the Evergreen runtime, then start the app again |
+| 系统 | Windows 10 / 11 |
+| WebView2 | 界面需要 [Microsoft Edge WebView2](https://developer.microsoft.com/microsoft-edge/webview2/)。**Windows 11 和多数 Windows 10 一般已经预装**；若缺失，启动时会提示并打开下载页，装好常青版再打开程序 |
 
-## Quick start (recommended: run as administrator)
+## 常见问题
 
+> 遇到bug？
+>
+> 本工具由grok4.5与Fable5混合开发，~~遇到问题推荐发送email询问马斯克和Dario Amodei如何解决~~，推荐将代码发给AI来解决问题，当然也可以提出issue
 
-1. **Run as administrator** — faster drive-root scans, and some hidden paths become readable
-2. Click **＋ New scan**, pick a folder such as `C:\`. When the scan finishes, you get a snapshot
-3. When free space is eaten again, scan the **same** folder once more
-4. Set the older snapshot as **Base**, the newer one as **Current**, then click **Compare**
-5. Results show up below: red means growth, green means shrink
+**Q：扫描进度很久是怎么回事？**  
+**A：扫描时间主要取决于你选择的路径下有多少文件和电脑配置**
 
-At the bottom of the sidebar you can also:
+> 以作者笔记本为例：约百万级文件的盘符根、M.2 固态上，开启 MFT 时整次扫描大约十数秒量级（视机器与冷热缓存而变）
 
-- **Open / refresh / import snapshots**: open the current snapshot folder, refresh the list, or import snapshots from elsewhere
-- **Settings**: adjust scan threads, snapshot compression, MFT attempt, snapshot folder, and more
-- **Language / theme**: switch between Chinese and English, dark and light
+- 如果扫描目录在机械硬盘上，请到设置页把扫描线程数设为 1 
 
-## Data & uninstall
+- **扫描根盘符（如 `C:\`、`D:\`）时**，在设置项中**打开或关闭** [尝试MFT扫描] 或许会有帮助（需要管理员身份）
+- 若仍然有问题，欢迎提交 issue
 
-### What data files we leave behind
+**Q：为什么我连续扫描两次，容量变化很大？**
 
-> Yes — we left a little 💩 on your C: drive too
+**A：** 可以考虑到这几种情况
 
-Config files and default snapshots created by the app live here by default:
+1. 两次扫描是在不同运行模式下进行的（**非管理员、管理员**），部分路径需要管理员的权限才能读取
+2. 的确在这两次扫描的间隔之间，某些其他软件生成了内容，具体可查看对比树
+
+**Q：对比树上出现「不可比较」？**  
+**A：** 部分路径可能因为权限等原因没有扫描完整，所以无法参与对比
+
+**Q：启动时提示缺少 WebView2？**  
+**A：** 请先安装 [WebView2 常青版](https://developer.microsoft.com/microsoft-edge/webview2/)，然后再打开程序
+
+## 数据与卸载
+
+### 我们产生了什么数据文件
+
+> 是的，我们也在你的 C 盘底下拉了一点 💩
+
+软件在本机产生的配置文件与默认快照，默认都存放在：
 
 `%LOCALAPPDATA%\WhoShitsOnMyC`
 
-Paste that path into File Explorer’s address bar and press Enter to open it
+你可以把这条路径粘贴到资源管理器地址栏后回车打开
 
-| What | Where |
+| 内容 | 位置 |
 | --- | --- |
-| Snapshots | By default in the `snapshots` folder under the path above; you can change this to another location in Settings |
-| Settings | Stored as a config file in the same folder; saved after you change options and click **Done** |
+| 快照 | 默认在上述目录下的 `snapshots` 文件夹中；你也可以在设置里改成其它存放位置 |
+| 设置 | 同样写在上述目录中的配置文件里；你在设置页改过选项并点「完成」后会保存 |
 
-### How to uninstall WhoShitsOnMyC?
+### 如何卸载WhoShitsOnMyC？
 
-**Open Settings → General, click the red Uninstall, then confirm in the dialog whether to delete data and finish cleanup**
+**打开 设置 → 通用，点红色「卸载」，在弹窗中确认是否删除数据后完成清理**
 
-- When data deletion is on, the app clears config and snapshots under the default data folder
-- **If you migrated the snapshot folder, that migrated location still needs to be deleted manually!**
-- After cleanup, delete the exe yourself
-
-## FAQ
-
-**Q: Why does scanning take so long?**  
-**A: Scan time mainly depends on how many files sit under the path you chose, and on your machine**
-
-> Ballpark: volume-root scan of ~1M files on an M.2 SSD with MFT on is often around the low-teens of seconds (machine and cold/warm cache vary)
-
-- If the scan path is on a hard disk drive, set the scan thread count to **1** in Settings
-
-- **When scanning a drive root** (e.g. `C:\`, `D:\`), turning **Try MFT scan** on or off in Settings may help (administrator required)
-- Still stuck? Open an issue
-
-**Q: Why do two scans in a row show a large size difference?**
-
-**A:** Common cases:
-
-1. The two scans ran under different elevation modes (**non-admin vs admin**); some paths need administrator rights to read
-2. Other software really wrote data between the two scans — check the compare tree for details
-
-**Q: Why does the compare tree show “Incomparable”?**  
-**A:** Some paths may not have been scanned fully — often because of permissions — so they cannot take part in the compare
-
-**Q: The app says WebView2 is missing**  
-**A:** Install the [WebView2 Evergreen runtime](https://developer.microsoft.com/microsoft-edge/webview2/), then start the app again
+- 删除数据时，软件会清掉默认数据目录里的配置与快照
+- **如果您迁移过快照存放位置，则该迁移位置仍需您手动删除！**
+- 清理完成后，再自行删除exe程序即可
 
 
 
----
+## 开发者
 
-## Build from source
+源码运行、测试与打包见 [开发者文档](assets/docs/Designed.md)
 
-Requires **Python 3.10+**
+## 许可
 
-```bash
-pip install -r requirements.txt
-python app.py
-python -m pytest tests/ -q
+[GNU GPLv3](LICENSE)
 
-pip install pyinstaller
-python build.py
-```
-
-## Developers
-
-For project layout and internals, see the [developer docs](assets/docs/Designed.md)
-
-## License
-
-[MIT](LICENSE)
-
-## Links
+## 友情链接
 
 [LINUX DO](https://linux.do/)

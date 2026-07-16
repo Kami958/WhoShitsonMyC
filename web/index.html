@@ -9,15 +9,17 @@
 <body>
   <div class="layout">
     <!-- 左侧栏：新建扫描 + 快照列表 -->
-    <aside class="sidebar">
+    <aside class="sidebar" id="sidebar">
       <div class="side-head">
         <button id="newScanBtn" class="btn-primary" data-i18n="newScan">＋ 新建扫描</button>
+        <!-- 磁盘清理入口暂不接入：隐藏按钮，逻辑见 web/js/ai.js 中 disk cleanup 段 -->
+        <button id="diskCleanupBtn" class="btn-plain side-disk-cleanup hidden" type="button" hidden data-module="ai" data-i18n="diskCleanupBtn" data-i18n-title="diskCleanupTitle" title="基于快照或目录做 AI 清理分析" aria-hidden="true">🧹 AI 清理</button>
       </div>
       <div class="side-section">
         <div class="side-group">
           <div class="side-group-left">
             <span data-i18n="snapRecords">快照记录</span>
-            <button id="newFolderBtn" class="btn-plain snap-tool side-folder-new" type="button" data-i18n-title="folderNewTitle" title="在快照目录下新建文件夹，用于归纳快照" aria-label="New folder">
+            <button id="newFolderBtn" class="btn-plain snap-tool side-folder-new" type="button" data-i18n-title="folderNewTitle" title="新建文件夹以归纳快照" aria-label="New folder">
               <svg class="tool-icon folder-plus-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
                 <path fill="currentColor" d="M1.5 2.5A1.5 1.5 0 0 1 3 1h3.793a1.5 1.5 0 0 1 1.06.44l.707.707H13A1.5 1.5 0 0 1 14.5 3.5v1h-13v-2zm0 3h13v7A1.5 1.5 0 0 1 13 14H3a1.5 1.5 0 0 1-1.5-1.5v-7z"/>
                 <circle cx="12.2" cy="12.2" r="3.4" fill="var(--bg-side)"/>
@@ -25,13 +27,15 @@
               </svg>
             </button>
           </div>
-          <select id="snapSortSel" class="sort-sel snap-sort" data-i18n-title="snapSortTitle" title="快照排序">
-            <option value="time-desc" data-i18n="snapSortTimeDesc">时间 ↓</option>
-            <option value="time-asc" data-i18n="snapSortTimeAsc">时间 ↑</option>
-            <option value="name-asc" data-i18n="snapSortNameAsc">路径 A→Z</option>
-            <option value="name-desc" data-i18n="snapSortNameDesc">路径 Z→A</option>
-          </select>
+          <button id="snapSortMenuBtn" class="btn-plain summary-icon-btn snap-sort-btn" type="button"
+                  data-i18n-title="snapSortTitle" title="快照排序" aria-haspopup="menu" aria-expanded="false">
+            <svg class="summary-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+              <path fill="currentColor" d="M2 3.25h8.5a.75.75 0 0 1 0 1.5H2a.75.75 0 0 1 0-1.5zm0 4h6a.75.75 0 0 1 0 1.5H2a.75.75 0 0 1 0-1.5zm0 4h3.5a.75.75 0 0 1 0 1.5H2a.75.75 0 0 1 0-1.5z"/>
+              <path fill="currentColor" d="M12.25 2.5a.75.75 0 0 1 .75.75v7.19l1.22-1.22a.75.75 0 1 1 1.06 1.06l-2.5 2.5a.75.75 0 0 1-1.06 0l-2.5-2.5a.75.75 0 0 1 1.06-1.06l1.22 1.22V3.25a.75.75 0 0 1 .75-.75z"/>
+            </svg>
+          </button>
         </div>
+        <div id="snapSortMenu" class="icon-menu hidden" role="menu" aria-labelledby="snapSortMenuBtn"></div>
         <div id="snapshotList" class="snapshot-list"></div>
       </div>
       <div class="side-foot">
@@ -41,7 +45,7 @@
               <path fill="currentColor" d="M1.5 2.5A1.5 1.5 0 0 1 3 1h3.793a1.5 1.5 0 0 1 1.06.44l.707.707H13A1.5 1.5 0 0 1 14.5 3.5v1h-13v-2zm0 3h13v7A1.5 1.5 0 0 1 13 14H3a1.5 1.5 0 0 1-1.5-1.5v-7z"/>
             </svg>
           </button>
-          <button id="refreshSnapsBtn" class="btn-plain snap-tool" type="button" data-i18n-title="refreshSnapsTitle" title="从默认目录刷新列表（保留手动导入的快照）" aria-label="Refresh">
+          <button id="refreshSnapsBtn" class="btn-plain snap-tool" type="button" data-i18n-title="refreshSnapsTitle" title="从存放目录刷新列表，已导入的快照会保留" aria-label="Refresh">
             <svg class="tool-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
               <path fill="currentColor" d="M8 2.5a5.5 5.5 0 1 0 5.27 7.02h-1.54A4 4 0 1 1 8 4v2.5l3.5-3L8 .5V2.5z"/>
             </svg>
@@ -53,7 +57,7 @@
             </svg>
           </button>
         </div>
-        <button id="settingsBtn" class="btn-plain settings-side-btn" data-i18n-title="settingsTitle" title="扫描与持久化选项">
+        <button id="settingsBtn" class="btn-plain settings-side-btn" data-i18n-title="settingsTitle" title="扫描与应用选项">
           <span class="settings-side-icon" aria-hidden="true">⚙</span>
           <span class="settings-side-label" data-i18n="settings">设置</span>
         </button>
@@ -68,67 +72,186 @@
           </button>
         </div>
       </div>
+      <div id="sidebarResizer" class="sidebar-resizer" role="separator" aria-orientation="vertical" data-i18n-title="sidebarResizeTitle" title="拖动可调整侧栏宽度，会挤压中间对比区域"></div>
     </aside>
 
     <!-- 主区 -->
     <main class="main">
       <!-- 对比选择条 -->
       <div class="comparebar">
-        <div class="pick" id="pickOld">
+        <div class="pick pick-old" id="pickOld">
+          <span class="pick-role old-c" data-i18n="pickOldLabel">基准</span>
           <div class="pick-inner">
-            <span class="pick-label old-c" data-i18n="pickOldLabel">基准（较早的快照）</span>
             <span class="pick-value" data-role="old-value" data-i18n="pickPlaceholder">点击选择</span>
           </div>
           <span class="caret">▾</span>
         </div>
         <button id="swapBtn" class="btn-plain swap" data-i18n-title="swapTitle" title="交换基准与当前" disabled>⇄</button>
-        <div class="pick" id="pickNew">
+        <div class="pick pick-new" id="pickNew">
+          <span class="pick-role new-c" data-i18n="pickNewLabel">当前</span>
           <div class="pick-inner">
-            <span class="pick-label new-c" data-i18n="pickNewLabel">当前（较新的快照）</span>
             <span class="pick-value" data-role="new-value" data-i18n="pickPlaceholder">点击选择</span>
           </div>
           <span class="caret">▾</span>
         </div>
-        <button id="compareBtn" class="btn-primary compact" data-i18n="compare" disabled>对比</button>
+        <button id="compareBtn" class="btn-primary compact compare-btn" data-i18n="compare" disabled>对比</button>
 <!--        <button id="clearPickBtn" class="btn-plain" title="清空基准与当前的选择" disabled>清空</button>-->
         <button id="clearPickBtn" class="btn-primary compact" data-i18n="clearPick" data-i18n-title="clearPickTitle" title="清空基准与当前的选择" disabled>清空</button>
       </div>
+      <div id="compareBusy" class="compare-busy hidden" aria-live="polite"></div>
 
       <!-- 概览 + 过滤 -->
       <div id="summaryBar" class="summary-bar hidden">
         <span class="summary-caption" data-i18n="totalChange">总变化</span>
         <span id="summaryDelta" class="summary-delta"></span>
         <span class="spacer"></span>
-        <select id="barBaseSel" class="sort-sel" data-i18n-title="barBaseTitle" title="占比条的长度基准">
-          <option value="global" data-i18n="barBaseGlobal">条长基准：顶层最大项</option>
-          <option value="sibling" data-i18n="barBaseSibling">条长基准：同级最大项</option>
-        </select>
-        <select id="sortSel" class="sort-sel" data-i18n-title="sortSelTitle" title="排序方式">
-          <option value="delta-desc" data-i18n="sortDeltaDesc">按变化幅度（绝对值）</option>
-          <option value="pct-desc" data-i18n="sortPctDesc">按变化幅度（百分比）</option>
-          <option value="name-asc" data-i18n="sortNameAsc">按名称 A→Z</option>
-          <option value="name-desc" data-i18n="sortNameDesc">按名称 Z→A</option>
-          <option value="mtime-desc" data-i18n="sortMtimeDesc">按修改时间 新→旧</option>
-        </select>
-        <select id="filterSel" class="sort-sel" data-i18n-title="filterTitle" title="筛选变化方向">
-          <option value="all" selected data-i18n="filterAll">全部变化</option>
-          <option value="grew" data-i18n="filterGrew">只看变大 ▲</option>
-          <option value="shrank" data-i18n="filterShrank">只看变小 ▼</option>
-        </select>
+        <div class="summary-icon-tools">
+          <div id="treeSearchWrap" class="tree-search-wrap">
+            <button id="treeSearchToggle" class="btn-plain summary-icon-btn tree-search-toggle" type="button"
+                    data-i18n-title="treeSearchOpenTitle" title="搜索名称或路径" aria-expanded="false">
+              <svg class="summary-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                <path fill="currentColor" d="M6.5 2a4.5 4.5 0 1 0 2.83 8.04l2.82 2.81a.75.75 0 1 0 1.06-1.06l-2.81-2.82A4.5 4.5 0 0 0 6.5 2zm-3 4.5a3 3 0 1 1 6 0 3 3 0 0 1-6 0z"/>
+              </svg>
+            </button>
+            <input id="treeSearchInput" class="tree-search-input" type="text" autocomplete="off"
+                   spellcheck="false" tabindex="-1"
+                   data-i18n-placeholder="treeSearchPlaceholder" placeholder="搜索名称或路径" />
+            <button id="treeSearchClear" class="btn-plain tree-search-clear hidden" type="button"
+                    data-i18n-title="treeSearchClearTitle" title="清除搜索">×</button>
+          </div>
+          <button id="sortMenuBtn" class="btn-plain summary-icon-btn" type="button"
+                  data-i18n-title="sortSelTitle" title="排序方式" aria-haspopup="menu" aria-expanded="false">
+            <svg class="summary-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+              <path fill="currentColor" d="M2 3.25h8.5a.75.75 0 0 1 0 1.5H2a.75.75 0 0 1 0-1.5zm0 4h6a.75.75 0 0 1 0 1.5H2a.75.75 0 0 1 0-1.5zm0 4h3.5a.75.75 0 0 1 0 1.5H2a.75.75 0 0 1 0-1.5z"/>
+              <path fill="currentColor" d="M12.25 2.5a.75.75 0 0 1 .75.75v7.19l1.22-1.22a.75.75 0 1 1 1.06 1.06l-2.5 2.5a.75.75 0 0 1-1.06 0l-2.5-2.5a.75.75 0 0 1 1.06-1.06l1.22 1.22V3.25a.75.75 0 0 1 .75-.75z"/>
+            </svg>
+          </button>
+          <button id="filterMenuBtn" class="btn-plain summary-icon-btn" type="button"
+                  data-i18n-title="filterTitle" title="筛选变化方向" aria-haspopup="menu" aria-expanded="false">
+            <svg class="summary-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+              <path fill="currentColor" d="M1.75 2.5h12.5a.75.75 0 0 1 .53 1.28L10 8.56v3.69a.75.75 0 0 1-1.09.67l-2.5-1.25A.75.75 0 0 1 6 11v-2.44L1.22 3.78A.75.75 0 0 1 1.75 2.5z"/>
+            </svg>
+          </button>
+        </div>
       </div>
+
+      <!-- 排序 / 筛选：图标触发的选项菜单 -->
+      <div id="sortMenu" class="icon-menu hidden" role="menu" aria-labelledby="sortMenuBtn"></div>
+      <div id="filterMenu" class="icon-menu hidden" role="menu" aria-labelledby="filterMenuBtn"></div>
 
       <!-- 跳过目录警告 -->
       <div id="skipWarn" class="skip-warn hidden"></div>
+
+      <!-- 搜索结果（排序与选项与变化树独立） -->
+      <div id="searchPanel" class="search-panel hidden">
+        <div class="search-panel-head">
+          <div id="searchMeta" class="search-meta"></div>
+          <div class="search-panel-opts">
+            <label class="search-opt" title="">
+              <input id="searchCaseChk" type="checkbox" />
+              <span data-i18n="treeSearchCase">区分大小写</span>
+            </label>
+            <label class="search-opt" title="">
+              <input id="searchExactChk" type="checkbox" />
+              <span data-i18n="treeSearchExact">严格匹配</span>
+            </label>
+          </div>
+          <button id="searchSortBtn" class="btn-plain search-tool-btn" type="button"
+                  data-i18n-title="treeSearchSortTitle" title="搜索结果排序" aria-haspopup="menu" aria-expanded="false">
+            <svg class="summary-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+              <path fill="currentColor" d="M2 3.25h8.5a.75.75 0 0 1 0 1.5H2a.75.75 0 0 1 0-1.5zm0 4h6a.75.75 0 0 1 0 1.5H2a.75.75 0 0 1 0-1.5zm0 4h3.5a.75.75 0 0 1 0 1.5H2a.75.75 0 0 1 0-1.5z"/>
+              <path fill="currentColor" d="M12.25 2.5a.75.75 0 0 1 .75.75v7.19l1.22-1.22a.75.75 0 1 1 1.06 1.06l-2.5 2.5a.75.75 0 0 1-1.06 0l-2.5-2.5a.75.75 0 0 1 1.06-1.06l1.22 1.22V3.25a.75.75 0 0 1 .75-.75z"/>
+            </svg>
+          </button>
+          <button id="searchCloseBtn" class="btn-plain search-close-btn" type="button"
+                  data-i18n-title="treeSearchCloseTitle" title="关闭搜索">×</button>
+        </div>
+        <div id="searchList" class="search-list"></div>
+        <div id="searchMoreWrap" class="search-more-wrap hidden">
+          <button id="searchMoreBtn" class="btn-plain search-more-btn" type="button" data-i18n="treeSearchMore">加载更多</button>
+        </div>
+      </div>
+      <div id="searchSortMenu" class="icon-menu hidden" role="menu" aria-labelledby="searchSortBtn"></div>
 
       <!-- 变化树 / 空态 -->
       <div id="treeWrap" class="tree-wrap">
         <div id="emptyState" class="empty-state">
           <p class="empty-title" data-i18n="emptyTitle">磁盘空间对比</p>
-          <p class="empty-hint" data-i18n="emptyHint">新建扫描以留存基准，隔段时间对同一目录再扫一次，选择两份快照进行对比，即可定位空间去向。</p>
+          <p class="empty-hint" data-i18n="emptyHint">先扫描目录保存快照，空间变化后再扫同一目录，选两份快照对比即可</p>
         </div>
         <div id="tree" class="tree"></div>
       </div>
     </main>
+
+    <!-- 右侧工具栏：待删除（常驻）+ AI（有模块时页签切换） -->
+    <div id="toolDock" class="tool-dock">
+      <button id="toolRailToggle" class="tool-rail-toggle" type="button" aria-expanded="false" aria-controls="toolPanel">
+        <span class="tool-rail-chevron" aria-hidden="true"></span>
+      </button>
+      <div id="toolPanelResizer" class="tool-panel-resizer hidden" role="separator" aria-orientation="vertical" data-i18n-title="toolPanelResizeTitle" title="拖动可调整右侧栏宽度，会挤压中间对比区域"></div>
+      <aside id="toolPanel" class="tool-panel hidden" aria-label="tools">
+        <div class="tool-head">
+          <div class="tool-tabs" role="tablist">
+            <button type="button" class="tool-tab active" role="tab" aria-selected="true" data-tool-tab="pending" data-i18n="pendingTab">待删除</button>
+            <button type="button" class="tool-tab module-off" role="tab" aria-selected="false" data-tool-tab="ai" data-module="ai" data-i18n="aiPanelTitle">问 AI（实验）</button>
+          </div>
+          <button id="toolCloseBtn" class="btn-plain settings-close" type="button" data-i18n-title="toolClose" title="关闭">✕</button>
+        </div>
+        <div class="tool-pane active" data-tool-pane="pending" role="tabpanel">
+          <p id="pendingEmpty" class="pending-empty" data-i18n="pendingEmpty">暂无待删除项，可在对比树右键添加</p>
+          <div id="pendingList" class="pending-list" aria-live="polite"></div>
+          <div class="pending-foot">
+            <label class="pending-permanent-row" for="pendingPermanentChk">
+              <input id="pendingPermanentChk" type="checkbox" />
+              <span data-i18n="pendingPermanent">彻底删除（不进回收站）</span>
+            </label>
+            <div class="pending-foot-actions">
+              <button id="pendingClearBtn" class="btn-plain compact" type="button" data-i18n="pendingClear">清空</button>
+              <button id="pendingExecuteBtn" class="btn-danger compact" type="button" data-i18n="pendingExecute">执行删除</button>
+            </div>
+          </div>
+        </div>
+        <div id="aiPanel" class="tool-pane hidden module-off" data-tool-pane="ai" data-module="ai" role="tabpanel" aria-label="AI">
+          <div class="ai-head ai-head-in-tab">
+            <div class="ai-head-actions">
+              <button id="aiExportChatBtn" class="btn-plain compact" type="button" data-i18n="aiExportChat" data-i18n-title="aiExportChatTitle" title="导出对话">导出</button>
+              <button id="aiImportChatBtn" class="btn-plain compact" type="button" data-i18n="aiImportChat" data-i18n-title="aiImportChatTitle" title="导入对话">导入</button>
+              <button id="aiNewChatBtn" class="btn-plain compact" type="button" data-i18n="aiNewChat" data-i18n-title="aiNewChatTitle" title="清空对话">新对话</button>
+              <button id="aiPanelSettingsBtn" class="btn-plain compact" type="button" data-i18n-title="aiPanelSettingsTitle" title="AI 设置">⚙</button>
+            </div>
+          </div>
+          <p class="ai-experimental-banner" data-i18n="aiExperimentalBanner">实验功能：结果仅供参考，删除前请自行确认</p>
+          <div id="aiContextBar" class="ai-context-bar hidden">
+            <button id="aiContextChip" class="ai-context-chip" type="button" data-i18n-title="aiContextViewTitle" title="查看携带的信息">
+              <span class="ai-context-chip-tag" data-i18n="aiContextChipLabel">工具上下文</span>
+              <span id="aiContextText" class="ai-context-text"></span>
+            </button>
+            <button id="aiClearCtxBtn" class="ai-context-clear" type="button" data-i18n-title="aiClearContext" title="去掉工具上下文">✕</button>
+          </div>
+          <div id="aiCleanupContinueBar" class="ai-cleanup-continue-bar hidden">
+            <span id="aiCleanupContinueHint" class="ai-cleanup-continue-hint"></span>
+            <button id="aiCleanupContinueBtn" class="btn-plain compact" type="button" data-i18n="aiCleanupContinue">继续分析剩余</button>
+          </div>
+          <div id="aiContextDetail" class="ai-context-detail hidden" role="region" aria-label="tool context"></div>
+          <div id="aiMessages" class="ai-messages" aria-live="polite"></div>
+          <div class="ai-foot">
+            <textarea id="aiInput" class="ai-input" rows="2" data-i18n-placeholder="aiInputPlaceholder" placeholder="你可以自由提问，或在对比树里右键某项询问 AI"></textarea>
+            <div class="ai-foot-actions">
+              <div class="ai-foot-left">
+                <select id="aiPanelModelSelect" class="ai-panel-model" data-i18n-title="aiModel" title="模型" aria-label="model">
+                  <option value="" data-i18n="aiModelNone">选择模型</option>
+                </select>
+                <button id="aiPanelFetchModelsBtn" class="btn-plain compact" type="button" data-i18n="aiFetchModels" data-i18n-title="aiFetchModels" title="获取模型">获取</button>
+              </div>
+              <div class="ai-foot-right">
+                <button id="aiStopBtn" class="btn-plain compact hidden" type="button" data-i18n="aiStop">停止</button>
+                <button id="aiSendBtn" class="btn-primary compact" type="button" data-i18n="aiSend">发送</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </div>
   </div>
 
   <!-- 快照选择下拉 -->
@@ -136,8 +259,12 @@
 
   <!-- 树节点右键菜单 -->
   <div id="ctxMenu" class="ctx-menu hidden">
-    <div class="ctx-item" data-cmd="reveal" data-i18n="ctxReveal">📂 在资源管理器中打开</div>
-    <div class="ctx-item" data-cmd="copy" data-i18n="ctxCopy">📋 复制完整路径</div>
+    <div class="ctx-item" data-cmd="reveal" data-i18n="ctxReveal">在资源管理器中打开</div>
+    <div class="ctx-item" data-cmd="copy" data-i18n="ctxCopy">复制完整路径</div>
+    <div class="ctx-item ctx-danger" data-cmd="delete" data-i18n="ctxDelete">加入待删除</div>
+    <div class="ctx-item module-off" data-cmd="ask-ai" data-module="ai" data-i18n="ctxAskAi">问 AI（实验）</div>
+    <!-- AI 清理分析：暂不接入右键菜单；恢复时去掉 hidden 并保留 data-cmd="cleanup-ai" -->
+    <div class="ctx-item module-off hidden" data-cmd="cleanup-ai" data-module="ai" data-i18n="ctxCleanupAi" hidden>AI 清理分析（实验）</div>
   </div>
 
   <!-- 扫描进度遮罩 -->
@@ -212,6 +339,7 @@
       <div class="settings-tabs" role="tablist" aria-label="Settings tabs">
         <button type="button" class="settings-tab active" role="tab" aria-selected="true" data-settings-tab="general" data-i18n="settingsTabGeneral">通用</button>
         <button type="button" class="settings-tab" role="tab" aria-selected="false" data-settings-tab="log" data-i18n="settingsTabLog">日志</button>
+        <button type="button" class="settings-tab module-off" role="tab" aria-selected="false" data-settings-tab="ai" data-module="ai" data-i18n="settingsTabAi">AI</button>
       </div>
       <div class="settings-body">
         <div class="settings-pane active" data-settings-pane="general" role="tabpanel">
@@ -219,37 +347,47 @@
             <div class="settings-row">
               <span class="settings-label">
                 <label for="workerSel" data-i18n="workers">扫描线程数</label>
-                <button type="button" class="settings-q" data-help="workers" data-i18n-title="workersTitle" title="扫描用的并行线程数，机械硬盘建议 1，SSD 可加大" aria-label="?">?</button>
+                <button type="button" class="settings-q" data-help="workers" data-i18n-title="workersTitle" title="控制扫描时同时工作的线程数，用来加快扫描。机械硬盘建议设为 1，固态硬盘可适当提高" aria-label="?">?</button>
               </span>
               <select id="workerSel" class="sort-sel worker-sel"></select>
             </div>
-            <p class="settings-help-panel hidden" data-help-panel="workers" data-i18n="workersTitle">扫描用的并行线程数，机械硬盘建议 1，SSD 可加大</p>
+            <p class="settings-help-panel hidden" data-help-panel="workers" data-i18n="workersTitle">控制扫描时同时工作的线程数，用来加快扫描。机械硬盘建议设为 1，固态硬盘可适当提高</p>
           </div>
           <div class="settings-field">
             <div class="settings-row">
               <span class="settings-label">
                 <label for="compressChk" data-i18n="compress">压缩快照</label>
-                <button type="button" class="settings-q" data-help="compress" data-i18n-title="compressTitle" title="扫描完成后压缩快照以节省磁盘；对比时再解压" aria-label="?">?</button>
+                <button type="button" class="settings-q" data-help="compress" data-i18n-title="compressTitle" title="扫描完成后把快照压小再保存，用来减少占用空间。对比时会自动解压" aria-label="?">?</button>
               </span>
               <input id="compressChk" type="checkbox" checked />
             </div>
-            <p class="settings-help-panel hidden" data-help-panel="compress" data-i18n="compressTitle">扫描完成后压缩快照以节省磁盘；对比时再解压</p>
+            <p class="settings-help-panel hidden" data-help-panel="compress" data-i18n="compressTitle">扫描完成后把快照压小再保存，用来减少占用空间。对比时会自动解压</p>
           </div>
           <div class="settings-field">
             <div class="settings-row">
               <span class="settings-label">
                 <label for="mftChk" data-i18n="mft">尝试 MFT 扫描</label>
-                <button type="button" class="settings-q" data-help="mft" data-i18n-title="mftTitle" title="盘符根 + NTFS 时读 MFT 构建快照，需要管理员。解析进程数按 CPU 与数据量自动决定，与上方扫描线程数无关。非管理员或失败时自动回退常规扫描，默认开" aria-label="?">?</button>
+                <button type="button" class="settings-q" data-help="mft" data-i18n-title="mftTitle" title="扫描整个盘符时，优先读取系统文件表来加快速度。需要管理员权限，且仅适用于 NTFS；失败时会自动改用常规扫描" aria-label="?">?</button>
               </span>
               <input id="mftChk" type="checkbox" />
             </div>
-            <p class="settings-help-panel hidden" data-help-panel="mft" data-i18n="mftHint">仅 Windows 盘符根 + NTFS，需要管理员。非管理员时勾选仍可保留，扫描会回退常规目录扫描。解析用多进程，不占用上方扫描线程设置</p>
+            <p class="settings-help-panel hidden" data-help-panel="mft" data-i18n="mftHint">扫描整个盘符时，优先读取系统文件表来加快速度。需要管理员权限，且仅适用于 NTFS；失败时会自动改用常规扫描</p>
+          </div>
+          <div class="settings-field">
+            <div class="settings-row">
+              <span class="settings-label">
+                <label for="searchMemIdxChk" data-i18n="searchMemIdx">搜索内存索引</label>
+                <button type="button" class="settings-q" data-help="searchMemIdx" data-i18n-title="searchMemIdxTitle" title="开启后打开搜索会先载入索引，占用更多内存，但后续搜索更快。内存充足建议开启；内存紧张或小目录可关闭" aria-label="?">?</button>
+              </span>
+              <input id="searchMemIdxChk" type="checkbox" checked />
+            </div>
+            <p class="settings-help-panel hidden" data-help-panel="searchMemIdx" data-i18n="searchMemIdxTitle">开启后打开搜索会先载入索引，占用更多内存，但后续搜索更快。内存充足建议开启；内存紧张或小目录可关闭</p>
           </div>
           <div class="settings-field">
             <div class="settings-row">
               <span class="settings-label">
                 <span data-i18n="snapDir">快照存放目录</span>
-                <button type="button" class="settings-q" data-help="snapDir" data-i18n-title="snapDirTitle" title="新建扫描写入的目录；更改后点完成会把原目录中的快照迁到新目录（同名已存在则跳过）" aria-label="?">?</button>
+                <button type="button" class="settings-q" data-help="snapDir" data-i18n-title="snapDirTitle" title="扫描得到的快照会保存在这里。更改后点完成，会把原目录里的快照迁到新位置" aria-label="?">?</button>
               </span>
               <div class="settings-row-actions">
                 <button id="snapDirChooseBtn" class="btn-plain compact" type="button" data-i18n="snapDirChoose">更改</button>
@@ -258,23 +396,74 @@
               </div>
             </div>
             <p id="snapDirPathLine" class="settings-hint settings-path snap-dir-path"></p>
-            <p class="settings-help-panel hidden" data-help-panel="snapDir" data-i18n="snapDirTitle">新建扫描写入的目录；更改后点完成会把原目录中的快照迁到新目录（同名已存在则跳过）</p>
+            <p class="settings-help-panel hidden" data-help-panel="snapDir" data-i18n="snapDirTitle">扫描得到的快照会保存在这里。更改后点完成，会把原目录里的快照迁到新位置</p>
           </div>
-          <p class="settings-hint settings-auto-save-hint" data-i18n="settingsAutoSaveHint">修改后点「完成」会自动保存，语言与主题切换会立即保存</p>
+          <div class="settings-field">
+            <div class="settings-row">
+              <span class="settings-label">
+                <span data-i18n="deleteBlacklist">删除白名单</span>
+                <button type="button" class="settings-q" data-help="deleteBlacklist" data-i18n-title="deleteBlacklistTitle" title="名单中的路径禁止删除，可选精确、前缀、正则三种匹配" aria-label="?">?</button>
+              </span>
+            </div>
+            <p class="settings-hint" data-i18n="deleteBlacklistHint">名单中的路径不会被删除</p>
+            <select id="blacklistSelect" class="blacklist-select" size="4" aria-label="delete whitelist"></select>
+            <div class="blacklist-add-row">
+              <input id="blacklistPath" class="blacklist-path-input" type="text" data-i18n-placeholder="blacklistPathPlaceholder" placeholder="路径或规则" />
+              <select id="blacklistMode" class="sort-sel blacklist-mode-sel" aria-label="match mode">
+                <option value="prefix" data-i18n="blacklistModePrefix">前缀</option>
+                <option value="exact" data-i18n="blacklistModeExact">精确</option>
+                <option value="regex" data-i18n="blacklistModeRegex">正则</option>
+              </select>
+            </div>
+            <div class="settings-row-actions blacklist-actions">
+              <button id="blacklistPickBtn" class="btn-plain compact" type="button" data-i18n="blacklistPick">选择文件夹</button>
+              <button id="blacklistAddBtn" class="btn-plain compact" type="button" data-i18n="blacklistAdd">添加</button>
+              <button id="blacklistRemoveBtn" class="btn-plain compact" type="button" data-i18n="blacklistRemove">移除</button>
+            </div>
+            <p class="settings-help-panel hidden" data-help-panel="deleteBlacklist" data-i18n="deleteBlacklistTitle">名单中的路径禁止删除，可选三种匹配：
+精确：只保护这一条路径，例如 C:\Games\save.dat
+前缀：保护该路径及其子项，例如 C:\Windows 会连同其下所有文件
+正则：按正则匹配完整路径，例如 (?i)\\Windows\\ 可匹配路径中含 \Windows\ 的项</p>
+          </div>
           <div class="settings-field settings-danger-zone">
             <div class="settings-row">
               <span class="settings-label">
+                <span data-i18n="checkUpdate">检查更新</span>
+                <span id="appVersionLabel" class="settings-version"></span>
+                <button type="button" class="settings-q" data-help="checkUpdate" data-i18n-title="checkUpdateTitle" title="从 GitHub 查询最新发布版本，并与当前版本比较" aria-label="?">?</button>
+              </span>
+              <div class="settings-row-actions">
+                <button id="checkUpdateBtn" class="btn-plain compact" type="button" data-i18n="checkUpdateBtn">检查更新</button>
+                <button id="openReleaseBtn" class="btn-plain compact hidden" type="button" data-i18n="openReleaseBtn">打开发布页</button>
+              </div>
+            </div>
+            <p id="checkUpdateStatus" class="settings-hint check-update-status" aria-live="polite"></p>
+            <p class="settings-help-panel hidden" data-help-panel="checkUpdate" data-i18n="checkUpdateTitle">从 GitHub 查询最新发布版本，并与当前版本比较</p>
+          </div>
+          <div class="settings-field">
+            <div class="settings-row">
+              <span class="settings-label">
                 <span data-i18n="uninstall">卸载</span>
-                <button type="button" class="settings-q" data-help="uninstall" data-i18n-title="uninstallTitle" title="清理工具在本机留下的配置文件与快照（不包含您自定义的快照存放位置）" aria-label="?">?</button>
+                <button type="button" class="settings-q" data-help="uninstall" data-i18n-title="uninstallTitle" title="不再使用本软件时，可清理它在本机留下的配置和默认位置的快照。您自行指定的快照目录不会被删除" aria-label="?">?</button>
               </span>
               <button id="uninstallBtn" class="btn-danger compact" type="button" data-i18n="uninstallBtn">卸载</button>
             </div>
-            <p class="settings-help-panel hidden" data-help-panel="uninstall" data-i18n="uninstallTitle">清理工具在本机留下的配置文件与快照（不包含您自定义的快照存放位置）</p>
+            <p class="settings-help-panel hidden" data-help-panel="uninstall" data-i18n="uninstallTitle">不再使用本软件时，可清理它在本机留下的配置和默认位置的快照。您自行指定的快照目录不会被删除</p>
           </div>
         </div>
         <div class="settings-pane hidden" data-settings-pane="log" role="tabpanel">
-          <p class="settings-hint log-privacy-hint" data-i18n="logPrivacyHint">日志默认不保存，仅存在于软件本次运行中，可使用导出功能将日志输出</p>
-          <p class="settings-hint log-privacy-hint" data-i18n="logPrivacyNote">隐私说明：导出的日志文件通常不会包含您的隐私信息，并已对相关信息进行脱敏，若担心隐私问题可根据源码自行判断</p>
+          <p class="settings-hint log-privacy-hint" data-i18n="logPrivacyHint">日志默认不保存，仅存在于软件本次运行中，若需要可使用导出功能</p>
+          <p class="settings-hint log-privacy-hint" data-i18n="logPrivacyNote">隐私说明：开启路径脱敏后，日志中的绝对路径会替换为标记；关闭后新日志可能含本机路径</p>
+          <div class="settings-field">
+            <div class="settings-row">
+              <span class="settings-label">
+                <label for="logSanitizeChk" data-i18n="logSanitize">路径脱敏</label>
+                <button type="button" class="settings-q" data-help="logSanitize" data-i18n-title="logSanitizeTitle" title="开启后日志里的绝对路径会替换为标记，导出更安全。排查问题时可关闭以查看完整路径，仅影响之后的新日志" aria-label="?">?</button>
+              </span>
+              <input id="logSanitizeChk" type="checkbox" checked />
+            </div>
+            <p class="settings-help-panel hidden" data-help-panel="logSanitize" data-i18n="logSanitizeTitle">开启后日志里的绝对路径会替换为标记，导出更安全。排查问题时可关闭以查看完整路径，仅影响之后的新日志</p>
+          </div>
           <div class="log-toolbar">
             <span id="logCountLabel" class="settings-hint log-count">0</span>
             <div class="settings-row-actions">
@@ -285,11 +474,176 @@
           </div>
           <pre id="logView" class="log-view" aria-live="polite"></pre>
         </div>
+        <div class="settings-pane hidden module-off" data-settings-pane="ai" data-module="ai" role="tabpanel">
+          <p class="settings-hint ai-experimental-note" data-i18n="aiExperimentalNote">实验功能：结果仅供参考，请谨慎操作</p>
+          <p class="settings-hint" data-i18n="aiPrivacyNote">启用后，提问时会把所选路径与大小信息发送到您配置的 AI 服务商。密钥仅保存在本机</p>
+          <div class="settings-field">
+            <div class="settings-row">
+              <span class="settings-label">
+                <label for="aiEnabledChk" data-i18n="aiEnabled">启用 AI</label>
+              </span>
+              <input id="aiEnabledChk" type="checkbox" />
+            </div>
+          </div>
+          <div class="settings-field">
+            <div class="settings-row">
+              <span class="settings-label">
+                <label for="aiBaseUrl" data-i18n="aiBaseUrl">接口地址</label>
+              </span>
+              <span id="aiBaseUrlHint" class="settings-hint ai-base-url-hint hidden" data-i18n="aiBaseUrlV1Hint" hidden>OpenAI 格式通常以 /v1 结尾，请确认</span>
+            </div>
+            <input id="aiBaseUrl" class="note-input ai-settings-input" type="text" spellcheck="false" autocomplete="off" placeholder="https://api.openai.com/v1" />
+          </div>
+          <div class="settings-field">
+            <div class="settings-row">
+              <span class="settings-label">
+                <label for="aiModelSelect" data-i18n="aiModel">模型</label>
+              </span>
+              <div class="settings-row-actions">
+                <button id="aiRemoveModelBtn" class="btn-plain compact" type="button" data-i18n="aiRemoveModel">删除</button>
+                <button id="aiFetchModelsBtn" class="btn-plain compact" type="button" data-i18n="aiFetchModels">获取模型</button>
+              </div>
+            </div>
+            <select id="aiModelSelect" class="note-input ai-settings-input ai-model-select" aria-label="model list">
+              <option value="" data-i18n="aiModelNone">选择模型</option>
+            </select>
+            <div class="ai-model-add-row">
+              <input id="aiModel" class="note-input ai-settings-input" type="text" spellcheck="false" autocomplete="off" data-i18n-placeholder="aiModelPlaceholder" placeholder="例如 gpt-4o-mini" />
+              <button id="aiAddModelBtn" class="btn-plain compact ai-add-model-btn" type="button" data-i18n="aiAddModel">填入</button>
+            </div>
+          </div>
+          <div class="settings-field">
+            <div class="settings-row">
+              <span class="settings-label">
+                <label for="aiApiKey" data-i18n="aiApiKey">API Key</label>
+              </span>
+            </div>
+            <input id="aiApiKey" class="note-input ai-settings-input" type="password" spellcheck="false" autocomplete="off" data-i18n-placeholder="aiKeyPlaceholder" placeholder="粘贴密钥" />
+          </div>
+          <div class="settings-field">
+            <div class="settings-row">
+              <span class="settings-label">
+                <label for="aiExtraPrompt" data-i18n="aiExtraPrompt">追加提示词</label>
+              </span>
+            </div>
+            <textarea id="aiExtraPrompt" class="note-input ai-settings-input ai-extra-prompt" rows="3" data-i18n-placeholder="aiExtraPromptPlaceholder" placeholder="可选，补充你的偏好"></textarea>
+          </div>
+          <div class="settings-field">
+            <div class="settings-row">
+              <span class="settings-label">
+                <span data-i18n="aiToolsSettings">工具设置</span>
+                <button type="button" class="settings-q" data-help="aiToolsSettings" data-i18n-title="aiToolsSettingsTitle" title="选择 AI 在右键问 AI 等场景下可以调用的工具。未勾选的工具不会交给模型" aria-label="?">?</button>
+              </span>
+              <button id="aiToolsSettingsBtn" class="btn-plain compact" type="button" data-i18n="aiToolsSettingsBtn">编辑</button>
+            </div>
+            <p id="aiToolsSettingsSummary" class="settings-hint ai-tools-summary"></p>
+            <p class="settings-help-panel hidden" data-help-panel="aiToolsSettings" data-i18n="aiToolsSettingsTitle">选择 AI 在右键问 AI 等场景下可以调用的工具。未勾选的工具不会交给模型</p>
+          </div>
+          <div class="settings-field">
+            <div class="settings-row">
+              <span class="settings-label">
+                <label for="aiCleanupMaxDepth" data-i18n="aiCleanupMaxDepth">清理展开层数</label>
+                <button type="button" class="settings-q" data-help="aiCleanupMaxDepth" data-i18n-title="aiCleanupMaxDepthTitle" title="AI 清理分析用的展开深度，暂未实装。默认 3，范围 1–8" aria-label="?">?</button>
+              </span>
+            </div>
+            <input id="aiCleanupMaxDepth" class="note-input ai-settings-input" type="number" min="1" max="8" step="1" value="3" />
+            <p class="settings-hint" data-i18n="aiCleanupMaxDepthHint">暂未实装，仅预留配置</p>
+            <p class="settings-help-panel hidden" data-help-panel="aiCleanupMaxDepth" data-i18n="aiCleanupMaxDepthTitle">AI 清理分析用的展开深度，暂未实装。默认 3，范围 1–8</p>
+          </div>
+        </div>
       </div>
       <div class="settings-foot">
         <button id="resetSettingsBtn" class="btn-plain compact" type="button" data-i18n="resetSettingsBtn" data-i18n-title="resetSettingsTitle" title="删除配置并恢复默认">恢复默认</button>
         <span class="settings-foot-spacer"></span>
+        <button id="aiTestBtn" class="btn-plain compact module-off" type="button" data-module="ai" data-i18n="aiTest">测试连接</button>
         <button id="settingsDoneBtn" class="btn-primary compact" data-i18n="settingsDone">完成</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- AI 磁盘清理：选来源 -->
+  <div id="diskCleanupSourceOverlay" class="overlay hidden">
+    <div class="confirm-card" role="dialog" aria-modal="true" aria-labelledby="diskCleanupSourceTitle">
+      <div class="note-head">
+        <h2 id="diskCleanupSourceTitle" class="note-title" data-i18n="diskCleanupSourceTitle">AI 清理</h2>
+        <button id="diskCleanupSourceCloseBtn" class="btn-plain settings-close" type="button" data-i18n-title="settingsClose" title="关闭">✕</button>
+      </div>
+      <p class="note-hint confirm-body" data-i18n="diskCleanupSourceHint">选择一份已有快照，或选择目录（该目录需已有扫描快照）</p>
+      <div class="note-foot disk-cleanup-source-actions">
+        <button id="diskCleanupPickSnapBtn" class="btn-primary compact" type="button" data-i18n="diskCleanupPickSnap">选快照</button>
+        <button id="diskCleanupPickFolderBtn" class="btn-plain compact" type="button" data-i18n="diskCleanupPickFolder">选目录</button>
+        <span class="note-foot-spacer"></span>
+        <button id="diskCleanupSourceCancelBtn" class="btn-plain" type="button" data-i18n="cancel">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- AI 磁盘清理：从列表选快照 -->
+  <div id="diskCleanupSnapOverlay" class="overlay hidden">
+    <div class="confirm-card disk-cleanup-snap-card" role="dialog" aria-modal="true" aria-labelledby="diskCleanupSnapTitle">
+      <div class="note-head">
+        <h2 id="diskCleanupSnapTitle" class="note-title" data-i18n="diskCleanupSnapTitle">选择快照</h2>
+        <button id="diskCleanupSnapCloseBtn" class="btn-plain settings-close" type="button" data-i18n-title="settingsClose" title="关闭">✕</button>
+      </div>
+      <p id="diskCleanupSnapHint" class="note-hint confirm-body" data-i18n="diskCleanupSnapHint">将按该快照中的体积分布做清理分析</p>
+      <div id="diskCleanupSnapList" class="disk-cleanup-snap-list" role="listbox"></div>
+      <div class="note-foot">
+        <span class="note-foot-spacer"></span>
+        <button id="diskCleanupSnapCancelBtn" class="btn-plain" type="button" data-i18n="cancel">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 通用确认：恢复默认、删除文件夹等，避免原生 confirm 弹出系统窗口 -->
+  <div id="confirmOverlay" class="overlay hidden">
+    <div class="confirm-card" role="dialog" aria-modal="true" aria-labelledby="confirmDialogTitle">
+      <div class="note-head">
+        <h2 id="confirmDialogTitle" class="note-title"></h2>
+        <button id="confirmCloseBtn" class="btn-plain settings-close" type="button" data-i18n-title="settingsClose" title="关闭">✕</button>
+      </div>
+      <p id="confirmDialogBody" class="note-hint confirm-body"></p>
+      <div class="note-foot">
+        <span class="note-foot-spacer"></span>
+        <button id="confirmCancelBtn" class="btn-plain" type="button" data-i18n="cancel">取消</button>
+        <button id="confirmOkBtn" class="btn-primary compact" type="button" data-i18n="confirmOk">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- AI 工具设置：选择可调用的 tool -->
+  <div id="aiToolsSettingsOverlay" class="overlay hidden">
+    <div class="confirm-card ai-tools-settings-card" role="dialog" aria-modal="true" aria-labelledby="aiToolsSettingsDialogTitle">
+      <div class="note-head">
+        <h2 id="aiToolsSettingsDialogTitle" class="note-title" data-i18n="aiToolsSettingsDialogTitle">可调用的工具</h2>
+        <button id="aiToolsSettingsCloseBtn" class="btn-plain settings-close" type="button" data-i18n-title="settingsClose" title="关闭">✕</button>
+      </div>
+      <p class="note-hint confirm-body" data-i18n="aiToolsSettingsDialogHint">勾选后，右键问 AI 等场景下模型才可使用对应工具；申请加入待删除仍须你确认</p>
+      <div id="aiToolsSettingsList" class="ai-tools-settings-list" role="group"></div>
+      <div class="note-foot">
+        <span class="note-foot-spacer"></span>
+        <button id="aiToolsSettingsCancelBtn" class="btn-plain" type="button" data-i18n="cancel">取消</button>
+        <button id="aiToolsSettingsOkBtn" class="btn-primary compact" type="button" data-i18n="aiToolsSettingsOk">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- AI 提议入队：可勾选路径清单 -->
+  <div id="pendingChecklistOverlay" class="overlay hidden">
+    <div class="confirm-card pending-checklist-card" role="dialog" aria-modal="true" aria-labelledby="pendingChecklistTitle">
+      <div class="note-head">
+        <h2 id="pendingChecklistTitle" class="note-title" data-i18n="pendingChecklistTitle">选择要加入的项</h2>
+        <button id="pendingChecklistCloseBtn" class="btn-plain settings-close" type="button" data-i18n-title="settingsClose" title="关闭">✕</button>
+      </div>
+      <p id="pendingChecklistHint" class="pending-checklist-hint" data-i18n="pendingChecklistHint">AI 请求将下列内容加入待删除列表，文件删除仍需要你的审批</p>
+      <div class="pending-checklist-toolbar">
+        <button id="pendingChecklistSelectAllBtn" class="btn-plain compact" type="button" data-i18n="pendingChecklistSelectAll">全选</button>
+        <button id="pendingChecklistSelectNoneBtn" class="btn-plain compact" type="button" data-i18n="pendingChecklistSelectNone">全不选</button>
+      </div>
+      <div id="pendingChecklistList" class="pending-checklist-list" role="group"></div>
+      <div class="note-foot">
+        <span class="note-foot-spacer"></span>
+        <button id="pendingChecklistCancelBtn" class="btn-plain" type="button" data-i18n="cancel">取消</button>
+        <button id="pendingChecklistOkBtn" class="btn-primary compact" type="button" data-i18n="pendingChecklistConfirm">加入选中项</button>
       </div>
     </div>
   </div>
@@ -303,7 +657,7 @@
       </div>
       <label class="settings-check-row uninstall-dialog-check" for="uninstallDeleteDataChk">
         <input id="uninstallDeleteDataChk" type="checkbox" checked />
-        <span data-i18n="uninstallDeleteData">同时删除数据文件夹（快照与设置）</span>
+        <span data-i18n="uninstallDeleteData">同时删除数据文件夹中的快照与设置</span>
       </label>
       <div class="note-foot">
         <span class="note-foot-spacer"></span>
@@ -353,6 +707,18 @@
   <!-- Toast 提示 -->
   <div id="toast" class="toast hidden"></div>
 
-  <script src="app.js"></script>
+  <script src="js/state.js"></script>
+  <script src="js/i18n.js"></script>
+  <script src="js/util.js"></script>
+  <script src="js/theme.js"></script>
+  <script src="js/snapshots.js"></script>
+  <script src="js/pick.js"></script>
+  <script src="js/compare.js"></script>
+  <script src="js/scan.js"></script>
+  <script src="js/settings.js"></script>
+  <script src="js/modules.js"></script>
+  <script src="js/pending.js"></script>
+  <script src="js/ai.js"></script>
+  <script src="js/app.js"></script>
 </body>
 </html>

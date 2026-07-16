@@ -18,10 +18,13 @@ from core.store import (
     delete_snapshot_folder,
     get_compress_snapshots,
     get_lang,
+    get_log_sanitize,
     get_scan_workers,
     get_snapshot_dir_configured,
     get_theme,
     get_use_mft,
+    get_search_memory_index,
+    is_log_sanitize_explicit,
     list_snapshot_folders,
     list_snapshots,
     move_snapshot_to_folder,
@@ -31,11 +34,13 @@ from core.store import (
     sanitize_folder_name,
     set_compress_snapshots,
     set_lang,
+    set_log_sanitize,
     set_note,
     set_scan_workers,
     set_snapshot_dir,
     set_theme,
     set_use_mft,
+    set_search_memory_index,
     settings_path,
     snapshot_content_key,
     snapshot_info,
@@ -52,10 +57,14 @@ def _isolate_settings(tmp_path, monkeypatch):
     store._data_wiped = False
     store._use_mft = True
     store._compress_snapshots = True
+    store._search_memory_index = True
+    store._log_sanitize = True
+    store._log_sanitize_explicit = None
     store._scan_workers = store.default_scan_workers()
     store._lang = "en"
     store._theme = "light"
     store._snapshot_dir = ""
+    store._delete_blacklist = []
     yield
 
 
@@ -259,6 +268,23 @@ def test_use_mft_defaults_on():
     set_use_mft(True)
 
 
+def test_search_memory_index_defaults_on():
+    assert get_search_memory_index() is True
+    assert set_search_memory_index(False) is False
+    assert get_search_memory_index() is False
+    assert set_search_memory_index(True) is True
+
+
+def test_log_sanitize_defaults_on_and_explicit_flag():
+    assert get_log_sanitize() is True
+    assert is_log_sanitize_explicit() is False
+    assert set_log_sanitize(False) is False
+    assert get_log_sanitize() is False
+    assert is_log_sanitize_explicit() is True
+    assert set_log_sanitize(True) is True
+    assert get_log_sanitize() is True
+
+
 def test_yaml_roundtrip_helpers(tmp_path):
     path = str(tmp_path / "settings.yaml")
     custom = str(tmp_path / "snaps")
@@ -266,6 +292,8 @@ def test_yaml_roundtrip_helpers(tmp_path):
         "scan_workers": 6,
         "compress_snapshots": False,
         "use_mft": True,
+        "search_memory_index": False,
+        "log_sanitize": False,
         "lang": "zh",
         "theme": "light",
         "snapshot_dir": custom,
@@ -276,14 +304,28 @@ def test_yaml_roundtrip_helpers(tmp_path):
     assert "common:" in raw
     assert "persist" not in raw
     assert "\n  scan_workers:" in raw or "\n  scan_workers: " in raw
+    assert "search_memory_index: false" in raw
+    assert "log_sanitize: false" in raw
     loaded = _load_settings_yaml(path)
     assert "persist" not in loaded
-    assert loaded["scan_workers"] == 6
-    assert loaded["compress_snapshots"] is False
-    assert loaded["use_mft"] is True
-    assert loaded["lang"] == "zh"
-    assert loaded["theme"] == "light"
-    assert loaded["snapshot_dir"] == os.path.abspath(custom)
+    # common / ai 同为顶层节；值先是字符串，类型在 _apply_loaded 转
+    common = loaded["common"]
+    assert common["scan_workers"] == "6"
+    assert common["compress_snapshots"] == "false"
+    assert common["use_mft"] == "true"
+    assert common["search_memory_index"] == "false"
+    assert common["log_sanitize"] == "false"
+    assert common["lang"] == "zh"
+    assert common["theme"] == "light"
+    assert common["snapshot_dir"] == os.path.abspath(custom)
+    assert isinstance(loaded.get("ai"), dict)
+    _apply_loaded(loaded)
+    assert get_scan_workers() == 6
+    assert get_compress_snapshots() is False
+    assert get_use_mft() is True
+    assert get_search_memory_index() is False
+    assert get_log_sanitize() is False
+    assert is_log_sanitize_explicit() is True
 
 
 def test_yaml_loads_legacy_flat_format(tmp_path):
@@ -300,10 +342,51 @@ def test_yaml_loads_legacy_flat_format(tmp_path):
             "snapshot_dir: ''\n"
         )
     loaded = _load_settings_yaml(path)
-    assert loaded.get("persist") is True
-    assert loaded.get("scan_workers") == 4
-    assert loaded.get("compress_snapshots") is False
-    assert loaded.get("use_mft") is True
+    assert loaded.get("persist") == "true"
+    assert loaded.get("scan_workers") == "4"
+    assert loaded.get("compress_snapshots") == "false"
+    assert loaded.get("use_mft") == "true"
+    _apply_loaded(loaded)
+    assert get_scan_workers() == 4
+    assert get_compress_snapshots() is False
+    assert get_use_mft() is True
+
+
+def test_common_lang_present_for_startup_branch(tmp_path):
+    """分节 YAML 的 lang 在 common 下；启动分支须用 _common_view，不能 ``\"lang\" in raw``。
+
+    回归：旧逻辑只查顶层键，会把 common.lang 当成「无语言」并用系统 UI 覆盖。
+    """
+    from core.store import _common_view
+
+    path = settings_path()
+    set_lang("en")
+    set_theme("dark")
+    assert os.path.isfile(path)
+    raw = open(path, encoding="utf-8").read()
+    assert "common:" in raw
+    assert "lang:" in raw
+
+    loaded = _load_settings_yaml(path)
+    # 分节格式：顶层没有 lang，只有 common.lang
+    assert "lang" not in loaded or not isinstance(loaded.get("lang"), str)
+    assert isinstance(loaded.get("common"), dict)
+    assert loaded["common"].get("lang") == "en"
+
+    common = _common_view(loaded)
+    assert "lang" in common
+    assert common["lang"] == "en"
+
+    # 模拟 app.main 正确分支：有 common.lang 则保留 store（不写系统语言）
+    store._lang = "zh"  # 假装被系统语言污染
+    if "lang" in common:
+        _apply_loaded(loaded)
+    assert get_lang() == "en"
+
+    # 旧扁平：_common_view 仍能看到顶层 lang
+    flat = {"lang": "zh", "theme": "light"}
+    assert _common_view(flat).get("lang") == "zh"
+    assert "lang" not in _common_view({})
 
 
 def test_wipe_app_data_delete_and_settings_only(tmp_path, monkeypatch):
@@ -431,18 +514,19 @@ def test_setters_auto_write_yaml(tmp_path):
     assert os.path.isfile(path)
     loaded = _load_settings_yaml(path)
     assert "persist" not in loaded
-    assert loaded.get("scan_workers") == 3
-    assert loaded.get("compress_snapshots") is False
-    assert loaded.get("use_mft") is True
-    assert loaded.get("lang") == "zh"
-    assert loaded.get("theme") == "light"
-    assert loaded.get("snapshot_dir") == os.path.abspath(custom)
+    common = loaded["common"]
+    assert common.get("scan_workers") == "3"
+    assert common.get("compress_snapshots") == "false"
+    assert common.get("use_mft") == "true"
+    assert common.get("lang") == "zh"
+    assert common.get("theme") == "light"
+    assert common.get("snapshot_dir") == os.path.abspath(custom)
 
     set_scan_workers(7)
     set_theme("dark")
     loaded2 = _load_settings_yaml(path)
-    assert loaded2.get("scan_workers") == 7
-    assert loaded2.get("theme") == "dark"
+    assert loaded2["common"].get("scan_workers") == "7"
+    assert loaded2["common"].get("theme") == "dark"
 
 
 def test_reset_settings_to_defaults_deletes_yaml(tmp_path):
@@ -509,6 +593,30 @@ def test_apply_loaded_partial_keeps_missing_keys():
     assert get_compress_snapshots() is True
 
 
+def test_delete_blacklist_roundtrip_and_apply(tmp_path):
+    """删除黑名单：apply 写入、YAML 往返、reset 清空。"""
+    entries = [
+        {"path": r"C:\Windows", "mode": "prefix"},
+        {"path": r"D:\keep", "mode": "exact"},
+        {"path": r".*\\.tmp$", "mode": "regex"},
+    ]
+    out = apply_settings({"delete_blacklist": entries})
+    got = out.get("delete_blacklist") or []
+    assert any(e.get("path") == r"C:\Windows" and e.get("mode") == "prefix" for e in got)
+    assert any(e.get("path") == r"D:\keep" and e.get("mode") == "exact" for e in got)
+
+    path = settings_path()
+    assert os.path.isfile(path)
+    # 重新加载
+    store._delete_blacklist = []
+    store.reload_settings_from_disk()
+    again = store.get_delete_blacklist()
+    assert any(e.get("path") == r"C:\Windows" for e in again)
+
+    store.reset_settings_to_defaults(lang="en")
+    assert store.get_delete_blacklist() == []
+
+
 def test_apply_settings_batch_always_writes(tmp_path):
     """设置页「完成」：一次提交多项并写 yaml。"""
     custom = str(tmp_path / "batch_snaps")
@@ -517,10 +625,13 @@ def test_apply_settings_batch_always_writes(tmp_path):
             "scan_workers": 5,
             "compress_snapshots": False,
             "use_mft": True,
+            "log_sanitize": False,
             "snapshot_dir": custom,
             "persist_settings": False,  # 旧键忽略，仍写盘
         }
     )
+    assert get_log_sanitize() is False
+    assert is_log_sanitize_explicit() is True
     assert out["scan_workers"] == 5
     assert out["compress_snapshots"] is False
     assert out["use_mft"] is True
@@ -530,11 +641,13 @@ def test_apply_settings_batch_always_writes(tmp_path):
     path = settings_path()
     assert os.path.isfile(path)
     loaded = _load_settings_yaml(path)
-    assert loaded.get("scan_workers") == 5
-    assert loaded.get("compress_snapshots") is False
-    assert loaded.get("use_mft") is True
-    assert loaded.get("snapshot_dir") == os.path.abspath(custom)
+    common = loaded["common"]
+    assert common.get("scan_workers") == "5"
+    assert common.get("compress_snapshots") == "false"
+    assert common.get("use_mft") == "true"
+    assert common.get("snapshot_dir") == os.path.abspath(custom)
     assert "persist" not in loaded
+    assert "persist" not in common
 
 
 def test_apply_settings_migrates_snapshots(tmp_path):
@@ -587,3 +700,36 @@ def test_apply_loaded_empty_keeps_defaults():
     _apply_loaded({})
     assert get_scan_workers() == 5
     assert get_use_mft() is False
+
+
+def test_yaml_keeps_unknown_keys_and_sections(tmp_path):
+    """解析不丢未知键/节；common 与 ai 同为顶层节；apply 只消费认识的字段。"""
+    path = str(tmp_path / "settings.yaml")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(
+            "common:\n"
+            "  scan_workers: 8\n"
+            "  future_flag: true\n"
+            "ai:\n"
+            "  enabled: true\n"
+            "  model: m1\n"
+            "  mystery: keep-me\n"
+            "other:\n"
+            "  foo: bar\n"
+        )
+    loaded = _load_settings_yaml(path)
+    assert set(loaded.keys()) >= {"common", "ai", "other"}
+    assert loaded["common"].get("scan_workers") == "8"
+    assert loaded["common"].get("future_flag") == "true"
+    assert loaded["ai"].get("enabled") == "true"
+    assert loaded["ai"].get("model") == "m1"
+    assert loaded["ai"].get("mystery") == "keep-me"
+    assert loaded.get("other") == {"foo": "bar"}
+
+    store._scan_workers = store.default_scan_workers()
+    store._ai_enabled = False
+    store._ai_model = ""
+    _apply_loaded(loaded)
+    assert get_scan_workers() == 8
+    assert store.get_ai_settings()["enabled"] is True
+    assert store.get_ai_settings()["model"] == "m1"
