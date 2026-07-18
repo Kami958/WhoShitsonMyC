@@ -132,6 +132,13 @@
               <path fill="currentColor" d="M1.75 2.5h12.5a.75.75 0 0 1 .53 1.28L10 8.56v3.69a.75.75 0 0 1-1.09.67l-2.5-1.25A.75.75 0 0 1 6 11v-2.44L1.22 3.78A.75.75 0 0 1 1.75 2.5z"/>
             </svg>
           </button>
+          <button id="collapseAllBtn" class="btn-plain summary-icon-btn" type="button"
+                  data-i18n-title="collapseAllTitle" title="收起到顶层">
+            <svg class="summary-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+              <path fill="currentColor" d="M8 2.72 3.47 7.25a.75.75 0 0 0 1.06 1.06L8 4.84l3.47 3.47a.75.75 0 1 0 1.06-1.06L8 2.72z"/>
+              <path fill="currentColor" d="M8 7.22 3.47 11.75a.75.75 0 0 0 1.06 1.06L8 9.34l3.47 3.47a.75.75 0 1 0 1.06-1.06L8 7.22z"/>
+            </svg>
+          </button>
         </div>
       </div>
 
@@ -453,7 +460,22 @@
         </div>
         <div class="settings-pane hidden" data-settings-pane="log" role="tabpanel">
           <p class="settings-hint log-privacy-hint" data-i18n="logPrivacyHint">日志默认不保存，仅存在于软件本次运行中，若需要可使用导出功能</p>
-          <p class="settings-hint log-privacy-hint" data-i18n="logPrivacyNote">隐私说明：开启路径脱敏后，日志中的绝对路径会替换为标记；关闭后新日志可能含本机路径</p>
+          <p class="settings-hint log-privacy-hint" data-i18n="logPrivacyNote">隐私说明：开启路径脱敏后，导出内容中的绝对路径会替换为标记；关闭后新写入的日志可能含本机路径</p>
+          <div class="settings-field">
+            <div class="settings-row">
+              <span class="settings-label">
+                <label for="logLevelSel" data-i18n="logLevel">日志等级</label>
+                <button type="button" class="settings-q" data-help="logLevel" data-i18n-title="logLevelTitle" title="控制写入日志的最低等级。DEBUG 会记录更细的调试信息，仅影响之后的新日志" aria-label="?">?</button>
+              </span>
+              <select id="logLevelSel" class="sort-sel worker-sel" aria-label="log level">
+                <option value="DEBUG">DEBUG</option>
+                <option value="INFO" selected>INFO</option>
+                <option value="WARN">WARN</option>
+                <option value="ERROR">ERROR</option>
+              </select>
+            </div>
+            <p class="settings-help-panel hidden" data-help-panel="logLevel" data-i18n="logLevelTitle">控制写入日志的最低等级。DEBUG 会记录更细的调试信息，仅影响之后的新日志</p>
+          </div>
           <div class="settings-field">
             <div class="settings-row">
               <span class="settings-label">

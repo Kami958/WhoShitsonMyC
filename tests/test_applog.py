@@ -1,4 +1,4 @@
-"""进程内 applog：脱敏、环形缓冲、导出格式、等级门槛。"""
+"""进程内 applog：脱敏、内存条数上限、导出格式、等级门槛。"""
 
 from __future__ import annotations
 
@@ -50,8 +50,16 @@ def test_does_not_auto_persist_and_export_text():
     assert "hello" in text
     assert "careful" in text
     assert "backend: logging" in text
-    # 明确不写磁盘：模块无默认日志文件路径 API
-    assert not hasattr(applog, "log_file_path")
+    assert "file: on" not in text
+    assert "file: off" not in text
+
+
+def test_long_message_not_content_truncated():
+    big = "Z" * 9000
+    applog.info(big)
+    entries = applog.get_entries()
+    assert entries
+    assert entries[-1]["message"] == big
 
 
 def test_clear_and_count():
@@ -64,15 +72,16 @@ def test_clear_and_count():
     assert applog.count() == 0
 
 
-def test_ring_buffer_cap_is_1024():
-    assert applog._MAX_ENTRIES == 1024
+def test_entries_cap_is_5000():
+    assert applog._MAX_ENTRIES == 5000
+    assert applog.get_entries_cap() == 5000
     applog.clear()
-    for i in range(1100):
+    for i in range(5100):
         applog.info(f"row-{i}")
-    assert applog.count() == 1024
+    assert applog.count() == 5000
     entries = applog.get_entries()
-    assert entries[0]["message"] == "row-76"  # 1100-1024=76
-    assert entries[-1]["message"] == "row-1099"
+    assert entries[0]["message"] == "row-100"  # 5100-5000=100
+    assert entries[-1]["message"] == "row-5099"
 
 
 def test_env_summary_and_startup():
@@ -84,7 +93,7 @@ def test_env_summary_and_startup():
     assert applog.get_env_summary()
     text = applog.format_export()
     assert "Env:" in text
-    assert "buffer_cap: 1024" in text
+    assert "entries_cap: 5000" in text
     assert "min_level:" in text
     entries = applog.get_entries()
     assert any("App started" in (e.get("message") or "") for e in entries)

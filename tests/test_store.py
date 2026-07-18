@@ -18,12 +18,14 @@ from core.store import (
     delete_snapshot_folder,
     get_compress_snapshots,
     get_lang,
+    get_log_level,
     get_log_sanitize,
     get_scan_workers,
     get_snapshot_dir_configured,
     get_theme,
     get_use_mft,
     get_search_memory_index,
+    is_log_level_explicit,
     is_log_sanitize_explicit,
     list_snapshot_folders,
     list_snapshots,
@@ -34,6 +36,7 @@ from core.store import (
     sanitize_folder_name,
     set_compress_snapshots,
     set_lang,
+    set_log_level,
     set_log_sanitize,
     set_note,
     set_scan_workers,
@@ -60,6 +63,8 @@ def _isolate_settings(tmp_path, monkeypatch):
     store._search_memory_index = True
     store._log_sanitize = True
     store._log_sanitize_explicit = None
+    store._log_level = "INFO"
+    store._log_level_explicit = None
     store._scan_workers = store.default_scan_workers()
     store._lang = "en"
     store._theme = "light"
@@ -285,6 +290,17 @@ def test_log_sanitize_defaults_on_and_explicit_flag():
     assert get_log_sanitize() is True
 
 
+def test_log_level_defaults_info_and_explicit_flag():
+    assert get_log_level() == "INFO"
+    assert is_log_level_explicit() is False
+    assert set_log_level("debug") == "DEBUG"
+    assert get_log_level() == "DEBUG"
+    assert is_log_level_explicit() is True
+    assert set_log_level("WARNING") == "WARN"
+    assert get_log_level() == "WARN"
+    assert set_log_level("nope") == "INFO"
+
+
 def test_yaml_roundtrip_helpers(tmp_path):
     path = str(tmp_path / "settings.yaml")
     custom = str(tmp_path / "snaps")
@@ -294,6 +310,7 @@ def test_yaml_roundtrip_helpers(tmp_path):
         "use_mft": True,
         "search_memory_index": False,
         "log_sanitize": False,
+        "log_level": "DEBUG",
         "lang": "zh",
         "theme": "light",
         "snapshot_dir": custom,
@@ -306,6 +323,8 @@ def test_yaml_roundtrip_helpers(tmp_path):
     assert "\n  scan_workers:" in raw or "\n  scan_workers: " in raw
     assert "search_memory_index: false" in raw
     assert "log_sanitize: false" in raw
+    assert "log_level: DEBUG" in raw
+    assert "log_to_file" not in raw
     loaded = _load_settings_yaml(path)
     assert "persist" not in loaded
     # common / ai 同为顶层节；值先是字符串，类型在 _apply_loaded 转
@@ -315,6 +334,8 @@ def test_yaml_roundtrip_helpers(tmp_path):
     assert common["use_mft"] == "true"
     assert common["search_memory_index"] == "false"
     assert common["log_sanitize"] == "false"
+    assert common["log_level"] == "DEBUG"
+    assert "log_to_file" not in common
     assert common["lang"] == "zh"
     assert common["theme"] == "light"
     assert common["snapshot_dir"] == os.path.abspath(custom)
@@ -326,6 +347,8 @@ def test_yaml_roundtrip_helpers(tmp_path):
     assert get_search_memory_index() is False
     assert get_log_sanitize() is False
     assert is_log_sanitize_explicit() is True
+    assert get_log_level() == "DEBUG"
+    assert is_log_level_explicit() is True
 
 
 def test_yaml_loads_legacy_flat_format(tmp_path):
@@ -626,15 +649,20 @@ def test_apply_settings_batch_always_writes(tmp_path):
             "compress_snapshots": False,
             "use_mft": True,
             "log_sanitize": False,
+            "log_level": "DEBUG",
             "snapshot_dir": custom,
             "persist_settings": False,  # 旧键忽略，仍写盘
         }
     )
     assert get_log_sanitize() is False
     assert is_log_sanitize_explicit() is True
+    assert get_log_level() == "DEBUG"
+    assert is_log_level_explicit() is True
     assert out["scan_workers"] == 5
     assert out["compress_snapshots"] is False
     assert out["use_mft"] is True
+    assert out["log_level"] == "DEBUG"
+    assert "log_to_file" not in out
     assert "persist_settings" not in out
     assert out["snapshot_dir_is_custom"] is True
     assert out["settings_file_exists"] is True
@@ -645,6 +673,8 @@ def test_apply_settings_batch_always_writes(tmp_path):
     assert common.get("scan_workers") == "5"
     assert common.get("compress_snapshots") == "false"
     assert common.get("use_mft") == "true"
+    assert common.get("log_level") == "DEBUG"
+    assert "log_to_file" not in common
     assert common.get("snapshot_dir") == os.path.abspath(custom)
     assert "persist" not in loaded
     assert "persist" not in common

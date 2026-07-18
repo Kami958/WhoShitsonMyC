@@ -42,6 +42,7 @@ async function loadSettings() {
     use_mft: !!s.use_mft,
     search_memory_index: s.search_memory_index !== false,
     log_sanitize: s.log_sanitize !== false,
+    log_level: _normalizeLogLevel(s.log_level),
     // 空串 = 内置目录；非空 = 自定义绝对路径
     snapshot_dir: s.snapshot_dir_is_custom ? (s.snapshot_dir_configured || s.snapshot_dir || "") : "",
     snapshot_dir_display: s.snapshot_dir || "",
@@ -55,6 +56,13 @@ async function loadSettings() {
   };
   fillAppVersionLabel(s.version || "");
   fillSettingsFormFromDraft();
+}
+
+function _normalizeLogLevel(raw) {
+  const s = String(raw || "").trim().toUpperCase();
+  if (s === "WARNING") return "WARN";
+  if (s === "DEBUG" || s === "INFO" || s === "WARN" || s === "ERROR") return s;
+  return "INFO";
 }
 
 function _normalizeBlacklistDraft(raw) {
@@ -191,6 +199,10 @@ function fillSettingsFormFromDraft() {
   const logSanitizeChk = $("#logSanitizeChk");
   if (logSanitizeChk) {
     logSanitizeChk.checked = d.log_sanitize !== false;
+  }
+  const logLevelSel = $("#logLevelSel");
+  if (logLevelSel) {
+    logLevelSel.value = _normalizeLogLevel(d.log_level);
   }
   fillBlacklistSelect();
   updateSnapDirLine({
@@ -346,7 +358,7 @@ async function refreshLogView() {
   }
   let res;
   try {
-    res = await state.api.get_app_log(1024);
+    res = await state.api.get_app_log(5000);
   } catch (e) {
     toast(String(e), true);
     return;
@@ -720,6 +732,7 @@ async function applySettingsAndClose() {
   const mftChk = $("#mftChk");
   const searchMemIdxChk = $("#searchMemIdxChk");
   const logSanitizeChk = $("#logSanitizeChk");
+  const logLevelSel = $("#logLevelSel");
   const payload = {
     scan_workers: workerSel ? Number(workerSel.value) : _settingsDraft.scan_workers,
     compress_snapshots: compressChk ? !!compressChk.checked : _settingsDraft.compress_snapshots,
@@ -730,6 +743,9 @@ async function applySettingsAndClose() {
     log_sanitize: logSanitizeChk
       ? !!logSanitizeChk.checked
       : (_settingsDraft.log_sanitize !== false),
+    log_level: logLevelSel
+      ? _normalizeLogLevel(logLevelSel.value)
+      : _normalizeLogLevel(_settingsDraft.log_level),
     snapshot_dir: _settingsDraft.snapshot_dir_is_custom
       ? (_settingsDraft.snapshot_dir || "")
       : "",
@@ -892,6 +908,7 @@ async function resetSettingsToDefaults() {
     use_mft: !!res.use_mft,
     search_memory_index: res.search_memory_index !== false,
     log_sanitize: res.log_sanitize !== false,
+    log_level: _normalizeLogLevel(res.log_level),
     snapshot_dir: "",
     snapshot_dir_display: res.snapshot_dir || res.snapshot_dir_builtin || "",
     snapshot_dir_builtin: res.snapshot_dir_builtin || "",
@@ -900,6 +917,7 @@ async function resetSettingsToDefaults() {
     mft_platform_ok: res.mft_platform_ok !== false,
     is_admin: !!res.is_admin,
     cpu_count: res.cpu_count,
+    delete_blacklist: _normalizeBlacklistDraft(res.delete_blacklist),
   };
   fillSettingsFormFromDraft();
   toast(t("resetSettingsDone"));

@@ -5,14 +5,14 @@
 - 运行时业务 / 模块 / 扫描计时 → **只** 调本模块 ``debug/info/warn/error/exception``
 - 不要 ``print`` / ``traceback.print_exc`` / 裸 ``logging.getLogger`` 记运行日志
 - CLI 工具（``build.py``、``dev/bench_*``）面向终端的进度输出可以 ``print``，那不是应用日志
-- 默认不落盘（仅内存环形缓冲）；设置页读缓冲；用户可手动导出
+- 仅本次运行内存（按条数上限丢最旧整条，正文不截断）；关闭软件即消失；设置页可读；用户可手动导出为文件
 - 路径脱敏默认开启；写入时处理，关闭后只影响之后的新日志
 
-环境：
+门槛来源（设置优先）：
 
-- ``WSMC_LOG_LEVEL`` = DEBUG|INFO|WARN|ERROR
-- ``WSMC_DEBUG=1`` → 未设前者时门槛 DEBUG
-- ``WSMC_LOG_SANITIZE`` = 0/1（false/true）：仅当设置项未写明时生效；设置项优先
+- 设置页 / ``settings.yaml`` 的 ``log_level``（显式写入后优先）
+- 否则环境：``WSMC_LOG_LEVEL`` = DEBUG|INFO|WARN|ERROR；``WSMC_DEBUG=1`` 未设前者时门槛 DEBUG
+- ``WSMC_LOG_SANITIZE`` = 0/1：仅当设置项未写明路径脱敏时生效；设置项优先
 - 源码 + 门槛 ≤ DEBUG → 同步 mirror stderr（exe 不 mirror）
 """
 
@@ -29,10 +29,8 @@ from collections import deque
 from collections.abc import Sequence
 from typing import Any
 
-# 保留条数上限（内存）；满则丢最旧
-_MAX_ENTRIES = 1024
-_MAX_MSG_LEN = 4000
-_MAX_TRACE_LEN = 12000
+# 内存保留条数上限；满则丢最旧整条（单条正文不截断）
+_MAX_ENTRIES = 5000
 
 _LEVELS = ("DEBUG", "INFO", "WARN", "ERROR")
 _LEVEL_RANK = {name: i for i, name in enumerate(_LEVELS)}
@@ -83,7 +81,7 @@ class _LevelNameFilter(logging.Filter):
 
 
 class _SanitizeFilter(logging.Filter):
-    """message / 异常栈截断；按开关决定是否路径脱敏。写入 ``exc_text`` 供各 Handler 共用。"""
+    """按开关路径脱敏；正文与异常栈不截断。写入 ``exc_text`` 供各 Handler 共用。"""
 
     def filter(self, record: logging.LogRecord) -> bool:
         try:
@@ -93,7 +91,7 @@ class _SanitizeFilter(logging.Filter):
         text = str(msg).strip() or "(empty)"
         if get_sanitize_enabled():
             text = sanitize(text)
-        record.msg = _clip(text, _MAX_MSG_LEN)
+        record.msg = text
         record.args = ()
 
         tb = ""
@@ -109,7 +107,6 @@ class _SanitizeFilter(logging.Filter):
         if tb:
             if get_sanitize_enabled():
                 tb = sanitize(tb)
-            tb = _clip(tb, _MAX_TRACE_LEN)
             record.exc_text = tb
             # 避免 StreamHandler 再格式化出未脱敏栈
             record.exc_info = None
@@ -118,7 +115,7 @@ class _SanitizeFilter(logging.Filter):
 
 
 class _MemoryHandler(logging.Handler):
-    """写入进程内环形缓冲（设置页 / 导出）。"""
+    """写入进程内内存列表（设置页 / 导出）。"""
 
     def emit(self, record: logging.LogRecord) -> None:
         global _seq
@@ -223,6 +220,11 @@ def _apply_level_locked() -> None:
         _logger.removeHandler(_stderr_handler)
     if want_stderr:
         _stderr_handler.setLevel(py_level)
+
+
+def get_entries_cap() -> int:
+    """内存最多保留的日志条数。"""
+    return int(_MAX_ENTRIES)
 
 
 def get_min_level() -> str:
@@ -379,12 +381,6 @@ def sanitize(text: str) -> str:
     return s
 
 
-def _clip(s: str, n: int) -> str:
-    if len(s) <= n:
-        return s
-    return s[: n - 3] + "..."
-
-
 def log(
     level: str,
     message: str,
@@ -514,7 +510,7 @@ def format_export(entries: list[dict[str, Any]] | None = None) -> str:
         f"Env: {env}",
         f"min_level: {get_min_level()}  sanitize: "
         f"{'on' if get_sanitize_enabled() else 'off'}  "
-        f"buffer_cap: {_MAX_ENTRIES}  entries: {len(rows)}",
+        f"entries_cap: {_MAX_ENTRIES}  entries: {len(rows)}",
         f"backend: logging logger={LOGGER_NAME}",
         "-" * 60,
     ]
@@ -547,7 +543,7 @@ def note_startup(version: str = "") -> None:
     bits = f"v{ver} " if ver else ""
     info(
         f"App started {bits}| {_env_summary} "
-        f"| log=memory+logging cap={_MAX_ENTRIES} min_level={get_min_level()}"
+        f"| log=memory entries_cap={_MAX_ENTRIES} min_level={get_min_level()}"
         f" sanitize={'on' if get_sanitize_enabled() else 'off'}"
     )
     debug(

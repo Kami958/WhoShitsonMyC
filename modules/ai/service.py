@@ -36,11 +36,8 @@ PUBLIC_METHODS = frozenset(
     }
 )
 
-# DEBUG 下 dump 实际发给模型的 messages / 模型回复；单条 / 整段再截断，避免撑爆缓冲。
+# DEBUG 下 dump 实际发给模型的 messages / 模型回复（全文，不截断）。
 # 路径仍走 applog.sanitize；默认 INFO 门槛下不会进日志。
-_LOG_MSG_CONTENT_MAX = 2500
-_LOG_MESSAGES_TOTAL_MAX = 8000
-_LOG_RESPONSE_MAX = 4000
 
 # 配置 diff 日志字段顺序（api_key 只记有无，不记明文）
 _AI_DIFF_FIELDS = (
@@ -170,15 +167,8 @@ def _diff_ai_config(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
     return parts
 
 
-def _clip_for_log(text: str, limit: int) -> str:
-    body = text if isinstance(text, str) else str(text or "")
-    if len(body) <= limit:
-        return body
-    return body[: max(0, limit - 1)] + "…"
-
-
 def _format_messages_for_log(messages: list[dict] | None) -> str:
-    """把 messages 压成可读多行文本（仅调试用）。
+    """把 messages 压成可读多行文本（仅调试用，全文不截断）。
 
     格式示例::
 
@@ -189,38 +179,27 @@ def _format_messages_for_log(messages: list[dict] | None) -> str:
         （正文）
     """
     lines: list[str] = []
-    total = 0
     for i, item in enumerate(messages or []):
         if not isinstance(item, dict):
-            chunk = f"#{i} <非字典消息>"
+            lines.append(f"#{i} <非字典消息>")
+            continue
+        role = str(item.get("role") or "?")
+        content = item.get("content")
+        if content is None:
+            raw = ""
+        elif isinstance(content, str):
+            raw = content
         else:
-            role = str(item.get("role") or "?")
-            content = item.get("content")
-            if content is None:
-                raw = ""
-            elif isinstance(content, str):
-                raw = content
-            else:
-                raw = str(content)
-            body = _clip_for_log(raw, _LOG_MSG_CONTENT_MAX)
-            # 「字」= Python 字符串长度（字符数），不是 token
-            chunk = f"#{i} {role} · {len(raw)} 字\n{body}"
-        if total + len(chunk) + 1 > _LOG_MESSAGES_TOTAL_MAX:
-            remain = max(0, _LOG_MESSAGES_TOTAL_MAX - total - 20)
-            if remain > 0:
-                lines.append(chunk[:remain] + "…")
-            lines.append(f"... 已截断，共 {len(messages or [])} 条消息")
-            break
-        lines.append(chunk)
-        total += len(chunk) + 1
+            raw = str(content)
+        # 「字」= Python 字符串长度（字符数），不是 token
+        lines.append(f"#{i} {role} · {len(raw)} 字\n{raw}")
     return "\n---\n".join(lines) if lines else "(empty)"
 
 
 def _format_response_for_log(text: str | None) -> str:
-    """模型完整回复的调试文本。"""
+    """模型完整回复的调试文本（全文不截断）。"""
     raw = text if isinstance(text, str) else str(text or "")
-    body = _clip_for_log(raw, _LOG_RESPONSE_MAX)
-    return f"assistant · {len(raw)} 字\n{body}"
+    return f"assistant · {len(raw)} 字\n{raw}"
 
 
 class AiService:

@@ -175,6 +175,13 @@ function wireEvents() {
       openSummaryMenu("filter", e.currentTarget);
     };
   }
+  const collapseAllBtn = $("#collapseAllBtn");
+  if (collapseAllBtn) {
+    collapseAllBtn.onclick = (e) => {
+      e.stopPropagation();
+      collapseAllTree();
+    };
+  }
   const snapSortMenuBtn = $("#snapSortMenuBtn");
   if (snapSortMenuBtn) {
     snapSortMenuBtn.onclick = (e) => {

@@ -406,6 +406,16 @@ def _normalize_theme(raw: str) -> str:
     return "dark" if str(raw).strip().lower() == "dark" else "light"
 
 
+def _normalize_log_level(raw) -> str:
+    """日志等级：DEBUG|INFO|WARN|ERROR；WARNING 视作 WARN；非法回落 INFO。"""
+    s = str(raw or "").strip().upper()
+    if s == "WARNING":
+        s = "WARN"
+    if s in ("DEBUG", "INFO", "WARN", "ERROR"):
+        return s
+    return "INFO"
+
+
 def _normalize_lang(raw: str) -> str:
     return "zh" if str(raw).strip().lower() == "zh" else "en"
 
@@ -588,6 +598,7 @@ def _write_settings_yaml(path: str, data: dict) -> None:
         f"  use_mft: {'true' if data.get('use_mft') else 'false'}",
         f"  search_memory_index: {'true' if data.get('search_memory_index', True) else 'false'}",
         f"  log_sanitize: {'true' if data.get('log_sanitize', True) else 'false'}",
+        f"  log_level: {_normalize_log_level(data.get('log_level', 'INFO'))}",
         f"  lang: {_normalize_lang(data.get('lang', 'en'))}",
         f"  theme: {_normalize_theme(data.get('theme', 'light'))}",
         f"  snapshot_dir: {_yaml_quote(snap)}",
@@ -628,6 +639,10 @@ _search_memory_index = True  # 默认开：打开搜索时预热内存索引
 _log_sanitize = True  # 默认开：写入应用日志时脱敏绝对路径
 # None = YAML 未写明该键（可用环境变量兜底）；True/False = 用户/文件显式设定
 _log_sanitize_explicit: bool | None = None
+# 日志最低等级：DEBUG|INFO|WARN|ERROR；默认 INFO
+_log_level = "INFO"
+# None = YAML 未写明（可用 WSMC_LOG_LEVEL / WSMC_DEBUG 兜底）
+_log_level_explicit: bool | None = None
 _lang = "en"  # 启动时 app 会按系统语言再设；YAML 优先覆盖
 _theme = "light"
 # 自定义快照目录；空串 = 使用 builtin_snapshot_dir()
@@ -728,6 +743,7 @@ def _apply_loaded(data: dict) -> None:
     """
     global _scan_workers, _compress_snapshots, _use_mft, _search_memory_index
     global _log_sanitize, _log_sanitize_explicit
+    global _log_level, _log_level_explicit
     global _lang, _theme, _snapshot_dir, _delete_blacklist
     if not data:
         return
@@ -753,6 +769,9 @@ def _apply_loaded(data: dict) -> None:
         if b is not None:
             _log_sanitize = b
             _log_sanitize_explicit = b
+    if "log_level" in common:
+        _log_level = _normalize_log_level(common.get("log_level"))
+        _log_level_explicit = True
     if "lang" in common:
         _lang = _normalize_lang(_as_str(common.get("lang"), "en"))
     if "theme" in common:
@@ -774,6 +793,7 @@ def _settings_payload() -> dict:
         "use_mft": _use_mft,
         "search_memory_index": _search_memory_index,
         "log_sanitize": _log_sanitize,
+        "log_level": _normalize_log_level(_log_level),
         "lang": _lang,
         "theme": _theme,
         "snapshot_dir": _snapshot_dir,
@@ -897,6 +917,30 @@ def set_log_sanitize(enabled: bool) -> bool:
         _log_sanitize_explicit = new
         _persist()
     return _log_sanitize
+
+
+def get_log_level() -> str:
+    """应用日志最低等级（DEBUG|INFO|WARN|ERROR），默认 INFO。"""
+    return _normalize_log_level(_log_level)
+
+
+def is_log_level_explicit() -> bool:
+    """``settings.yaml`` / 设置页是否显式写过 ``log_level``。
+
+    False 时启动可用 ``WSMC_LOG_LEVEL`` / ``WSMC_DEBUG`` 兜底。
+    """
+    return _log_level_explicit is not None
+
+
+def set_log_level(level: str) -> str:
+    """设置日志最低等级；值变化或首次显式设定时写 YAML。"""
+    global _log_level, _log_level_explicit
+    new = _normalize_log_level(level)
+    if new != _normalize_log_level(_log_level) or _log_level_explicit is None:
+        _log_level = new
+        _log_level_explicit = True
+        _persist()
+    return _log_level
 
 
 def get_lang() -> str:
@@ -1148,12 +1192,13 @@ def apply_settings(
     ``progress`` 会在迁移过程中被调用（见 :func:`migrate_snapshots`）。
 
     可识别键：``scan_workers``、``compress_snapshots``、``use_mft``、
-    ``search_memory_index``、``log_sanitize``、``snapshot_dir``（空串=内置目录）、
-    ``delete_blacklist``。
+    ``search_memory_index``、``log_sanitize``、``log_level``、
+    ``snapshot_dir``（空串=内置目录）、``delete_blacklist``。
     缺省键保持当前值。
     """
     global _scan_workers, _compress_snapshots, _use_mft, _search_memory_index
     global _log_sanitize, _log_sanitize_explicit
+    global _log_level, _log_level_explicit
     global _snapshot_dir, _delete_blacklist
 
     if not isinstance(payload, dict):
@@ -1173,6 +1218,9 @@ def apply_settings(
     if "log_sanitize" in payload:
         _log_sanitize = bool(payload["log_sanitize"])
         _log_sanitize_explicit = _log_sanitize
+    if "log_level" in payload:
+        _log_level = _normalize_log_level(payload.get("log_level"))
+        _log_level_explicit = True
     if "delete_blacklist" in payload:
         _delete_blacklist = _normalize_delete_blacklist(payload.get("delete_blacklist"))
     if "snapshot_dir" in payload:
@@ -1215,6 +1263,7 @@ def reset_settings_to_defaults(*, lang: str | None = None) -> dict:
     """
     global _scan_workers, _compress_snapshots, _use_mft, _search_memory_index
     global _log_sanitize, _log_sanitize_explicit
+    global _log_level, _log_level_explicit
     global _lang, _theme, _snapshot_dir, _delete_blacklist
     global _ai_enabled, _ai_base_url, _ai_model, _ai_api_key
     global _ai_extra_prompt, _ai_consented, _ai_model_options
@@ -1226,6 +1275,8 @@ def reset_settings_to_defaults(*, lang: str | None = None) -> dict:
     _search_memory_index = True
     _log_sanitize = True
     _log_sanitize_explicit = None
+    _log_level = "INFO"
+    _log_level_explicit = None
     _theme = "light"
     _snapshot_dir = ""
     _delete_blacklist = []
@@ -1402,6 +1453,8 @@ def settings_dict() -> dict:
         "search_memory_index": _search_memory_index,
         "log_sanitize": bool(_log_sanitize),
         "log_sanitize_explicit": _log_sanitize_explicit is not None,
+        "log_level": _normalize_log_level(_log_level),
+        "log_level_explicit": _log_level_explicit is not None,
         "settings_path": settings_path(),
         "settings_file_exists": os.path.isfile(settings_path()),
         "app_data_dir": app_data_dir(),

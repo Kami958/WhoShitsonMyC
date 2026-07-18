@@ -38,11 +38,16 @@ def test_format_messages_for_log_roles_and_body():
     assert "chars=" not in text
 
 
-def test_format_messages_truncates_long_content():
-    big = "X" * (ai_service._LOG_MSG_CONTENT_MAX + 500)
-    text = _format_messages_for_log([{"role": "user", "content": big}])
-    assert "…" in text
-    assert len(text) < len(big)
+def test_format_messages_keeps_full_long_content():
+    big = "X" * 8000
+    question = "吹牛后面还有一整段真实问题内容不要丢"
+    body = f"{big}\n\n<user_input>\n{question}\n</user_input>"
+    text = _format_messages_for_log([{"role": "user", "content": body}])
+    assert big in text
+    assert "user_input" in text
+    assert question in text
+    assert "…" not in text
+    assert "已截断" not in text
 
 
 def test_format_response_for_log():

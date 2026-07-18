@@ -650,6 +650,18 @@ function buildNode(node, depth, ref) {
   return group;
 }
 
+/** 将整棵对比树收起到顶层（仅隐藏展开态，不卸载已加载子节点）。 */
+function collapseAllTree() {
+  const tree = $("#tree");
+  if (!tree) return;
+  for (const ch of tree.querySelectorAll(".children")) {
+    ch.classList.add("hidden");
+  }
+  for (const tw of tree.querySelectorAll(".twisty.open")) {
+    tw.classList.remove("open");
+  }
+}
+
 // ---- 对比树搜索 ----
 
 const SEARCH_PAGE_SIZE = 50;

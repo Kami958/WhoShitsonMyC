@@ -399,17 +399,19 @@ class Api:
     # ---- 应用日志（内存；默认不落盘） ------------------------------------
 
     def get_app_log(self, limit: int = 400) -> dict:
-        """返回进程内日志（旧→新）。仅内存缓冲，默认不落盘。"""
+        """返回进程内内存日志（旧→新）。不落盘；导出另走 export。"""
         try:
             n = int(limit)
         except (TypeError, ValueError):
             n = 400
-        n = max(1, min(n, 1024))
+        cap = int(applog.get_entries_cap())
+        n = max(1, min(n, cap))
         return {
             "ok": True,
             "entries": applog.get_entries(n),
             "count": applog.count(),
             "persisted": False,
+            "entries_cap": cap,
             "env": applog.get_env_summary(),
             "min_level": applog.get_min_level(),
             "sanitize": applog.get_sanitize_enabled(),
@@ -715,6 +717,7 @@ class Api:
         self._refresh_window_title()
         # 恢复默认后 yaml 已删：显式标志清空，可再吃环境变量
         _sync_log_sanitize_to_applog()
+        _sync_log_level_to_applog()
         applog.log_settings_event("settings", "reset to defaults", level="INFO")
         out = {"ok": True}
         out.update(d)
@@ -796,8 +799,9 @@ class Api:
             )
             return
 
-        # 日志脱敏：设置项已写入则同步 applog（设置优先于环境变量）
+        # 日志脱敏 / 等级：设置项已写入则同步 applog（设置优先于环境变量）
         _sync_log_sanitize_to_applog()
+        _sync_log_level_to_applog()
         # 变更日志走统一接口（DEBUG）；路径原文写入，是否脱敏由 applog 开关决定
         applog.log_settings_changed("settings", _diff_common_settings(before, d))
         out = {"ok": True}
@@ -1063,16 +1067,46 @@ class Api:
     def reveal_path(self, root: str, rel_path: str) -> dict:
         """在资源管理器中定位一个对比节点对应的真实路径。
 
-        目标已被删除时退而求其次打开其父目录；父目录也没了才报错。
+        目录：直接打开该文件夹（比 /select 更稳，尤其含空格路径）。
+        文件：explorer ``/select,`` + 路径分两个参数传入（list 形式，
+        空格/单引号由 CreateProcess 原样传递，勿拼成单个带引号字符串）。
+        目标已不存在时退而求其次打开父目录。
         """
         full = os.path.join(root, rel_path) if rel_path else root
-        if os.path.exists(full):
-            # /select, 让资源管理器打开父目录并选中该项。
-            subprocess.Popen(["explorer", f"/select,{full}"])  # noqa: S603,S607
-            return {"ok": True}
+        full = os.path.normpath(full)
+        try:
+            if os.path.isdir(full):
+                # 对比树多为目录；startfile 走 Shell 关联，空格路径可靠
+                os.startfile(full)  # noqa: S606
+                return {"ok": True}
+            if os.path.isfile(full) or os.path.exists(full):
+                # /select, 与路径必须是两个 argv；合成 "/select,path" 或
+                # '/select,"path"' 在含空格时会落到「文档」/此电脑。
+                # 见 https://stackoverflow.com/questions/281888
+                windir = os.environ.get("WINDIR") or r"C:\Windows"
+                explorer = os.path.join(windir, "explorer.exe")
+                subprocess.Popen(  # noqa: S603
+                    [explorer, "/select,", full]
+                )
+                return {"ok": True}
+        except OSError as exc:
+            return {
+                "error": i18n.t(
+                    f"无法打开：{full}\n{exc}",
+                    f"Cannot open: {full}\n{exc}",
+                )
+            }
         parent = os.path.dirname(full)
-        if os.path.isdir(parent):
-            os.startfile(parent)  # noqa: S606
+        if parent and os.path.isdir(parent):
+            try:
+                os.startfile(parent)  # noqa: S606
+            except OSError as exc:
+                return {
+                    "error": i18n.t(
+                        f"无法打开：{parent}\n{exc}",
+                        f"Cannot open: {parent}\n{exc}",
+                    )
+                }
             return {"ok": True, "message": i18n.t(
                 "该项已不存在，已打开其所在目录",
                 "This item no longer exists; opened its parent folder instead")}
@@ -2060,6 +2094,22 @@ def _sync_log_sanitize_to_applog() -> bool:
     return applog.set_sanitize_enabled(enabled)
 
 
+def _sync_log_level_to_applog() -> str:
+    """把日志最低等级同步到 applog。
+
+    优先级：设置项显式值（yaml / 设置页）> 环境变量 ``WSMC_LOG_LEVEL`` / ``WSMC_DEBUG`` > 默认 INFO。
+    返回生效后的等级名。
+    """
+    if store.is_log_level_explicit():
+        level = store.get_log_level()
+        return applog.set_min_level(level)
+    # 未写设置：交给 applog 读环境（set_min_level(None)）
+    level = applog.set_min_level(None)
+    # 仅会话与 store 展示对齐，不写 yaml、不标 explicit
+    store._log_level = level  # noqa: SLF001
+    return level
+
+
 def _settings_field_log_value(key: str, data: dict) -> str:
     """通用设置字段的日志可读值。
 
@@ -2077,6 +2127,8 @@ def _settings_field_log_value(key: str, data: dict) -> str:
         "snapshot_dir_is_custom",
     ):
         return "true" if bool(data.get(key)) else "false"
+    if key == "log_level":
+        return str(data.get(key) or "INFO").strip().upper() or "INFO"
     if key == "scan_workers":
         return str(int(data.get(key) or 0))
     if key in ("snapshot_dir", "snapshot_dir_configured"):
@@ -2101,6 +2153,7 @@ def _diff_common_settings(before: dict, after: dict) -> list[str]:
         "use_mft",
         "search_memory_index",
         "log_sanitize",
+        "log_level",
         "snapshot_dir_configured",
         "snapshot_dir",
         "delete_blacklist",
@@ -2139,6 +2192,11 @@ def _diff_common_settings(before: dict, after: dict) -> list[str]:
         ):
             if bool(before.get(key)) == bool(after.get(key)):
                 continue
+        elif key == "log_level":
+            b = str(before.get(key) or "INFO").strip().upper()
+            a = str(after.get(key) or "INFO").strip().upper()
+            if b == a:
+                continue
         elif key == "scan_workers":
             if int(before.get(key) or 0) == int(after.get(key) or 0):
                 continue
@@ -2161,8 +2219,9 @@ def main() -> None:
     """创建窗口并启动应用。"""
     # 语言 / 主题：settings.yaml 显式写入则用它；语言缺省用系统语言。
     # 标题栏默认跟 store 主题，避免先按 dark 刷再被前端纠正。
-    # 脱敏开关须在 note_startup 之前生效，启动日志才反映真实状态。
+    # 脱敏 / 日志等级须在 note_startup 之前生效，启动日志才反映真实状态。
     _sync_log_sanitize_to_applog()
+    _sync_log_level_to_applog()
     applog.note_startup(APP_VERSION)
     # 语言在 common.lang（旧扁平顶层 lang 亦经 _common_view 合并），
     # 不能写 ``"lang" in _disk``——分节 YAML 顶层只有 common/ai，会误判成「无语言」
