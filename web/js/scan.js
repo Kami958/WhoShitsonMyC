@@ -263,6 +263,9 @@ function onPyEvent(event, payload) {
       // 打开搜索框时内存索引预热进度（started / ready / failed）
       if (typeof onSearchPreheatEvent === "function") onSearchPreheatEvent(payload);
       break;
+    case "window-size-saved":
+      toast(t("windowSizeSaved"));
+      break;
     case "ai-chunk":
     case "ai-done":
     case "ai-error":

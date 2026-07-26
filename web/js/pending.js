@@ -11,6 +11,8 @@ const _tool = {
   items: [],
   permanent: false,
   executing: false,
+  // 待删除列表排序：added-desc|added-asc|name-asc|name-desc|size-desc|path-asc
+  sort: "added-desc",
 };
 
 let _pendingIdSeq = 1;
@@ -513,11 +515,72 @@ function addCompareNodeToPending(node) {
     name: (node && (node.name || node.path)) || rel,
     isDir: !!(node && node.is_dir),
     full,
+    size: Number(node && (node.new_size != null ? node.new_size : node.old_size)) || 0,
+    oldSize: Number(node && node.old_size) || 0,
+    newSize: Number(node && node.new_size) || 0,
+    delta: Number(node && node.delta) || (
+      (Number(node && node.new_size) || 0) - (Number(node && node.old_size) || 0)
+    ),
+    addedAt: Date.now(),
     result: null,
   });
   renderPendingList();
   openToolPanel("pending");
   toast(t("pendingAdded"));
+}
+
+/** 批量加入待删除；nodes 为对比树节点摘要列表。 */
+function addCompareNodesToPending(nodes) {
+  const list = Array.isArray(nodes) ? nodes : [];
+  if (!list.length) {
+    toast(t("treeSelectNeed"), true);
+    return { added: 0, skippedDup: 0 };
+  }
+  if (!state.compareRoot) {
+    toast(t("deleteFail"), true);
+    return { added: 0, skippedDup: 0 };
+  }
+  const root = state.compareRoot;
+  let added = 0;
+  let skippedDup = 0;
+  for (const node of list) {
+    const rel = (node && node.path) || "";
+    if (!rel) continue;
+    const key = pendingItemKey(root, rel);
+    if (_tool.items.some((it) => pendingItemKey(it.root, it.rel) === key)) {
+      skippedDup += 1;
+      continue;
+    }
+    const full = fullPath(root, rel);
+    _tool.items.push({
+      id: `p${_pendingIdSeq++}`,
+      root,
+      rel,
+      name: (node && (node.name || node.path)) || rel,
+      isDir: !!(node && node.is_dir),
+      full,
+      size: Number(node && (node.new_size != null ? node.new_size : node.old_size)) || 0,
+      oldSize: Number(node && node.old_size) || 0,
+      newSize: Number(node && node.new_size) || 0,
+      delta: Number(node && node.delta) || (
+        (Number(node && node.new_size) || 0) - (Number(node && node.old_size) || 0)
+      ),
+      addedAt: Date.now(),
+      result: null,
+    });
+    added += 1;
+  }
+  if (added > 0) {
+    renderPendingList();
+    openToolPanel("pending");
+    toast(t("pendingAddedN", added));
+  } else if (skippedDup > 0) {
+    toast(t("pendingExists"));
+    openToolPanel("pending");
+  } else {
+    toast(t("treeSelectNeed"), true);
+  }
+  return { added, skippedDup };
 }
 
 /** 可勾选清单对话框 resolver；同时只允许一个 */
@@ -734,6 +797,8 @@ async function proposePendingItems(items, opts) {
       name: String((row && row.name) || rel || full),
       isDir: !!(row && row.is_dir),
       full,
+      size: Number(row && row.size) || 0,
+      addedAt: Date.now(),
       result: null,
     });
     added += 1;
@@ -865,12 +930,150 @@ function enqueuePendingFromAi(items) {
   return { added, skippedDup };
 }
 
+const PENDING_SORT_OPTIONS = [
+  { value: "added-desc", key: "pendingSortAddedDesc" }, // 默认：加入时间
+  { value: "delta-desc", key: "pendingSortDeltaDesc" }, // 变化大小
+  { value: "pct-desc", key: "pendingSortPctDesc" },     // 变化比例
+  { value: "size-desc", key: "pendingSortSizeDesc" },   // 占用大小
+  { value: "name-asc", key: "pendingSortNameAsc" },     // 名称
+];
+
+function _pendingDelta(it) {
+  if (!it) return 0;
+  if (it.delta != null && Number.isFinite(Number(it.delta))) return Number(it.delta);
+  return (Number(it.newSize) || 0) - (Number(it.oldSize) || 0);
+}
+
+function _pendingPct(it) {
+  const oldSize = Number(it && it.oldSize) || 0;
+  const delta = Math.abs(_pendingDelta(it));
+  if (oldSize > 0) return delta / oldSize;
+  return delta !== 0 ? Number.POSITIVE_INFINITY : 0;
+}
+
+function sortedPendingItems(items) {
+  const list = Array.isArray(items) ? items.slice() : [];
+  const sort = (_tool && _tool.sort) || "added-desc";
+  const loc = typeof cmpLocale === "function" ? cmpLocale() : undefined;
+  const byPath = (a, b) =>
+    String(a.full || a.rel || "").localeCompare(String(b.full || b.rel || ""), loc);
+  if (sort === "delta-desc") {
+    list.sort(
+      (a, b) =>
+        Math.abs(_pendingDelta(b)) - Math.abs(_pendingDelta(a)) ||
+        (Number(b.size) || 0) - (Number(a.size) || 0) ||
+        byPath(a, b)
+    );
+  } else if (sort === "pct-desc") {
+    list.sort(
+      (a, b) =>
+        _pendingPct(b) - _pendingPct(a) ||
+        Math.abs(_pendingDelta(b)) - Math.abs(_pendingDelta(a)) ||
+        byPath(a, b)
+    );
+  } else if (sort === "size-desc") {
+    list.sort(
+      (a, b) =>
+        (Number(b.size) || 0) - (Number(a.size) || 0) ||
+        byPath(a, b)
+    );
+  } else if (sort === "name-asc") {
+    const loc = typeof cmpLocale === "function" ? cmpLocale() : undefined;
+    list.sort(
+      (a, b) =>
+        String(a.name || a.rel || "").localeCompare(String(b.name || b.rel || ""), loc) ||
+        byPath(a, b)
+    );
+  } else {
+    // added-desc 默认：后加入的在上
+    list.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0) || byPath(a, b));
+  }
+  return list;
+}
+
+function syncPendingSortChrome() {
+  const sort = (_tool && _tool.sort) || "added-desc";
+  const btn = $("#pendingSortBtn");
+  const opt = PENDING_SORT_OPTIONS.find((o) => o.value === sort) || PENDING_SORT_OPTIONS[0];
+  if (btn) {
+    btn.classList.toggle("is-active", sort !== "added-desc");
+    btn.setAttribute("aria-expanded", "false");
+    // 复用 summary-icon-btn：只改 title，不改内部 SVG
+    const title = opt ? t(opt.key) : t("pendingSortTitle");
+    btn.title = title;
+    btn.setAttribute("data-i18n-title", "pendingSortTitle");
+  }
+}
+
+function closePendingSortMenu() {
+  const menu = $("#pendingSortMenu");
+  const btn = $("#pendingSortBtn");
+  if (menu) menu.classList.add("hidden");
+  if (btn) btn.setAttribute("aria-expanded", "false");
+}
+
+function openPendingSortMenu(anchor) {
+  const menu = $("#pendingSortMenu");
+  const btn = $("#pendingSortBtn");
+  if (!menu || !anchor) return;
+  if (!menu.classList.contains("hidden")) {
+    closePendingSortMenu();
+    return;
+  }
+  if (typeof closeSummaryMenus === "function") closeSummaryMenus();
+  // tool-panel 有 contain: layout style，fixed 菜单会在侧栏内被裁切/定位错
+  // 打开时挂到 body，与主界面排序菜单一致
+  if (menu.parentElement !== document.body) {
+    document.body.appendChild(menu);
+  }
+  menu.innerHTML = "";
+  const current = (_tool && _tool.sort) || "added-desc";
+  for (const opt of PENDING_SORT_OPTIONS) {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className =
+      "icon-menu-item" + (opt.value === current ? " is-selected" : "");
+    item.setAttribute("role", "menuitemradio");
+    item.setAttribute("aria-checked", opt.value === current ? "true" : "false");
+    item.textContent = t(opt.key);
+    item.onclick = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (_tool.sort !== opt.value) {
+        _tool.sort = opt.value;
+        syncPendingSortChrome();
+        renderPendingList();
+      }
+      closePendingSortMenu();
+    };
+    menu.appendChild(item);
+  }
+  const r = anchor.getBoundingClientRect();
+  menu.classList.remove("hidden");
+  // 先显示再量宽
+  const mw = menu.offsetWidth || 180;
+  let left = r.right - mw;
+  if (left < 8) left = 8;
+  if (left + mw > window.innerWidth - 8) {
+    left = Math.max(8, window.innerWidth - mw - 8);
+  }
+  let top = r.bottom + 4;
+  const mh = menu.offsetHeight || 160;
+  if (top + mh > window.innerHeight - 8) {
+    top = Math.max(8, r.top - mh - 4);
+  }
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+  if (btn) btn.setAttribute("aria-expanded", "true");
+}
+
 function renderPendingList() {
   const list = $("#pendingList");
   const empty = $("#pendingEmpty");
   if (!list) return;
-  const items = _tool.items;
-  if (empty) empty.classList.toggle("hidden", items.length > 0);
+  syncPendingSortChrome();
+  const items = sortedPendingItems(_tool.items);
+  if (empty) empty.classList.toggle("hidden", (_tool.items || []).length > 0);
   list.innerHTML = items
     .map((it) => {
       const icon = it.isDir ? "📁" : "📄";
@@ -986,6 +1189,21 @@ async function executePendingDeletes() {
 
 function wirePendingUi() {
   wireToolPanelResizer();
+  const sortBtn = $("#pendingSortBtn");
+  if (sortBtn) {
+    sortBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      openPendingSortMenu(sortBtn);
+    });
+    syncPendingSortChrome();
+  }
+  document.addEventListener("click", (e) => {
+    const menu = $("#pendingSortMenu");
+    if (!menu || menu.classList.contains("hidden")) return;
+    if (e.target.closest("#pendingSortMenu") || e.target.closest("#pendingSortBtn")) return;
+    closePendingSortMenu();
+  });
   const rail = $("#toolRailToggle");
   if (rail) {
     rail.onclick = () => toggleToolPanel();

@@ -1,6 +1,9 @@
 # 运行依赖
 pywebview>=5.0
-httpx>=0.27,<1
+
+# AI 默认关闭（modules.discover 不注册 ai）。重新接入时取消下一行注释，
+# 并按 assets/docs/ai-reenable.md 打开 discover / build --with-ai。
+# httpx>=0.27,<1
 
 # 开发/测试依赖
 pytest>=8.0

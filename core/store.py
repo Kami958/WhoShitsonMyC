@@ -597,6 +597,9 @@ def _write_settings_yaml(path: str, data: dict) -> None:
         f"  compress_snapshots: {'true' if data.get('compress_snapshots') else 'false'}",
         f"  use_mft: {'true' if data.get('use_mft') else 'false'}",
         f"  search_memory_index: {'true' if data.get('search_memory_index', True) else 'false'}",
+        f"  remember_window_size: {'true' if data.get('remember_window_size', True) else 'false'}",
+        f"  window_width: {int(data.get('window_width') or 0)}",
+        f"  window_height: {int(data.get('window_height') or 0)}",
         f"  log_sanitize: {'true' if data.get('log_sanitize', True) else 'false'}",
         f"  log_level: {_normalize_log_level(data.get('log_level', 'INFO'))}",
         f"  lang: {_normalize_lang(data.get('lang', 'en'))}",
@@ -636,6 +639,9 @@ _scan_workers = default_scan_workers()
 _compress_snapshots = True
 _use_mft = True  # 默认开：盘符根 + NTFS 优先 MFT，失败回退 scandir
 _search_memory_index = True  # 默认开：打开搜索时预热内存索引
+_remember_window_size = True  # 默认开：记住窗口大小
+_window_width = 0
+_window_height = 0
 _log_sanitize = True  # 默认开：写入应用日志时脱敏绝对路径
 # None = YAML 未写明该键（可用环境变量兜底）；True/False = 用户/文件显式设定
 _log_sanitize_explicit: bool | None = None
@@ -742,6 +748,7 @@ def _apply_loaded(data: dict) -> None:
     - 旧文件中的 ``persist`` 键忽略（已不再使用手动持久化开关）。
     """
     global _scan_workers, _compress_snapshots, _use_mft, _search_memory_index
+    global _remember_window_size, _window_width, _window_height
     global _log_sanitize, _log_sanitize_explicit
     global _log_level, _log_level_explicit
     global _lang, _theme, _snapshot_dir, _delete_blacklist
@@ -764,6 +771,15 @@ def _apply_loaded(data: dict) -> None:
         b = _as_bool(common.get("search_memory_index"))
         if b is not None:
             _search_memory_index = b
+    if "remember_window_size" in common:
+        b = _as_bool(common.get("remember_window_size"))
+        if b is not None:
+            _remember_window_size = b
+    if "window_width" in common or "window_height" in common:
+        w = _as_int(common.get("window_width"), 0) or 0
+        h = _as_int(common.get("window_height"), 0) or 0
+        if w >= 820 and h >= 560:
+            _window_width, _window_height = _normalize_window_size(w, h)
     if "log_sanitize" in common:
         b = _as_bool(common.get("log_sanitize"))
         if b is not None:
@@ -785,6 +801,21 @@ def _apply_loaded(data: dict) -> None:
         _apply_ai_loaded(data.get("ai"))
 
 
+
+def _normalize_window_size(width, height) -> tuple[int, int]:
+    """窗口宽高收到合理范围（与 create_window min_size 对齐）。"""
+    try:
+        w = int(width)
+    except (TypeError, ValueError):
+        w = 1100
+    try:
+        h = int(height)
+    except (TypeError, ValueError):
+        h = 720
+    w = max(820, min(w, 10000))
+    h = max(560, min(h, 10000))
+    return w, h
+
 def _settings_payload() -> dict:
     """当前内存设置（写 YAML / API 共用）。"""
     return {
@@ -792,6 +823,9 @@ def _settings_payload() -> dict:
         "compress_snapshots": _compress_snapshots,
         "use_mft": _use_mft,
         "search_memory_index": _search_memory_index,
+        "remember_window_size": bool(_remember_window_size),
+        "window_width": int(_window_width),
+        "window_height": int(_window_height),
         "log_sanitize": _log_sanitize,
         "log_level": _normalize_log_level(_log_level),
         "lang": _lang,
@@ -878,6 +912,51 @@ def set_search_memory_index(enabled: bool) -> bool:
         _search_memory_index = new
         _persist()
     return _search_memory_index
+
+
+
+def get_remember_window_size() -> bool:
+    """是否记住窗口大小（写入 settings.yaml）。"""
+    return bool(_remember_window_size)
+
+
+def set_remember_window_size(enabled: bool) -> bool:
+    """设置是否记住窗口大小；值变化时写 YAML。"""
+    global _remember_window_size
+    val = bool(enabled)
+    if val == bool(_remember_window_size):
+        return val
+    _remember_window_size = val
+    _persist()
+    return val
+
+
+def get_window_size() -> tuple[int, int]:
+    """当前记住的窗口宽高（逻辑像素）；未记住过时可能为 (0, 0)。"""
+    return int(_window_width), int(_window_height)
+
+
+def has_saved_window_size() -> bool:
+    """是否已有可用的记住尺寸（关闭「记住」后启动不用它）。"""
+    w, h = int(_window_width), int(_window_height)
+    return w >= 820 and h >= 560
+
+
+def set_window_size(width: int, height: int, *, persist: bool = True) -> tuple[int, int]:
+    """更新记住的窗口尺寸；``persist=True`` 且开启记住时写 YAML。
+
+    防抖由调用方负责（尺寸稳定后再调本函数）。
+    """
+    global _window_width, _window_height
+    w, h = _normalize_window_size(width, height)
+    changed = w != int(_window_width) or h != int(_window_height)
+    _window_width, _window_height = w, h
+    if persist and _remember_window_size and changed:
+        _persist()
+    elif persist and _remember_window_size and not changed:
+        # 尺寸相同不写盘
+        pass
+    return w, h
 
 
 def get_delete_blacklist() -> list[dict[str, str]]:
@@ -1192,11 +1271,13 @@ def apply_settings(
     ``progress`` 会在迁移过程中被调用（见 :func:`migrate_snapshots`）。
 
     可识别键：``scan_workers``、``compress_snapshots``、``use_mft``、
-    ``search_memory_index``、``log_sanitize``、``log_level``、
+    ``search_memory_index``、``remember_window_size``、``window_width``、
+    ``window_height``、``log_sanitize``、``log_level``、
     ``snapshot_dir``（空串=内置目录）、``delete_blacklist``。
     缺省键保持当前值。
     """
     global _scan_workers, _compress_snapshots, _use_mft, _search_memory_index
+    global _remember_window_size, _window_width, _window_height
     global _log_sanitize, _log_sanitize_explicit
     global _log_level, _log_level_explicit
     global _snapshot_dir, _delete_blacklist
@@ -1215,6 +1296,12 @@ def apply_settings(
         _use_mft = bool(payload["use_mft"])
     if "search_memory_index" in payload:
         _search_memory_index = bool(payload["search_memory_index"])
+    if "remember_window_size" in payload:
+        _remember_window_size = bool(payload["remember_window_size"])
+    if "window_width" in payload or "window_height" in payload:
+        w = payload.get("window_width", _window_width)
+        h = payload.get("window_height", _window_height)
+        _window_width, _window_height = _normalize_window_size(w, h)
     if "log_sanitize" in payload:
         _log_sanitize = bool(payload["log_sanitize"])
         _log_sanitize_explicit = _log_sanitize
@@ -1262,6 +1349,7 @@ def reset_settings_to_defaults(*, lang: str | None = None) -> dict:
     ``lang`` 由调用方传入冷启动默认语言（系统语言）；省略则 ``en``。
     """
     global _scan_workers, _compress_snapshots, _use_mft, _search_memory_index
+    global _remember_window_size, _window_width, _window_height
     global _log_sanitize, _log_sanitize_explicit
     global _log_level, _log_level_explicit
     global _lang, _theme, _snapshot_dir, _delete_blacklist
@@ -1273,6 +1361,9 @@ def reset_settings_to_defaults(*, lang: str | None = None) -> dict:
     _compress_snapshots = True
     _use_mft = True
     _search_memory_index = True
+    _remember_window_size = True
+    _window_width = 0
+    _window_height = 0
     _log_sanitize = True
     _log_sanitize_explicit = None
     _log_level = "INFO"
@@ -1451,6 +1542,9 @@ def settings_dict() -> dict:
         "compress_snapshots": _compress_snapshots,
         "use_mft": _use_mft,
         "search_memory_index": _search_memory_index,
+        "remember_window_size": bool(_remember_window_size),
+        "window_width": int(_window_width),
+        "window_height": int(_window_height),
         "log_sanitize": bool(_log_sanitize),
         "log_sanitize_explicit": _log_sanitize_explicit is not None,
         "log_level": _normalize_log_level(_log_level),
@@ -1771,11 +1865,14 @@ def delete_snapshot_folder(
     *,
     out_dir: str | None = None,
     force: bool = False,
+    permanent: bool = False,
 ) -> None:
     """删除快照根下的一层归纳文件夹。
 
     默认仅允许空目录；``force=True`` 时连同其中快照文件一并删除
     （不递归删除更深子目录以外的内容——本产品只维护一层）。
+    ``permanent`` 仅影响夹内快照文件：False 进回收站，True 永久删除。
+    空目录本身始终 ``rmdir``。
     """
     safe = sanitize_folder_name(name)
     if not safe:
@@ -1794,7 +1891,7 @@ def delete_snapshot_folder(
         for n in names:
             p = os.path.join(path, n)
             if os.path.isfile(p) and is_snapshot_filename(n):
-                delete_snapshot(p)
+                delete_snapshot(p, permanent=permanent)
             elif os.path.isdir(p) and not os.path.islink(p):
                 # 不递归清深层；若有意外子目录则拒绝
                 raise OSError(f"unexpected subfolder: {n}")
@@ -1861,21 +1958,34 @@ def list_snapshots(out_dir: str | None = None) -> list[SnapshotInfo]:
     return infos
 
 
-def delete_snapshot(path: str) -> None:
-    """删除一个快照文件；若是 ``.dbz``，顺带清掉本进程解压临时文件。文件不存在时静默返回。
+def delete_snapshot(path: str, *, permanent: bool = False) -> None:
+    """删除一个快照文件；若是 ``.dbz``，顺带清掉本进程解压临时文件。
+
+    ``permanent=False``（默认）进回收站；``True`` 永久删除。
+    文件不存在时静默返回。回收站失败不降级为永久删除。
 
     若文件位于快照根下一层归纳文件夹且删后该夹已空，尝试删除空文件夹。
     """
+    from .fs_delete import DeleteError, delete_path, normalize_abs
+
     try:
         drop_cache_for(path)
     except Exception:  # noqa: BLE001 - 清会话缓存失败不影响删除本体
         pass
-    abs_path = os.path.abspath(path) if path else ""
+    abs_path = normalize_abs(path) if path else ""
     parent = os.path.dirname(abs_path) if abs_path else ""
-    try:
-        os.remove(path)
-    except FileNotFoundError:
-        pass
+    if abs_path:
+        try:
+            delete_path(abs_path, permanent=bool(permanent))
+        except DeleteError as exc:
+            code = str(exc.message or exc)
+            # 与旧行为一致：目标已不存在时不报错
+            if code == "missing":
+                pass
+            else:
+                raise
+        except FileNotFoundError:
+            pass
     # 尝试清空归纳夹（仅 base 下一层）
     if not parent:
         return

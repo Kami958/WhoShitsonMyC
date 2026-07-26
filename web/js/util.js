@@ -120,6 +120,25 @@ function escapeHtml(s) {
 
 /** 应用内确认框（替代 window.confirm，避免弹出系统原生窗口）。 */
 let _confirmResolver = null;
+/** 本次确认框是否带勾选（决定 resolve 形态）。 */
+let _confirmHasCheckbox = false;
+
+function _resetConfirmCheckboxUi() {
+  const row = $("#confirmCheckboxRow");
+  const chk = $("#confirmCheckbox");
+  const label = $("#confirmCheckboxLabel");
+  const content = $("#confirmContent");
+  const bodyEl = $("#confirmDialogBody");
+  if (row) row.classList.add("hidden");
+  if (chk) {
+    chk.checked = false;
+    chk.onchange = null;
+  }
+  if (label) label.textContent = "";
+  if (bodyEl) bodyEl.textContent = "";
+  if (content) content.classList.add("hidden");
+  _confirmHasCheckbox = false;
+}
 
 function closeConfirmDialog(result) {
   const ov = $("#confirmOverlay");
@@ -130,34 +149,81 @@ function closeConfirmDialog(result) {
     okBtn.classList.add("btn-primary");
   }
   const resolve = _confirmResolver;
+  const hasCheckbox = _confirmHasCheckbox;
+  const chk = $("#confirmCheckbox");
+  const checked = !!(chk && chk.checked);
   _confirmResolver = null;
-  if (resolve) resolve(!!result);
+  _resetConfirmCheckboxUi();
+  if (!resolve) return;
+  if (!result) {
+    resolve(false);
+    return;
+  }
+  // 带勾选时返回对象，便于调用方读 checked；无勾选仍返回 true 保持兼容
+  if (hasCheckbox) resolve({ checked });
+  else resolve(true);
 }
 
 /**
  * @param {object} opts
  * @param {string} [opts.title]
- * @param {string} opts.message
+ * @param {string} [opts.message] 有增量信息才传；空则不占正文区
  * @param {string} [opts.okText]
  * @param {boolean} [opts.danger]
- * @returns {Promise<boolean>}
+ * @param {string} [opts.checkboxLabel] 有值时在底栏显示轻量勾选
+ * @param {boolean} [opts.checkboxDefault]
+ * @param {string} [opts.okTextChecked] 勾选后确定按钮文案
+ * @returns {Promise<boolean|{checked:boolean}>} 取消为 false；无勾选确定为 true；有勾选确定为 {checked}
  */
 function showConfirmDialog(opts) {
   const options = opts || {};
   const ov = $("#confirmOverlay");
   const titleEl = $("#confirmDialogTitle");
+  const contentEl = $("#confirmContent");
   const bodyEl = $("#confirmDialogBody");
   const okBtn = $("#confirmOkBtn");
-  if (!ov || !titleEl || !bodyEl || !okBtn) {
+  const row = $("#confirmCheckboxRow");
+  const chk = $("#confirmCheckbox");
+  const labelEl = $("#confirmCheckboxLabel");
+  if (!ov || !titleEl || !okBtn) {
     return Promise.resolve(false);
   }
   if (_confirmResolver) closeConfirmDialog(false);
 
   titleEl.textContent = options.title || t("confirmTitle");
-  bodyEl.textContent = options.message || "";
-  okBtn.textContent = options.okText || t("confirmOk");
-  okBtn.classList.toggle("btn-danger", !!options.danger);
-  okBtn.classList.toggle("btn-primary", !options.danger);
+
+  const message = options.message == null ? "" : String(options.message);
+  const hasMessage = !!message.trim();
+  if (bodyEl) bodyEl.textContent = hasMessage ? message : "";
+  if (contentEl) contentEl.classList.toggle("hidden", !hasMessage);
+
+  const hasCheckbox = !!(options.checkboxLabel && row && chk && labelEl);
+  _confirmHasCheckbox = hasCheckbox;
+  const okText = options.okText || t("confirmOk");
+  const okTextChecked = options.okTextChecked || okText;
+
+  function syncOkFromCheckbox() {
+    const checked = !!(chk && chk.checked);
+    okBtn.textContent = checked ? okTextChecked : okText;
+    // 彻底删除用危险色；默认回收站也用 danger（删除动作）
+    const danger = !!options.danger || checked;
+    okBtn.classList.toggle("btn-danger", danger);
+    okBtn.classList.toggle("btn-primary", !danger);
+  }
+
+  if (hasCheckbox) {
+    labelEl.textContent = options.checkboxLabel;
+    chk.checked = !!options.checkboxDefault;
+    chk.onchange = syncOkFromCheckbox;
+    row.classList.remove("hidden");
+    syncOkFromCheckbox();
+  } else {
+    if (row) row.classList.add("hidden");
+    okBtn.textContent = okText;
+    okBtn.classList.toggle("btn-danger", !!options.danger);
+    okBtn.classList.toggle("btn-primary", !options.danger);
+  }
+
   ov.classList.remove("hidden");
 
   return new Promise((resolve) => {

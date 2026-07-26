@@ -50,3 +50,4 @@ desktop.ini
 dict/scan-timing.jsonl
 *.scan-timing.jsonl
 /claude.md
+/AGENTS.md

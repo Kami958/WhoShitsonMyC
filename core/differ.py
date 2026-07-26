@@ -93,7 +93,7 @@ _SearchEntry = tuple[str, str, "_SideRow | None", "_SideRow | None"]
 
 # 与前端 SORT_OPTIONS 对齐；未知值回退 delta-desc
 _SEARCH_SORT_KEYS = frozenset({
-    "delta-desc", "pct-desc", "name-asc", "name-desc", "mtime-desc",
+    "delta-desc", "size-desc", "pct-desc", "name-asc", "name-desc", "mtime-desc",
 })
 
 
@@ -103,6 +103,15 @@ def _entry_delta(entry: _SearchEntry) -> int:
 
 
 def _entry_old_size(entry: _SearchEntry) -> int:
+    o = entry[2]
+    return o[1] if o else 0
+
+
+def _entry_new_size(entry: _SearchEntry) -> int:
+    """当前侧大小；展开/同快照浏览时就是占用。"""
+    n = entry[3]
+    if n is not None:
+        return n[1]
     o = entry[2]
     return o[1] if o else 0
 
@@ -150,6 +159,15 @@ def _sort_search_entries(
             key=lambda e: (
                 -_entry_pct(e),
                 -abs(_entry_delta(e)),
+                _child_path(e[0], e[1]),
+            ),
+        )
+    if sort == "size-desc":
+        return sorted(
+            entries,
+            key=lambda e: (
+                -_entry_new_size(e),
+                e[1].casefold(),
                 _child_path(e[0], e[1]),
             ),
         )
@@ -555,7 +573,7 @@ class Diff:
             query: 搜索关键词；去空白后为空则返回空结果。
             limit: 本页最多条数，范围 1–200，默认 50。
             offset: 跳过前多少条，从 0 起。
-            sort: 排序方式，与前端一致：``delta-desc`` / ``pct-desc`` /
+            sort: 排序方式，与前端一致：``delta-desc`` / ``size-desc`` / ``pct-desc`` /
                 ``name-asc`` / ``name-desc`` / ``mtime-desc``。
             case_sensitive: 是否区分大小写，默认否。
             exact: 是否严格整名匹配，默认否（包含匹配）。

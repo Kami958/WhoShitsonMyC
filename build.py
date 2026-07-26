@@ -1,14 +1,18 @@
 """打包脚本 —— 产出带版本号的单文件版：
 
-  dist/wsmc-v{version}.exe       # 默认主线（不含 AI）
-  dist/wsmc-ai-v{version}.exe    # python build.py --with-ai
+  dist/wsmc-v{version}.exe       # 默认（不含 AI；当前产品策略）
+  dist/wsmc-ai-v{version}.exe    # python build.py --with-ai（仅维护/实验）
+
+当前默认**不**主动提供 AI 发行版：``python build.py`` 始终打主线。
+``--with-ai`` 仍保留在脚本里，便于以后按 ``assets/docs/ai-reenable.md`` 重新接入；
+日常开发与发布不要依赖它。
 
 依赖系统已安装的 WebView2 运行时；缺失时程序启动会弹窗引导安装。
 打包成功后会删掉 build/ 与 *.spec 中间产物，只保留 dist/。
 
 用法：
     python build.py
-    python build.py --with-ai
+    # python build.py --with-ai   # 默认关闭；重新接入 AI 时再使用
 """
 
 from __future__ import annotations
@@ -52,9 +56,11 @@ _EXCLUDES = [
     "_tkinter",
     "turtle",
     # 打包/安装工具链被 pythonnet 等间接拉入
+    # 注意：3.12 下不要排除 distutils。
+    # 标准库已移除 distutils，但 PyInstaller 的 hook-distutils 仍可能对
+    # 该名字做 alias；若先 --exclude-module distutils，会在分析阶段炸掉。
     "setuptools",
     "pkg_resources",
-    "distutils",
     "wheel",
     "pip",
     # 标准库调试/测试/文档（Analysis 偶发扫入）
@@ -98,7 +104,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--with-ai",
         action="store_true",
-        help="Include experimental AI module (produce wsmc-ai-v*.exe)",
+        help=(
+            "Include experimental AI module (wsmc-ai-v*.exe). "
+            "Disabled by product policy; see assets/docs/ai-reenable.md"
+        ),
     )
     return p.parse_args(argv)
 
@@ -219,42 +228,6 @@ def _rename_with_version(*, with_ai: bool = False) -> str:
     except OSError as exc:
         sys.exit(f"重命名失败：{exc}")
 
-    # 顺手清掉 dist 里其它旧版 exe（同前缀、不同版本），只留本次产物。
-    # 主线 / AI 包互不误删：主线清理 wsmc-v*（不含 wsmc-ai-v*），AI 包清理 wsmc-ai-v*。
-    try:
-        for name in os.listdir(DIST_DIR):
-            if not name.lower().endswith(".exe"):
-                continue
-            path = os.path.join(DIST_DIR, name)
-            if path == versioned_exe:
-                continue
-            if name == f"{APP_NAME}.exe":
-                try:
-                    os.remove(path)
-                    print(f"已删除旧包 {name}")
-                except OSError:
-                    pass
-                continue
-            if with_ai:
-                if name.startswith(f"{APP_NAME}-ai-v"):
-                    try:
-                        os.remove(path)
-                        print(f"已删除旧包 {name}")
-                    except OSError:
-                        pass
-            else:
-                # 主线：删旧主线版，不动 AI 包
-                if name.startswith(f"{APP_NAME}-v") and not name.startswith(
-                    f"{APP_NAME}-ai-v"
-                ):
-                    try:
-                        os.remove(path)
-                        print(f"已删除旧包 {name}")
-                    except OSError:
-                        pass
-    except OSError:
-        pass
-
     return f"{basename}.exe"
 
 
@@ -265,8 +238,13 @@ def main(argv: list[str] | None = None) -> None:
     except ImportError:
         sys.exit("未找到 PyInstaller，请先执行：pip install pyinstaller")
 
-    # 默认主线无 AI；--with-ai 才带 AI。
+    # 默认永远主线无 AI；--with-ai 仅供重新接入实验包（见 ai-reenable.md）。
     with_ai = bool(args.with_ai)
+    if with_ai:
+        print(
+            "==> 注意：当前产品默认不发 AI 包；"
+            "--with-ai 仅供维护/实验（见 assets/docs/ai-reenable.md）"
+        )
 
     excludes = list(_EXCLUDES)
     if not with_ai:

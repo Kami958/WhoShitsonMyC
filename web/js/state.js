@@ -12,7 +12,8 @@ const state = {
   oldPath: "",        // 选作「基准」的快照路径
   newPath: "",        // 选作「当前」的快照路径
   filter: "all",      // 当前过滤：all | grew | shrank
-  sort: "delta-desc", // 变化树排序，见 SORTERS
+  sort: "delta-desc", // 对比树排序，见 SORTERS
+  browseSort: "size-desc", // 占用展开树排序（与对比独立）
   searchSort: "delta-desc", // 搜索结果排序（与变化树独立）
   searchCaseSensitive: false, // 搜索：区分大小写（默认关）
   searchExact: false,         // 搜索：严格整名匹配（默认关）
@@ -23,13 +24,24 @@ const state = {
   // 设置：打开搜索时是否预热内存索引（默认开；与后端 store 对齐）
   searchMemoryIndex: true,
   snapSort: "time-desc", // 快照列表排序，见 SNAP_SORTERS
-  compared: false,    // 是否已出对比结果
-  comparing: false,   // 对比请求进行中（防重复点击）
-  compareRoot: "",    // 本次对比的扫描根（右键定位真实路径用）
+  compared: false,    // 是否已出对比/浏览结果
+  comparing: false,   // 对比/浏览请求进行中（防重复点击）
+  // 主树模式：compare=两份快照差分；browse=单份快照按占用展开
+  treeMode: "compare",
+  _childrenInflight: {},
+  // 会话内已拉取的子目录 path → nodes；收起/改排序不丢
+  _childrenCache: {},
+  // 当前处于展开态的目录 path 集合（仅 UI 状态）
+  _openPaths: {},
+  compareRoot: "",    // 本次对比/浏览的扫描根（右键定位真实路径用）
   // 上次成功对比的路径对（用于判断是否需再解压 .dbz）
   _lastCompareKey: "",
   _lastComparePaths: "",
   ctxNode: null,      // 右键菜单当前指向的节点
+  // 对比树多选：path → node 摘要；仅当前会话
+  treeSelected: {},
+  _treeSelectAnchor: "", // Shift 多选锚点 path
+  treeMultiSelect: false, // 工具栏多选开关：开后单击即勾选
   modules: {},        // 构建期可选模块：{ ai: true, ... }
 };
 

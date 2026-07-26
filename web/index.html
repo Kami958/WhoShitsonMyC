@@ -1,9 +1,34 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-theme="light">
+<html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>WhoShitsOnMyC</title>
+  <script>
+    // 第一帧前定主题与底色。
+    // 应用启动：app.py 用 ?theme= 传入 settings.yaml 主题；
+    // 直接打开页面：退回 localStorage，再默认 light。
+    (function () {
+      var theme = null;
+      try {
+        var q = new URLSearchParams(location.search || "");
+        var fromUrl = q.get("theme");
+        if (fromUrl === "dark" || fromUrl === "light") theme = fromUrl;
+      } catch (e) {}
+      if (theme !== "dark" && theme !== "light") {
+        theme = "light";
+        try {
+          var s = localStorage.getItem("theme");
+          if (s === "dark" || s === "light") theme = s;
+        } catch (e) {}
+      }
+      var root = document.documentElement;
+      root.setAttribute("data-theme", theme);
+      // CSS 未到前先铺底色，避免首帧白屏
+      root.style.backgroundColor = theme === "dark" ? "#14161a" : "#ffffff";
+      try { localStorage.setItem("theme", theme); } catch (e) {}
+    })();
+  </script>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -104,6 +129,7 @@
       <div id="summaryBar" class="summary-bar hidden">
         <span class="summary-caption" data-i18n="totalChange">总变化</span>
         <span id="summaryDelta" class="summary-delta"></span>
+        <span id="browseModeHint" class="browse-mode-hint hidden" data-i18n="browseModeHint">占用浏览</span>
         <span class="spacer"></span>
         <div class="summary-icon-tools">
           <div id="treeSearchWrap" class="tree-search-wrap">
@@ -119,6 +145,12 @@
             <button id="treeSearchClear" class="btn-plain tree-search-clear hidden" type="button"
                     data-i18n-title="treeSearchClearTitle" title="清除搜索">×</button>
           </div>
+          <button id="treeMultiSelectBtn" class="btn-plain summary-icon-btn" type="button"
+                  data-i18n-title="treeMultiSelectTitle" title="多选" aria-pressed="false">
+            <svg class="summary-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+              <path fill="currentColor" d="M2.5 2.5h4.25a.75.75 0 0 1 0 1.5H3.5v3.25a.75.75 0 0 1-1.5 0V3.25c0-.414.336-.75.75-.75zm6.75 0H13.5c.414 0 .75.336.75.75v3.5a.75.75 0 0 1-1.5 0V4h-3.25a.75.75 0 0 1 0-1.5zM2.75 8.75a.75.75 0 0 1 .75.75v3.25h3.25a.75.75 0 0 1 0 1.5H2.75a.75.75 0 0 1-.75-.75V9.5a.75.75 0 0 1 .75-.75zm10.5 0a.75.75 0 0 1 .75.75v4c0 .414-.336.75-.75.75H9.25a.75.75 0 0 1 0-1.5H12.5V9.5a.75.75 0 0 1 .75-.75z"/>
+            </svg>
+          </button>
           <button id="sortMenuBtn" class="btn-plain summary-icon-btn" type="button"
                   data-i18n-title="sortSelTitle" title="排序方式" aria-haspopup="menu" aria-expanded="false">
             <svg class="summary-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
@@ -149,6 +181,14 @@
       <!-- 跳过目录警告 -->
       <div id="skipWarn" class="skip-warn hidden"></div>
 
+      <!-- 对比树多选操作条 -->
+      <div id="treeSelectBar" class="tree-select-bar hidden">
+        <span id="treeSelectMeta" class="tree-select-meta"></span>
+        <span class="spacer"></span>
+        <button id="treeSelectAddPendingBtn" class="btn-plain compact" type="button" data-i18n="treeSelectAddPending">加入待删除</button>
+        <button id="treeSelectClearBtn" class="btn-plain compact" type="button" data-i18n="treeSelectClear">取消选择</button>
+      </div>
+
       <!-- 搜索结果（排序与选项与变化树独立） -->
       <div id="searchPanel" class="search-panel hidden">
         <div class="search-panel-head">
@@ -177,6 +217,7 @@
         <div id="searchMoreWrap" class="search-more-wrap hidden">
           <button id="searchMoreBtn" class="btn-plain search-more-btn" type="button" data-i18n="treeSearchMore">加载更多</button>
         </div>
+        <div id="searchPanelResizer" class="search-panel-resizer" role="separator" aria-orientation="horizontal" data-i18n-title="searchPanelResizeTitle" title="拖动调整搜索结果高度"></div>
       </div>
       <div id="searchSortMenu" class="icon-menu hidden" role="menu" aria-labelledby="searchSortBtn"></div>
 
@@ -205,6 +246,16 @@
           <button id="toolCloseBtn" class="btn-plain settings-close" type="button" data-i18n-title="toolClose" title="关闭">✕</button>
         </div>
         <div class="tool-pane active" data-tool-pane="pending" role="tabpanel">
+          <div class="pending-toolbar">
+            <button id="pendingSortBtn" class="btn-plain summary-icon-btn" type="button"
+                    data-i18n-title="pendingSortTitle" title="待删除排序" aria-haspopup="menu" aria-expanded="false">
+              <svg class="summary-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                <path fill="currentColor" d="M2 3.25h8.5a.75.75 0 0 1 0 1.5H2a.75.75 0 0 1 0-1.5zm0 4h6a.75.75 0 0 1 0 1.5H2a.75.75 0 0 1 0-1.5zm0 4h3.5a.75.75 0 0 1 0 1.5H2a.75.75 0 0 1 0-1.5z"/>
+                <path fill="currentColor" d="M12.25 2.5a.75.75 0 0 1 .75.75v7.19l1.22-1.22a.75.75 0 1 1 1.06 1.06l-2.5 2.5a.75.75 0 0 1-1.06 0l-2.5-2.5a.75.75 0 0 1 1.06-1.06l1.22 1.22V3.25a.75.75 0 0 1 .75-.75z"/>
+              </svg>
+            </button>
+          </div>
+          <div id="pendingSortMenu" class="icon-menu hidden" role="menu" aria-labelledby="pendingSortBtn"></div>
           <p id="pendingEmpty" class="pending-empty" data-i18n="pendingEmpty">暂无待删除项，可在对比树右键添加</p>
           <div id="pendingList" class="pending-list" aria-live="polite"></div>
           <div class="pending-foot">
@@ -269,6 +320,7 @@
     <div class="ctx-item" data-cmd="reveal" data-i18n="ctxReveal">在资源管理器中打开</div>
     <div class="ctx-item" data-cmd="copy" data-i18n="ctxCopy">复制完整路径</div>
     <div class="ctx-item ctx-danger" data-cmd="delete" data-i18n="ctxDelete">加入待删除</div>
+    <div class="ctx-item ctx-danger hidden" data-cmd="delete-selected" data-i18n="ctxDeleteSelected">将选中项加入待删除</div>
     <div class="ctx-item module-off" data-cmd="ask-ai" data-module="ai" data-i18n="ctxAskAi">问 AI（实验）</div>
     <!-- AI 清理分析：暂不接入右键菜单；恢复时去掉 hidden 并保留 data-cmd="cleanup-ai" -->
     <div class="ctx-item module-off hidden" data-cmd="cleanup-ai" data-module="ai" data-i18n="ctxCleanupAi" hidden>AI 清理分析（实验）</div>
@@ -389,6 +441,16 @@
               <input id="searchMemIdxChk" type="checkbox" checked />
             </div>
             <p class="settings-help-panel hidden" data-help-panel="searchMemIdx" data-i18n="searchMemIdxTitle">开启后打开搜索会先载入索引，占用更多内存，但后续搜索更快。内存充足建议开启；内存紧张或小目录可关闭</p>
+          </div>
+          <div class="settings-field">
+            <div class="settings-row">
+              <span class="settings-label">
+                <label for="rememberWinSizeChk" data-i18n="rememberWinSize">记住窗口大小</label>
+                <button type="button" class="settings-q" data-help="rememberWinSize" data-i18n-title="rememberWinSizeTitle" title="窗口大小保持 8 秒不变后写入设置，下次启动沿用" aria-label="?">?</button>
+              </span>
+              <input id="rememberWinSizeChk" type="checkbox" checked />
+            </div>
+            <p class="settings-help-panel hidden" data-help-panel="rememberWinSize" data-i18n="rememberWinSizeTitle">窗口大小保持 8 秒不变后写入设置，下次启动沿用</p>
           </div>
           <div class="settings-field">
             <div class="settings-row">
@@ -623,8 +685,14 @@
         <h2 id="confirmDialogTitle" class="note-title"></h2>
         <button id="confirmCloseBtn" class="btn-plain settings-close" type="button" data-i18n-title="settingsClose" title="关闭">✕</button>
       </div>
-      <p id="confirmDialogBody" class="note-hint confirm-body"></p>
-      <div class="note-foot">
+      <div id="confirmContent" class="confirm-content hidden">
+        <p id="confirmDialogBody" class="confirm-body"></p>
+      </div>
+      <div class="note-foot confirm-foot">
+        <label id="confirmCheckboxRow" class="confirm-checkbox-row hidden" for="confirmCheckbox">
+          <input id="confirmCheckbox" type="checkbox" />
+          <span id="confirmCheckboxLabel"></span>
+        </label>
         <span class="note-foot-spacer"></span>
         <button id="confirmCancelBtn" class="btn-plain" type="button" data-i18n="cancel">取消</button>
         <button id="confirmOkBtn" class="btn-primary compact" type="button" data-i18n="confirmOk">确定</button>

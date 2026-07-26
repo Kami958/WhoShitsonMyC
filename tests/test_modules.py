@@ -2,11 +2,22 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import modules
 from modules import discover
 
 
 def test_discover_includes_ai():
+    """默认 ENABLE_AI=False：不注册 ai；打开开关后才应含 ai。"""
+    import modules as modules_pkg
+
+    src = Path(modules_pkg.__file__).read_text(encoding="utf-8")
+    # 用源码开关为准：默认关闭时 discover 必须为空注册
+    if "ENABLE_AI = False" in src or "ENABLE_AI=False" in src.replace(" ", ""):
+        found = discover()
+        assert "ai" not in found
+        return
     found = discover()
     assert "ai" in found
     assert callable(found["ai"])
@@ -111,4 +122,10 @@ def test_list_modules_after_init(tmp_path, monkeypatch):
     api._modules = {}
     api._init_modules()
     listed = api.list_modules()
-    assert listed.get("ai") is True
+    # 默认关闭 AI：list_modules 不应冒充有 ai
+    import modules as modules_pkg
+    src = Path(modules_pkg.__file__).read_text(encoding="utf-8")
+    if "ENABLE_AI = False" in src or "ENABLE_AI=False" in src.replace(" ", ""):
+        assert listed.get("ai") is not True
+    else:
+        assert listed.get("ai") is True

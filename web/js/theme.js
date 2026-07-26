@@ -38,11 +38,19 @@ function toggleTheme() {
  * 权威来源是 settings.yaml；启动时由 reconcileLang 调用。
  */
 function applyThemeValue(theme) {
-  // 默认亮色；仅显式 dark 时用暗色
+  const html = document.documentElement;
   const v = theme === "dark" ? "dark" : "light";
-  document.documentElement.dataset.theme = v;
+  html.dataset.theme = v;
+  // 清掉启动脚本可能留下的内联底色，统一走 CSS 变量
+  html.style.backgroundColor = "";
+  html.style.color = "";
+  if (document.body) {
+    document.body.style.backgroundColor = "";
+    document.body.style.color = "";
+  }
   try { localStorage.setItem("theme", v); } catch (e) {}
 }
+
 
 /** 仅首屏占位：读 localStorage；真正主题以 get_settings 为准。 */
 function restoreThemePreference() {

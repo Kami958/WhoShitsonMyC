@@ -367,10 +367,19 @@ function buildSnapEl(s) {
     <div class="snap-acts">
       <button class="snap-act old" data-act="old">${t("setAsBase")}</button>
       <button class="snap-act new" data-act="new">${t("setAsCurrent")}</button>
+      <button class="snap-act browse" data-act="browse">${t("browseSnapshot")}</button>
       <button class="snap-act move-btn" data-act="move">${t("folderMove")}</button>
       <button class="snap-act del" data-act="del">${t("delete")}</button>
     </div>`;
 
+  const browseBtn = el.querySelector('[data-act="browse"]');
+  if (browseBtn) {
+    browseBtn.onclick = (e) => {
+      e.stopPropagation();
+      if (typeof browseSnapshot === "function") browseSnapshot(s.path);
+    };
+    browseBtn.title = t("browseSnapshotTitle");
+  }
   el.querySelector('[data-act="old"]').onclick = () => selectSnapshot("old", s.path);
   el.querySelector('[data-act="new"]').onclick = () => selectSnapshot("new", s.path);
   // 备注：点正文备注行编辑（不再单独放「备注」按钮，避免与「添加备注」重复）
@@ -745,22 +754,19 @@ function _remapSelectionAfterMove(oldPathSet) {
 async function deleteSnapshotFolder(name, itemCount) {
   if (!name) return;
   const count = Math.max(0, Number(itemCount) || 0);
+  let permanent = false;
   if (count > 0) {
-    // 非空：二次确认
-    const ok1 = await showConfirmDialog({
+    const result = await showConfirmDialog({
       title: t("folderDelete"),
       message: t("folderDeleteConfirmWithItems", name, count),
-      okText: t("folderDelete"),
+      okText: t("deleteToRecycle"),
+      okTextChecked: t("deletePermanent"),
       danger: true,
+      checkboxLabel: t("pendingPermanent"),
+      checkboxDefault: false,
     });
-    if (!ok1) return;
-    const ok2 = await showConfirmDialog({
-      title: t("folderDelete"),
-      message: t("folderDeleteConfirmAgain", name),
-      okText: t("folderDelete"),
-      danger: true,
-    });
-    if (!ok2) return;
+    if (!result) return;
+    permanent = !!(result && result.checked);
   } else {
     const ok = await showConfirmDialog({
       title: t("folderDelete"),
@@ -779,7 +785,7 @@ async function deleteSnapshotFolder(name, itemCount) {
 
   let res;
   try {
-    res = await state.api.delete_snapshot_folder(name, count > 0);
+    res = await state.api.delete_snapshot_folder(name, count > 0, permanent);
   } catch (e) {
     toast(t("folderDeleteFailed", e), true);
     return;
@@ -902,9 +908,22 @@ function editSnapshotNote(s) {
 }
 
 async function deleteSnapshot(path) {
+  if (!path) return;
+  // 无增量信息：不写正文；勾选放底栏脚注级，主按钮表达默认进回收站
+  const result = await showConfirmDialog({
+    title: t("snapshotDeleteTitle"),
+    okText: t("deleteToRecycle"),
+    okTextChecked: t("deletePermanent"),
+    danger: true,
+    checkboxLabel: t("pendingPermanent"),
+    checkboxDefault: false,
+  });
+  if (!result) return;
+  const permanent = !!(result && result.checked);
+
   let res;
   try {
-    res = await state.api.delete_snapshot(path);
+    res = await state.api.delete_snapshot(path, permanent);
   } catch (err) {
     toast(t("deleteFailed", err), true);
     return;
@@ -920,14 +939,24 @@ async function deleteSnapshot(path) {
   delete state.importedPaths[_normPath(path)];
   if (state.compared && inCompare) resetCompareView();
   await loadSnapshots({ quiet: true });
-  toast(t("snapshotDeleted"));
+  toast(
+    permanent ? t("snapshotDeletedPermanent") : t("snapshotDeletedRecycle")
+  );
 }
 
 /** 清空对比结果区域，回到初始空态（快照列表不动）。 */
 function resetCompareView() {
+  if (typeof clearTreeSelection === "function") clearTreeSelection();
   state.compared = false;
+  state.treeMode = "compare";
   state.compareRoot = "";
   state._topNodes = null;
+  if (typeof clearChildrenCache === "function") clearChildrenCache();
+  else {
+    state._childrenCache = {};
+    state._openPaths = {};
+    state._childrenInflight = {};
+  }
   state._lastSummary = null;
   state._lastCompareKey = "";
   state._lastComparePaths = "";

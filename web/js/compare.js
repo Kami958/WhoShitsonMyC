@@ -26,9 +26,297 @@ function setCompareBusy(text) {
   el.classList.add("is-busy");
 }
 
+
+function isBrowseMode() {
+  return state.treeMode === "browse";
+}
+
+function isTreeMultiSelectMode() {
+  return !!state.treeMultiSelect;
+}
+
+function setTreeMultiSelectMode(on) {
+  state.treeMultiSelect = !!on;
+  const btn = $("#treeMultiSelectBtn");
+  if (btn) {
+    btn.classList.toggle("is-active", state.treeMultiSelect);
+    btn.setAttribute("aria-pressed", state.treeMultiSelect ? "true" : "false");
+    btn.title = t("treeMultiSelectTitle");
+  }
+  // 关闭多选时清掉已选，避免残留高亮干扰普通浏览
+  if (!state.treeMultiSelect && typeof clearTreeSelection === "function") {
+    clearTreeSelection();
+  } else if (typeof syncTreeSelectBar === "function") {
+    syncTreeSelectBar();
+  }
+}
+
+function toggleTreeMultiSelectMode() {
+  setTreeMultiSelectMode(!state.treeMultiSelect);
+  if (typeof toast === "function") {
+    toast(state.treeMultiSelect ? t("treeMultiSelectOn") : t("treeMultiSelectOff"));
+  }
+}
+
+function treeSelectionCount() {
+  const bag = state.treeSelected || {};
+  return Object.keys(bag).length;
+}
+
+function clearTreeSelection() {
+  state.treeSelected = {};
+  state._treeSelectAnchor = "";
+  document.querySelectorAll("#tree .node.is-selected").forEach((el) => {
+    el.classList.remove("is-selected");
+  });
+  syncTreeSelectBar();
+}
+
+function selectedTreeNodes() {
+  const bag = state.treeSelected || {};
+  return Object.keys(bag).map((k) => bag[k]).filter(Boolean);
+}
+
+function syncTreeSelectBar() {
+  const bar = $("#treeSelectBar");
+  const meta = $("#treeSelectMeta");
+  const n = treeSelectionCount();
+  if (!bar) return;
+  if (n <= 0 || !state.compared) {
+    bar.classList.add("hidden");
+    if (meta) meta.textContent = "";
+    return;
+  }
+  bar.classList.remove("hidden");
+  if (meta) meta.textContent = t("treeSelectMeta", n);
+}
+
+function _treePathKey(path) {
+  return String(path || "").replace(/\\/g, "/").replace(/\/+/g, "/");
+}
+
+function _nodeSelectPayload(node) {
+  const oldSize = Number(node.old_size) || 0;
+  const newSize = Number(node.new_size) || 0;
+  return {
+    path: node.path || "",
+    name: node.name || node.path || "",
+    is_dir: !!node.is_dir,
+    new_size: newSize,
+    old_size: oldSize,
+    delta: Number(node.delta) || (newSize - oldSize),
+  };
+}
+
+function setTreeNodeSelected(node, selected) {
+  if (!node || !node.path) return;
+  if (!state.treeSelected) state.treeSelected = {};
+  const key = _treePathKey(node.path);
+  if (selected) state.treeSelected[key] = _nodeSelectPayload(node);
+  else delete state.treeSelected[key];
+  const row = document.querySelector(
+    `#tree .node[data-path="${typeof cssEscapeAttr === "function" ? cssEscapeAttr(node.path) : String(node.path).replace(/"/g, '\\"')}"]`
+  );
+  if (row) row.classList.toggle("is-selected", !!selected);
+}
+
+function applyTreeSelectionToDom() {
+  const bag = state.treeSelected || {};
+  document.querySelectorAll("#tree .node").forEach((row) => {
+    const p = row.dataset.path || "";
+    const on = !!bag[_treePathKey(p)];
+    row.classList.toggle("is-selected", on);
+  });
+  syncTreeSelectBar();
+}
+
+function toggleTreeSelection(node, { range } = {}) {
+  if (!node || !node.path) return;
+  if (!state.treeSelected) state.treeSelected = {};
+  const key = _treePathKey(node.path);
+  if (range && state._treeSelectAnchor) {
+    // 同层可见节点：在 DOM 中找同一父级下的 .node 序列
+    const rows = Array.from(document.querySelectorAll("#tree .node"));
+    const paths = rows.map((r) => r.dataset.path || "");
+    const a = paths.indexOf(state._treeSelectAnchor);
+    const b = paths.indexOf(node.path);
+    if (a >= 0 && b >= 0) {
+      const lo = Math.min(a, b);
+      const hi = Math.max(a, b);
+      for (let i = lo; i <= hi; i++) {
+        const row = rows[i];
+        const p = row.dataset.path || "";
+        if (!p) continue;
+        // 用行上已有数据不够 size；只保证 path/name
+        const nameEl = row.querySelector(".node-name");
+        state.treeSelected[_treePathKey(p)] = {
+          path: p,
+          name: nameEl ? nameEl.textContent : p,
+          is_dir: row.classList.contains("dir"),
+          new_size: 0,
+          old_size: 0,
+        };
+        row.classList.add("is-selected");
+      }
+      syncTreeSelectBar();
+      return;
+    }
+  }
+  if (state.treeSelected[key]) {
+    delete state.treeSelected[key];
+  } else {
+    state.treeSelected[key] = _nodeSelectPayload(node);
+  }
+  state._treeSelectAnchor = node.path || "";
+  applyTreeSelectionToDom();
+}
+
+
+function nodeSize(n) {
+  const v = Number(n && n.new_size);
+  return Number.isFinite(v) && v > 0 ? v : 0;
+}
+
+/** 缓存键：统一分隔符，避免同一目录因 \ / 混用而 miss。 */
+function treePathKey(path) {
+  return String(path || "").replace(/\\/g, "/").replace(/\/+/g, "/").replace(/^\//, "");
+}
+
+/** 当前主树应使用的排序键（对比 / 展开各自独立）。 */
+function currentTreeSort() {
+  if (isBrowseMode()) {
+    const s = state.browseSort || "size-desc";
+    if (s === "delta-desc" || s === "pct-desc") return "size-desc";
+    return s;
+  }
+  const s = state.sort || "delta-desc";
+  if (s === "size-desc") return "delta-desc";
+  return s;
+}
+
+/** 搜索结果排序键：展开模式默认按占用，对比模式默认按变化量。 */
+function currentSearchSort() {
+  let s = state.searchSort || (isBrowseMode() ? "size-desc" : "delta-desc");
+  if (isBrowseMode()) {
+    if (s === "delta-desc" || s === "pct-desc") s = "size-desc";
+  } else if (s === "size-desc") {
+    s = "delta-desc";
+  }
+  return s;
+}
+
+function clearChildrenCache() {
+  state._childrenCache = {};
+  state._openPaths = {};
+  state._childrenInflight = {};
+}
+
+function cacheChildren(path, nodes) {
+  if (!state._childrenCache || typeof state._childrenCache !== "object" || Array.isArray(state._childrenCache)) {
+    state._childrenCache = {};
+  }
+  // 防止误写成 Object 构造器
+  if (state._childrenCache === Object) state._childrenCache = {};
+  state._childrenCache[treePathKey(path)] = Array.isArray(nodes) ? nodes : [];
+}
+
+function cachedChildren(path) {
+  const bag = state._childrenCache;
+  if (!bag || bag === Object || typeof bag !== "object") return null;
+  const key = treePathKey(path);
+  return Object.prototype.hasOwnProperty.call(bag, key) ? bag[key] : null;
+}
+
+function markPathOpen(path, open) {
+  if (!state._openPaths || state._openPaths === Object) state._openPaths = {};
+  const key = treePathKey(path);
+  if (open) state._openPaths[key] = true;
+  else delete state._openPaths[key];
+}
+
+function isPathOpen(path) {
+  return !!(state._openPaths && state._openPaths !== Object && state._openPaths[treePathKey(path)]);
+}
+
+function collectOpenPathsFromDom() {
+  const tree = document.querySelector("#tree");
+  if (!tree) return;
+  if (!state._openPaths || state._openPaths === Object) state._openPaths = {};
+  for (const ch of tree.querySelectorAll(".children")) {
+    if (ch.classList.contains("hidden")) continue;
+    const group = ch.parentElement;
+    if (!group || !group.classList.contains("node-group")) continue;
+    const row = group.querySelector(":scope > .node");
+    if (!row) continue;
+    const p = row.dataset.path;
+    if (p != null) state._openPaths[treePathKey(p)] = true;
+  }
+}
+
+/** 用会话 cache 回填已打开目录；只读 cache，不请求后端。 */
+function hydrateOpenDirs(rootEl, depth) {
+  if (!rootEl) return;
+  const groups = rootEl.querySelectorAll(":scope > .node-group");
+  for (const group of groups) {
+    const row = group.querySelector(":scope > .node");
+    const children = group.querySelector(":scope > .children");
+    if (!row || !children) continue;
+    const path = row.dataset.path || "";
+    if (!isPathOpen(path)) continue;
+    const hit = cachedChildren(path);
+    if (!hit) continue;
+    const twisty = row.querySelector(".twisty");
+    children.innerHTML = "";
+    children.appendChild(buildLevel(hit, depth + 1));
+    children.dataset.loaded = "1";
+    children.classList.remove("hidden");
+    if (twisty) twisty.classList.add("open");
+    if (!children.querySelector(".node")) {
+      children.innerHTML = `<div class="child-loading">${t("noMatchChild")}</div>`;
+    } else {
+      hydrateOpenDirs(children, depth + 1);
+    }
+  }
+}
+
+function fetchChildrenNodes(parentPath) {
+  const key = treePathKey(parentPath);
+  if (!state._childrenInflight || state._childrenInflight === Object) state._childrenInflight = {};
+  if (state._childrenInflight[key]) return state._childrenInflight[key];
+
+  const req = (async () => {
+    const res = await state.api.get_children(state.oldPath, state.newPath, parentPath);
+    if (res && res.error) {
+      const err = new Error(String(res.error));
+      throw err;
+    }
+    const nodes = Array.isArray(res && res.nodes) ? res.nodes : [];
+    cacheChildren(parentPath, nodes);
+    return nodes;
+  })();
+
+  state._childrenInflight[key] = req;
+  const clear = () => {
+    if (state._childrenInflight && state._childrenInflight[key] === req) {
+      delete state._childrenInflight[key];
+    }
+  };
+  req.then(clear, clear);
+  return req;
+}
+
 async function doCompare() {
   if (state.comparing) return;
+  if (typeof clearTreeSelection === "function") clearTreeSelection();
+  // 基准=当前：走占用展开，不走差分对比
+  if (state.oldPath && state.newPath && state.oldPath === state.newPath) {
+    await browseSnapshot(state.oldPath);
+    return;
+  }
   state.comparing = true;
+  state.treeMode = "compare";
+  if (state.searchSort === "size-desc") state.searchSort = "delta-desc";
+  clearChildrenCache();
   // 新一轮对比：立刻收起搜索栏；并强制作废上一对的索引就绪状态
   if (typeof collapseTreeSearch === "function") collapseTreeSearch({ clear: true });
   if (typeof resetSearchPreheatUi === "function") resetSearchPreheatUi();
@@ -82,6 +370,7 @@ async function doCompare() {
       return;
     }
     state.compared = true;
+    state.treeMode = "compare";
     state.compareRoot = res.summary.new.root;
     state._lastSummary = res.summary;
     state._lastCompareKey = `${state.oldPath}\n${state.newPath}`;
@@ -92,6 +381,7 @@ async function doCompare() {
       .join("\n");
     // 对比开始时已收起搜索；成功后再确保一次（防异步预热回调又撑开）
     if (typeof collapseTreeSearch === "function") collapseTreeSearch({ clear: true });
+    syncSummaryToolButtons();
     renderSummary(res.summary);
     renderTopLevel(res.nodes);
     // 搜索仅回车触发；内存索引在打开搜索框时再预热
@@ -108,6 +398,87 @@ async function doCompare() {
   }
 }
 
+
+/** 单份快照按占用展开；复用 compare/get_children，两侧传同一路径。 */
+async function browseSnapshot(path) {
+  if (!path || state.comparing) return;
+  if (typeof clearTreeSelection === "function") clearTreeSelection();
+  state.comparing = true;
+  state.treeMode = "browse";
+  if (!state.browseSort || state.browseSort === "delta-desc" || state.browseSort === "pct-desc") {
+    state.browseSort = "size-desc";
+  }
+  // 展开模式下搜索按占用；避免沿用对比的 delta/pct
+  if (!state.searchSort || state.searchSort === "delta-desc" || state.searchSort === "pct-desc") {
+    state.searchSort = "size-desc";
+  }
+  clearChildrenCache();
+  state.oldPath = path;
+  state.newPath = path;
+  if (typeof collapseTreeSearch === "function") collapseTreeSearch({ clear: true });
+  if (typeof resetSearchPreheatUi === "function") resetSearchPreheatUi();
+  else {
+    state.searchPreheat = "idle";
+    state.searchPreheatKey = "";
+  }
+  updatePickers();
+  renderSnapshotList();
+  syncSummaryToolButtons();
+
+  let needDecompress = false;
+  try {
+    if (state.api && state.api.compare_cache_status) {
+      const st = await state.api.compare_cache_status(path, path);
+      if (st && st.ok !== false && !st.error) {
+        needDecompress = !!st.need_decompress;
+      } else {
+        const s = snapByPath(path);
+        needDecompress = !!(s && s.compressed);
+      }
+    } else {
+      const s = snapByPath(path);
+      needDecompress = !!(s && s.compressed);
+    }
+  } catch (_) {
+    const s = snapByPath(path);
+    needDecompress = !!(s && s.compressed);
+  }
+  const busyText = needDecompress ? t("decompressing") : t("browsing");
+  setCompareBusy(busyText);
+  const empty = $("#emptyState");
+  const emptyTitle = empty && empty.querySelector(".empty-title");
+  const prevEmptyTitle = emptyTitle ? emptyTitle.textContent : "";
+  if (empty && !empty.classList.contains("hidden") && emptyTitle) {
+    emptyTitle.textContent = busyText;
+  }
+  try {
+    const res = await state.api.compare(path, path);
+    if (res.error) {
+      toast(res.error, true);
+      return;
+    }
+    state.compared = true;
+    state.treeMode = "browse";
+    state.compareRoot = (res.summary && res.summary.new && res.summary.new.root) || "";
+    state._lastSummary = res.summary;
+    state._lastCompareKey = `${path}\n${path}`;
+    state._lastComparePaths = path || "";
+    if (typeof collapseTreeSearch === "function") collapseTreeSearch({ clear: true });
+    syncSummaryToolButtons();
+    renderSummary(res.summary);
+    renderTopLevel(res.nodes);
+  } catch (err) {
+    toast(t("browseFailed", err), true);
+  } finally {
+    state.comparing = false;
+    setCompareBusy("");
+    if (emptyTitle && empty && !empty.classList.contains("hidden")) {
+      emptyTitle.textContent = prevEmptyTitle || t("emptyTitle");
+    }
+    updatePickers();
+  }
+}
+
 /** 设置过滤并同步图标按钮状态（不触发重渲染，渲染由调用方负责）。 */
 function setFilter(f) {
   state.filter = f;
@@ -117,6 +488,14 @@ function setFilter(f) {
 const SORT_OPTIONS = [
   { value: "delta-desc", key: "sortDeltaDesc" },
   { value: "pct-desc", key: "sortPctDesc" },
+  { value: "name-asc", key: "sortNameAsc" },
+  { value: "name-desc", key: "sortNameDesc" },
+  { value: "mtime-desc", key: "sortMtimeDesc" },
+];
+
+// 浏览模式：按占用排序，不展示变化百分比
+const BROWSE_SORT_OPTIONS = [
+  { value: "size-desc", key: "sortSizeDesc" },
   { value: "name-asc", key: "sortNameAsc" },
   { value: "name-desc", key: "sortNameDesc" },
   { value: "mtime-desc", key: "sortMtimeDesc" },
@@ -138,12 +517,15 @@ const SNAP_SORT_OPTIONS = [
 function syncSummaryToolButtons() {
   const sortBtn = $("#sortMenuBtn");
   if (sortBtn) {
-    sortBtn.classList.toggle("is-active", state.sort !== "delta-desc");
+    const defaultSort = isBrowseMode() ? "size-desc" : "delta-desc";
+    sortBtn.classList.toggle("is-active", currentTreeSort() !== defaultSort);
     sortBtn.setAttribute("aria-expanded", "false");
   }
   const filterBtn = $("#filterMenuBtn");
   if (filterBtn) {
-    filterBtn.classList.toggle("is-active", state.filter !== "all");
+    // 占用浏览没有「变大/变小」筛选
+    filterBtn.classList.toggle("hidden", isBrowseMode());
+    filterBtn.classList.toggle("is-active", !isBrowseMode() && state.filter !== "all");
     filterBtn.setAttribute("aria-expanded", "false");
   }
   const snapSortBtn = $("#snapSortMenuBtn");
@@ -153,9 +535,10 @@ function syncSummaryToolButtons() {
   }
   const searchSortBtn = $("#searchSortBtn");
   if (searchSortBtn) {
+    const defaultSearchSort = isBrowseMode() ? "size-desc" : "delta-desc";
     searchSortBtn.classList.toggle(
       "is-active",
-      (state.searchSort || "delta-desc") !== "delta-desc"
+      currentSearchSort() !== defaultSearchSort
     );
     searchSortBtn.setAttribute("aria-expanded", "false");
   }
@@ -199,13 +582,21 @@ function openSummaryMenu(kind, anchor) {
     sort: {
       menu: "#sortMenu",
       btn: "#sortMenuBtn",
-      options: SORT_OPTIONS,
-      current: () => state.sort,
+      options: isBrowseMode() ? BROWSE_SORT_OPTIONS : SORT_OPTIONS,
+      current: () => currentTreeSort(),
       onPick: (value) => {
-        if (state.sort === value) return;
-        state.sort = value;
+        if (isBrowseMode()) {
+          if ((state.browseSort || "size-desc") === value) return;
+          state.browseSort = value;
+        } else {
+          if (state.sort === value) return;
+          state.sort = value;
+        }
         syncSummaryToolButtons();
-        if (state.compared && state._topNodes) renderTopLevel(state._topNodes);
+        if (state.compared && state._topNodes) {
+          collectOpenPathsFromDom();
+          renderTopLevel(state._topNodes);
+        }
       },
     },
     filter: {
@@ -216,7 +607,10 @@ function openSummaryMenu(kind, anchor) {
       onPick: (value) => {
         if (state.filter === value) return;
         setFilter(value);
-        if (state.compared && state._topNodes) renderTopLevel(state._topNodes);
+        if (state.compared && state._topNodes) {
+          collectOpenPathsFromDom();
+          renderTopLevel(state._topNodes);
+        }
       },
     },
     snapSort: {
@@ -234,13 +628,13 @@ function openSummaryMenu(kind, anchor) {
     searchSort: {
       menu: "#searchSortMenu",
       btn: "#searchSortBtn",
-      options: SORT_OPTIONS,
-      current: () => state.searchSort || "delta-desc",
+      options: isBrowseMode() ? BROWSE_SORT_OPTIONS : SORT_OPTIONS,
+      current: () => currentSearchSort(),
       onPick: (value) => {
-        if ((state.searchSort || "delta-desc") === value) return;
+        if (currentSearchSort() === value) return;
         state.searchSort = value;
         syncSummaryToolButtons();
-        // 仅重排搜索结果，不影响变化树
+        // 仅重排搜索结果，不影响主树
         if (_searchQuery) runTreeSearch(_searchQuery);
       },
     },
@@ -276,10 +670,25 @@ function renderSummary(summary) {
   $("#emptyState").classList.add("hidden");
   $("#summaryBar").classList.remove("hidden");
 
-  const delta = summary.total_delta;
+  const cap = document.querySelector("#summaryBar .summary-caption");
   const dEl = $("#summaryDelta");
-  dEl.textContent = fmtDelta(delta);
-  dEl.className = "summary-delta " + (delta >= 0 ? "grow" : "shrink");
+  const browseHint = $("#browseModeHint");
+  if (isBrowseMode()) {
+    if (cap) cap.textContent = t("totalSize");
+    const total = (summary && summary.new && summary.new.total_size) || 0;
+    dEl.textContent = fmtBytes(total);
+    dEl.className = "summary-delta size";
+    if (browseHint) {
+      browseHint.textContent = t("browseModeHint");
+      browseHint.classList.remove("hidden");
+    }
+  } else {
+    if (cap) cap.textContent = t("totalChange");
+    const delta = summary.total_delta;
+    dEl.textContent = fmtDelta(delta);
+    dEl.className = "summary-delta " + (delta >= 0 ? "grow" : "shrink");
+    if (browseHint) browseHint.classList.add("hidden");
+  }
 
   const skipped = summary.old.skipped_count + summary.new.skipped_count;
   const warn = $("#skipWarn");
@@ -523,6 +932,8 @@ function _waitPreheatTerminal() {
 function matchFilter(node) {
   // 搜索定位时临时展示全部节点（含大小未变），否则中间路径会被藏掉
   if (state._showAllForLocate) return true;
+  // 占用浏览：展示整层，按 size 排序即可
+  if (isBrowseMode()) return true;
   if (node.kind === "incomparable") return state.filter !== "shrank";
   if (state.filter === "grew") return node.delta > 0;
   if (state.filter === "shrank") return node.delta < 0;
@@ -539,6 +950,9 @@ function deltaPct(n) {
 
 const SORTERS = {
   "delta-desc": (a, b) => Math.abs(b.delta) - Math.abs(a.delta),
+  "size-desc": (a, b) =>
+    (nodeSize(b) - nodeSize(a)) ||
+    (a.name || a.path || "").localeCompare(b.name || b.path || "", cmpLocale()),
   "pct-desc": (a, b) =>
     (deltaPct(b) - deltaPct(a)) || (Math.abs(b.delta) - Math.abs(a.delta)),
   "name-asc": (a, b) =>
@@ -551,23 +965,30 @@ const SORTERS = {
 
 function renderTopLevel(nodes) {
   state._topNodes = nodes;
-  // 顶层最大变化量：作为「顶层基准」模式下整棵树统一的条长标尺，
+  // 顶层最大变化量/占用：作为「顶层基准」模式下整棵树统一的条长标尺，
   // 取全部顶层节点（不受筛选影响），保证切换筛选时条长不跳变。
-  state._barRef = nodes.reduce((m, n) => Math.max(m, Math.abs(n.delta)), 1);
+  state._barRef = isBrowseMode()
+    ? nodes.reduce((m, n) => Math.max(m, nodeSize(n)), 1)
+    : nodes.reduce((m, n) => Math.max(m, Math.abs(n.delta)), 1);
   const tree = $("#tree");
   tree.innerHTML = "";
   const frag = buildLevel(nodes, 0);
   tree.appendChild(frag);
   if (!tree.querySelector(".node")) {
     tree.innerHTML = `<div class="child-loading">${t("noMatchTop")}</div>`;
+    return;
   }
+  // 改排序/筛选会重建 DOM：用会话 cache 回填已打开目录，不重新 get_children
+  hydrateOpenDirs(tree, 0);
+  applyTreeSelectionToDom();
 }
 
 /** 由一层节点数据构建 DOM 片段（含展开/懒加载逻辑）。 */
 function buildLevel(nodes, depth) {
   const frag = document.createDocumentFragment();
   const visible = nodes.filter(matchFilter);
-  visible.sort(SORTERS[state.sort] || SORTERS["delta-desc"]);
+  const sortKey = currentTreeSort();
+  visible.sort(SORTERS[sortKey] || SORTERS[isBrowseMode() ? "size-desc" : "delta-desc"]);
   // 条长统一按顶层最大变化量，保证切换筛选时比例不跳变
   const ref = state._barRef || 1;
 
@@ -600,8 +1021,11 @@ function buildNode(node, depth, ref) {
   group.className = "node-group";
   group.dataset.path = node.path || "";
 
-  const kindClass =
-    node.kind === "incomparable" ? "incomparable"
+  const browse = isBrowseMode();
+  const sizeVal = nodeSize(node);
+  const kindClass = browse
+    ? "size"
+    : node.kind === "incomparable" ? "incomparable"
     : node.delta > 0 ? "grow"
     : node.delta < 0 ? "shrink"
     : "unchanged";
@@ -612,12 +1036,15 @@ function buildNode(node, depth, ref) {
   row.style.paddingLeft = `${14 + depth * 20}px`;
 
   const canExpand = node.is_dir && node.has_children;
-  const barPct = Math.max(2, Math.min(100, Math.round((Math.abs(node.delta) / ref) * 100)));
-  const deltaText =
-    node.kind === "incomparable" ? t("incomparable") : fmtDelta(node.delta);
-  // 只存在于一侧的内容单独打标，回答「多/少了什么」。
-  const tag =
-    node.kind === "added" ? `<span class="node-tag added">${t("tagAdded")}</span>`
+  const metric = browse ? sizeVal : Math.abs(node.delta);
+  const barPct = Math.max(2, Math.min(100, Math.round((metric / ref) * 100)));
+  const deltaText = browse
+    ? fmtBytes(sizeVal)
+    : node.kind === "incomparable" ? t("incomparable") : fmtDelta(node.delta);
+  // 只存在于一侧的内容单独打标，回答「多/少了什么」。浏览模式不打变化标。
+  const tag = browse
+    ? ""
+    : node.kind === "added" ? `<span class="node-tag added">${t("tagAdded")}</span>`
     : node.kind === "removed" ? `<span class="node-tag removed">${t("tagRemoved")}</span>`
     : "";
 
@@ -633,13 +1060,30 @@ function buildNode(node, depth, ref) {
   const children = document.createElement("div");
   children.className = "children hidden";
 
-  if (canExpand) {
-    row.onclick = () => toggleDir(node, row, children, depth);
+  // 多选模式 / Ctrl / Shift：勾选；否则目录单击展开
+  row.onclick = (e) => {
+    if (e.shiftKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      toggleTreeSelection(node, { range: true });
+      return;
+    }
+    if (e.ctrlKey || e.metaKey || isTreeMultiSelectMode()) {
+      e.preventDefault();
+      e.stopPropagation();
+      toggleTreeSelection(node, { range: false });
+      return;
+    }
+    if (canExpand) toggleDir(node, row, children, depth);
+  };
+  if (state.treeSelected && state.treeSelected[_treePathKey(node.path)]) {
+    row.classList.add("is-selected");
   }
   // 悬停显示明细；右键出菜单（定位/复制路径）。
-  row.title =
-    `${fmtBytes(node.old_size)} → ${fmtBytes(node.new_size)}` +
-    (node.mtime ? t("mtimeLine", fmtTime(node.mtime)) : "");
+  row.title = browse
+    ? `${fmtBytes(sizeVal)}` + (node.mtime ? t("mtimeLine", fmtTime(node.mtime)) : "")
+    : `${fmtBytes(node.old_size)} → ${fmtBytes(node.new_size)}` +
+      (node.mtime ? t("mtimeLine", fmtTime(node.mtime)) : "");
   row.oncontextmenu = (e) => {
     e.preventDefault();
     openCtxMenu(e, node);
@@ -881,7 +1325,7 @@ async function runTreeSearch(raw, { append = false } = {}) {
   try {
     res = await state.api.search_diff(
       state.oldPath, state.newPath, q, SEARCH_PAGE_SIZE, offset,
-      state.searchSort || "delta-desc",
+      currentSearchSort(),
       !!state.searchCaseSensitive,
       !!state.searchExact
     );
@@ -1074,13 +1518,16 @@ function formatSearchPathHtml(path, query) {
 function buildSearchItem(node, query) {
   const el = document.createElement("div");
   el.className = "search-item";
-  const kindClass =
-    node.kind === "incomparable" ? "muted"
+  const browse = isBrowseMode();
+  const kindClass = browse
+    ? "size"
+    : node.kind === "incomparable" ? "muted"
     : node.delta > 0 ? "grow"
     : node.delta < 0 ? "shrink"
     : "muted";
-  const deltaText =
-    node.kind === "incomparable" ? t("incomparable") : fmtDelta(node.delta);
+  const deltaText = browse
+    ? fmtBytes(nodeSize(node))
+    : node.kind === "incomparable" ? t("incomparable") : fmtDelta(node.delta);
   const name = node.name || node.path || "";
   const path = node.path || "";
   el.innerHTML =
@@ -1209,6 +1656,23 @@ function waitForChildrenLoaded(childrenEl, timeoutMs = 8000) {
 function openCtxMenu(e, node) {
   state.ctxNode = node;
   const menu = $("#ctxMenu");
+  // 右键时若当前项未选中且无修饰键，单选此项
+  if (node && node.path && !(e && (e.ctrlKey || e.metaKey || e.shiftKey))) {
+    const key = _treePathKey(node.path);
+    if (!state.treeSelected || !state.treeSelected[key]) {
+      // 保持已有多选；仅当完全无选择时点亮当前项
+      if (!treeSelectionCount()) {
+        setTreeNodeSelected(node, true);
+        state._treeSelectAnchor = node.path || "";
+        syncTreeSelectBar();
+      }
+    }
+  }
+  const bulk = menu.querySelector('[data-cmd="delete-selected"]');
+  if (bulk) {
+    const n = treeSelectionCount();
+    bulk.classList.toggle("hidden", n <= 1);
+  }
   menu.classList.remove("hidden");
   // 贴着鼠标放，出界则往回收。
   const mw = menu.offsetWidth, mh = menu.offsetHeight;
@@ -1238,6 +1702,16 @@ async function ctxCommand(cmd) {
     } else {
       toast(t("deleteFail"), true);
     }
+  } else if (cmd === "delete-selected") {
+    const nodes = selectedTreeNodes();
+    if (!nodes.length) {
+      toast(t("treeSelectNeed"), true);
+    } else if (typeof addCompareNodesToPending === "function") {
+      addCompareNodesToPending(nodes);
+      clearTreeSelection();
+    } else {
+      toast(t("deleteFail"), true);
+    }
   } else if (cmd === "ask-ai") {
     if (typeof askAiAboutNode === "function") {
       askAiAboutNode(node);
@@ -1257,33 +1731,62 @@ async function toggleDir(node, row, children, depth) {
   const twisty = row.querySelector(".twisty");
   const isOpen = !children.classList.contains("hidden");
   if (isOpen) {
+    // 只藏 DOM，不卸子节点、不清 cache —— 再展开零请求
     children.classList.add("hidden");
-    twisty.classList.remove("open");
+    if (twisty) twisty.classList.remove("open");
+    markPathOpen(node.path, false);
     return;
   }
-  twisty.classList.add("open");
-  children.classList.remove("hidden");
 
-  if (children.dataset.loaded !== "1") {
-    children.innerHTML = `<div class="child-loading">${t("loading")}</div>`;
-    let res;
-    try {
-      res = await state.api.get_children(state.oldPath, state.newPath, node.path);
-    } catch (err) {
-      // 后端调用本身失败（而非业务 error）也要落地成可见提示，
-      // 否则「加载中」会永远挂着。收起后可再点重试。
-      children.innerHTML = `<div class="child-error">${escapeHtml(t("loadFailed", String(err)))}</div>`;
-      return;
-    }
+  if (twisty) twisty.classList.add("open");
+  children.classList.remove("hidden");
+  markPathOpen(node.path, true);
+
+  // 已在 DOM 装过：直接显示
+  if (children.dataset.loaded === "1") return;
+
+  // 会话 cache 命中：填 DOM，不打后端
+  const hit = cachedChildren(node.path);
+  if (hit) {
     children.innerHTML = "";
-    if (res.error) {
-      children.innerHTML = `<div class="child-error">${escapeHtml(t("loadFailed", res.error))}</div>`;
-      return;
+    children.appendChild(buildLevel(hit, depth + 1));
+    children.dataset.loaded = "1";
+    if (!children.querySelector(".node")) {
+      children.innerHTML = `<div class="child-loading">${t("noMatchChild")}</div>`;
+    } else {
+      hydrateOpenDirs(children, depth);
     }
-    children.appendChild(buildLevel(res.nodes, depth + 1));
+    return;
+  }
+
+  // 慢请求才显示「加载中」，避免本地几十 ms 闪一下
+  let loadingTimer = setTimeout(() => {
+    if (children.dataset.loaded === "1") return;
+    if (
+      !children.querySelector(".child-loading") &&
+      !children.querySelector(".node") &&
+      !children.querySelector(".child-error")
+    ) {
+      children.innerHTML = `<div class="child-loading">${t("loading")}</div>`;
+    }
+  }, 150);
+
+  try {
+    const nodes = await fetchChildrenNodes(node.path);
+    clearTimeout(loadingTimer);
+    // 等待期间若已收起：数据留 cache，DOM 保持收起
+    if (children.classList.contains("hidden")) return;
+    children.innerHTML = "";
+    children.appendChild(buildLevel(nodes, depth + 1));
     children.dataset.loaded = "1";
     if (!children.querySelector(".node")) {
       children.innerHTML = `<div class="child-loading">${t("noMatchChild")}</div>`;
     }
+  } catch (err) {
+    clearTimeout(loadingTimer);
+    if (children.classList.contains("hidden")) return;
+    const msg = err && err.message ? err.message : String(err);
+    children.innerHTML = `<div class="child-error">${escapeHtml(t("loadFailed", msg))}</div>`;
+    children.dataset.loaded = "";
   }
 }

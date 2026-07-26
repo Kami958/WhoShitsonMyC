@@ -11,16 +11,19 @@ pip install -r requirements.txt
 python app.py
 python -m pytest tests/ -q
 pip install pyinstaller
-python build.py            # dist/wsmc-v*.exe（主线，不含 AI）
-python build.py --with-ai  # dist/wsmc-ai-v*.exe（含实验 AI）
+python build.py            # dist/wsmc-v*.exe（默认；不含 AI）
+# python build.py --with-ai  # 默认关闭；重新接入见 ai-reenable.md
 ```
+
+> **AI 默认关闭（2026-07）**：开发运行与默认打包都不再加载 AI。  
+> `modules/ai/` 与相关前端代码**保留不删**；如何重新接入见 [ai-reenable.md](ai-reenable.md)。
 
 ## 目录
 
 ```text
 app.py           窗口、JS API、扫描/设置后台线程、WebView2、删除与侧栏加宽
 titlebar.py      标题栏暗/浅色（Windows）
-build.py         打包（主线默认无 AI / --with-ai）
+build.py         打包（默认无 AI；--with-ai 仅维护/实验，见 ai-reenable.md）
 version.py       版本号与 GitHub 发布比较
 core/            无 UI 核心
   models.py        Entry / SnapshotMeta / DiffNode
@@ -34,7 +37,7 @@ core/            无 UI 核心
   applog.py        应用日志（stdlib logging + 内存缓冲；等级门槛；脱敏导出）
   i18n.py          后端文案语言
   timing_probe.py  扫描计时入口（生产空操作；汇总进 applog）
-modules/         可选模块（如 AI；主线包可不打包）
+modules/         可选模块（AI 代码保留；默认 discover 不注册，见 ai-reenable.md）
   ai/
     config.py      settings.yaml 的 ai: 节；Key 明文；public_view 含 tool 目录
     client.py      OpenAI 兼容流式请求

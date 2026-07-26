@@ -18,45 +18,53 @@ def discover() -> dict[str, ModuleFactory]:
 
     每个模块包应暴露 ``create(ctx) -> object``。
     import 失败（构建期排除 / 缺依赖）时跳过，不抛错，但写日志便于排查。
+
+    产品策略（当前）：默认**不**注册 AI。代码仍保留在 ``modules/ai/``，
+    重新接入步骤见 ``assets/docs/ai-reenable.md``。
     """
     found: dict[str, ModuleFactory] = {}
 
-    # 逐个 try-import；被 PyInstaller --exclude-module 裁掉时 ImportError
-    try:
-        from modules import ai as ai_mod  # noqa: WPS433 — 可选模块
+    # ---- AI 模块：默认关闭（不 import、不注册）---------------------------
+    # 重新接入：将下方 ENABLE_AI 改为 True，并按 assets/docs/ai-reenable.md
+    # 恢复 build.py / requirements / 文档说明。
+    ENABLE_AI = False
+    if ENABLE_AI:
+        # 逐个 try-import；被 PyInstaller --exclude-module 裁掉时 ImportError
+        try:
+            from modules import ai as ai_mod  # noqa: WPS433 — 可选模块
 
-        if hasattr(ai_mod, "create"):
-            found["ai"] = ai_mod.create
-        else:
+            if hasattr(ai_mod, "create"):
+                found["ai"] = ai_mod.create
+            else:
+                try:
+                    from core import applog
+
+                    applog.warn("module ai has no create(), skipped")
+                except Exception:  # noqa: BLE001
+                    pass
+        except ImportError as exc:
+            # 常见：运行环境缺 httpx 等 AI 依赖；lite 包排除 AI 也走这里
             try:
+                import sys
+
                 from core import applog
 
-                applog.warn("module ai has no create(), skipped")
+                applog.warn(
+                    f"module ai unavailable: {exc}"
+                    f" | python={sys.executable}"
+                )
             except Exception:  # noqa: BLE001
                 pass
-    except ImportError as exc:
-        # 常见：运行环境缺 httpx 等 AI 依赖；lite 包排除 AI 也走这里
-        try:
-            import sys
+        except Exception as exc:  # noqa: BLE001
+            try:
+                import sys
 
-            from core import applog
+                from core import applog
 
-            applog.warn(
-                f"module ai unavailable: {exc}"
-                f" | python={sys.executable}"
-            )
-        except Exception:  # noqa: BLE001
-            pass
-    except Exception as exc:  # noqa: BLE001
-        try:
-            import sys
-
-            from core import applog
-
-            applog.exception(
-                f"module ai import failed | python={sys.executable}", exc
-            )
-        except Exception:  # noqa: BLE001
-            pass
+                applog.exception(
+                    f"module ai import failed | python={sys.executable}", exc
+                )
+            except Exception:  # noqa: BLE001
+                pass
 
     return found

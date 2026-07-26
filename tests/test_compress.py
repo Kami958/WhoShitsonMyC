@@ -134,7 +134,7 @@ def test_delete_snapshot_removes_dbz(tmp_path):
     meta = _write_sample(db)
     dbz = compress_db(db, meta)
     assert os.path.exists(dbz)
-    delete_snapshot(dbz)
+    delete_snapshot(dbz, permanent=True)
     assert not os.path.exists(dbz)
 
 

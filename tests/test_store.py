@@ -113,9 +113,26 @@ def test_delete_snapshot(tmp_path):
     db = os.path.join(tmp_path, "x.db")
     _write(db, "C:\\", 100, when=1.0)
     assert os.path.exists(db)
+    delete_snapshot(db, permanent=True)
+    assert not os.path.exists(db)
+    delete_snapshot(db, permanent=True)  # 再删不存在的不报错
+
+
+def test_delete_snapshot_recycle_calls_recycle(tmp_path, monkeypatch):
+    """默认 permanent=False 应走回收站，不直接永久删。"""
+    db = os.path.join(tmp_path, "y.db")
+    _write(db, "C:\\", 100, when=1.0)
+    calls: list[tuple[str, bool]] = []
+
+    def _fake_delete_path(abs_path: str, *, permanent: bool = False) -> None:
+        calls.append((abs_path, permanent))
+        os.remove(abs_path)
+
+    monkeypatch.setattr("core.fs_delete.delete_path", _fake_delete_path)
     delete_snapshot(db)
     assert not os.path.exists(db)
-    delete_snapshot(db)  # 再删不存在的不报错
+    assert len(calls) == 1
+    assert calls[0][1] is False
 
 
 def test_sanitize_folder_name():

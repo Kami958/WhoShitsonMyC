@@ -182,6 +182,38 @@ function wireEvents() {
       collapseAllTree();
     };
   }
+
+  const treeMultiSelectBtn = $("#treeMultiSelectBtn");
+  if (treeMultiSelectBtn) {
+    treeMultiSelectBtn.onclick = (e) => {
+      e.stopPropagation();
+      if (typeof toggleTreeMultiSelectMode === "function") toggleTreeMultiSelectMode();
+    };
+    // 初始态
+    if (typeof setTreeMultiSelectMode === "function") {
+      setTreeMultiSelectMode(!!state.treeMultiSelect);
+    }
+  }
+  const treeSelectAddPendingBtn = $("#treeSelectAddPendingBtn");
+  if (treeSelectAddPendingBtn) {
+    treeSelectAddPendingBtn.onclick = () => {
+      const nodes = typeof selectedTreeNodes === "function" ? selectedTreeNodes() : [];
+      if (!nodes.length) {
+        toast(t("treeSelectNeed"), true);
+        return;
+      }
+      if (typeof addCompareNodesToPending === "function") {
+        addCompareNodesToPending(nodes);
+        if (typeof clearTreeSelection === "function") clearTreeSelection();
+      }
+    };
+  }
+  const treeSelectClearBtn = $("#treeSelectClearBtn");
+  if (treeSelectClearBtn) {
+    treeSelectClearBtn.onclick = () => {
+      if (typeof clearTreeSelection === "function") clearTreeSelection();
+    };
+  }
   const snapSortMenuBtn = $("#snapSortMenuBtn");
   if (snapSortMenuBtn) {
     snapSortMenuBtn.onclick = (e) => {
@@ -326,6 +358,8 @@ function wireEvents() {
   setFilter(state.filter);
   syncSummaryToolButtons();
   wireSidebarResizer();
+  restoreSearchPanelHeight();
+  wireSearchPanelResizer();
 }
 
 // ---- 左侧栏宽度拖拽（仅改布局，向右变宽挤压对比树，不改窗口） ----
@@ -356,6 +390,101 @@ function restoreSidebarWidth() {
     }
   } catch (e) {}
   applySidebarWidth(_SIDEBAR_W_DEFAULT);
+}
+
+
+const _SEARCH_PANEL_H_KEY = "wsmc.searchPanelH";
+const _SEARCH_PANEL_H_DEFAULT = 260;
+const _SEARCH_PANEL_H_MIN = 120;
+
+function applySearchPanelHeight(px) {
+  const n = Math.max(_SEARCH_PANEL_H_MIN, Math.min(Math.round(px), 900));
+  document.documentElement.style.setProperty("--search-panel-h", n + "px");
+  return n;
+}
+
+function restoreSearchPanelHeight() {
+  try {
+    const raw = localStorage.getItem(_SEARCH_PANEL_H_KEY);
+    const n = raw ? parseInt(raw, 10) : _SEARCH_PANEL_H_DEFAULT;
+    if (Number.isFinite(n) && n > 0) applySearchPanelHeight(n);
+    else applySearchPanelHeight(_SEARCH_PANEL_H_DEFAULT);
+  } catch (e) {
+    applySearchPanelHeight(_SEARCH_PANEL_H_DEFAULT);
+  }
+}
+
+function wireSearchPanelResizer() {
+  const handle = $("#searchPanelResizer");
+  const panel = $("#searchPanel");
+  if (!handle || !panel) return;
+
+  let dragging = false;
+  let startY = 0;
+  let startH = 0;
+  let pendingH = 0;
+  let raf = 0;
+
+  const onMove = (e) => {
+    if (!dragging) return;
+    const dy = e.clientY - startY;
+    // 拖底边：向下拉增高
+    pendingH = startH + dy;
+    if (raf) return;
+    raf = requestAnimationFrame(() => {
+      raf = 0;
+      // 不超过主区 70%
+      const main = document.querySelector(".main");
+      const maxH = main ? Math.floor(main.clientHeight * 0.7) : 900;
+      const h = Math.max(_SEARCH_PANEL_H_MIN, Math.min(pendingH, maxH));
+      applySearchPanelHeight(h);
+    });
+  };
+
+  const onUp = () => {
+    if (!dragging) return;
+    dragging = false;
+    document.body.classList.remove("is-search-panel-resizing");
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+    window.removeEventListener("pointercancel", onUp);
+    if (raf) {
+      cancelAnimationFrame(raf);
+      raf = 0;
+    }
+    const main = document.querySelector(".main");
+    const maxH = main ? Math.floor(main.clientHeight * 0.7) : 900;
+    const h = applySearchPanelHeight(
+      Math.max(_SEARCH_PANEL_H_MIN, Math.min(pendingH || startH, maxH))
+    );
+    try {
+      localStorage.setItem(_SEARCH_PANEL_H_KEY, String(h));
+    } catch (e) {}
+  };
+
+  handle.addEventListener("pointerdown", (e) => {
+    if (e.button != null && e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    dragging = true;
+    startY = e.clientY;
+    const applied = parseInt(
+      getComputedStyle(document.documentElement).getPropertyValue("--search-panel-h"),
+      10
+    );
+    startH =
+      (Number.isFinite(applied) && applied > 0
+        ? applied
+        : panel.getBoundingClientRect().height) || _SEARCH_PANEL_H_DEFAULT;
+    pendingH = startH;
+    document.body.classList.add("is-search-panel-resizing");
+    try {
+      handle.setPointerCapture(e.pointerId);
+    } catch (err) {}
+    window.addEventListener("pointermove", onMove, { passive: true });
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  });
 }
 
 function wireSidebarResizer() {

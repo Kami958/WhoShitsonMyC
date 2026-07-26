@@ -68,6 +68,11 @@ class Api:
         self._diff: Diff | None = None
         self._diff_key: tuple[str, str] | None = None
         self._diff_lock = threading.Lock()
+        self._window_size_timer: threading.Timer | None = None
+        self._window_size_lock = threading.Lock()
+        self._pending_window_size: tuple[int, int] | None = None
+        # 工具侧栏主动 win.resize 期间忽略 resized，避免误记窗口大小
+        self._ignore_window_size_save = False
         # 搜索是否进行中：cancel_search 只在此期间打断连接，避免误伤其他查询
         self._search_active = False
         # 搜索预热回调代际：换会话后丢弃旧线程的 UI 推送
@@ -102,7 +107,11 @@ class Api:
     # ---- 可选模块（AI 等） -------------------------------------------------
 
     def _init_modules(self) -> None:
-        """发现并实例化构建期可选模块；失败静默。"""
+        """发现并实例化构建期可选模块；失败静默。
+
+        当前产品默认不启用 AI：``modules.discover`` 默认不注册 ai。
+        代码与 ``modules/ai/`` 仍保留；重新接入见 ``assets/docs/ai-reenable.md``。
+        """
         try:
             from modules import discover
         except ImportError:
@@ -113,7 +122,7 @@ class Api:
             "app_data_dir": store.app_data_dir,
             "t": i18n.t,
             "get_lang": i18n.get_lang,
-            # AI 清理 packing：一层子项，与 get_children 同源
+            # AI 清理 packing：一层子项，与 get_children 同源（AI 启用时才有消费者）
             "get_diff_children": self._get_diff_children_for_modules,
         }
         mods: dict[str, object] = {}
@@ -135,6 +144,7 @@ class Api:
         if mods:
             applog.info(f"modules loaded: {', '.join(sorted(mods))}")
         else:
+            # 默认路径：无 AI 时这里就是 (none)
             applog.info("modules loaded: (none)")
 
     def list_modules(self) -> dict:
@@ -268,24 +278,40 @@ class Api:
                 f"Rename failed: {exc}")}
         return {"ok": True, "folder": name}
 
-    def delete_snapshot_folder(self, name: str, force: bool = False) -> dict:
-        """删除归纳文件夹；默认仅空夹，``force`` 时连同内含快照删除。"""
+    def delete_snapshot_folder(
+        self,
+        name: str,
+        force: bool = False,
+        permanent: bool = False,
+    ) -> dict:
+        """删除归纳文件夹；默认仅空夹，``force`` 时连同内含快照删除。
+
+        ``permanent`` 仅作用于夹内快照文件：默认进回收站。
+        """
         # 若对比会话持有夹内文件，先关
         with self._diff_lock:
             self._close_diff()
         try:
             store.delete_snapshot_folder(
-                str(name or ""), force=bool(force)
+                str(name or ""),
+                force=bool(force),
+                permanent=bool(permanent),
             )
         except ValueError as exc:
             return {"error": str(exc)}
         except SnapshotError as exc:
             return {"error": str(exc)}
+        except fs_delete.DeleteError as exc:
+            code = str(exc.message or exc)
+            return {
+                "error": _delete_error_message(code),
+                "code": code,
+            }
         except OSError as exc:
             return {"error": i18n.t(
                 f"删除文件夹失败：{exc}",
                 f"Failed to delete folder: {exc}")}
-        return {"ok": True}
+        return {"ok": True, "permanent": bool(permanent)}
 
     def read_snapshot_infos(self, paths: list | None = None) -> dict:
         """读取任意路径上的快照摘要（用于「从其它位置导入」）。
@@ -366,24 +392,35 @@ class Api:
         paths = [str(p) for p in result if p]
         return {"paths": paths}
 
-    def delete_snapshot(self, path: str) -> dict:
+    def delete_snapshot(self, path: str, permanent: bool = False) -> dict:
         """删除一个快照文件。
 
         顺序很关键：**先**释放对比会话（它持有该文件的 sqlite 只读连接，
         Windows 上打开的句柄会让删除报 WinError 32），**再**删文件。
+        默认进回收站；``permanent=True`` 永久删除。
         备注写在快照文件内，随文件一起删除。
         """
         with self._diff_lock:
             if self._diff_key and path in self._diff_key:
                 self._close_diff()
         try:
-            store.delete_snapshot(path)
+            store.delete_snapshot(path, permanent=bool(permanent))
+        except fs_delete.DeleteError as exc:
+            code = str(exc.message or exc)
+            return {
+                "error": _delete_error_message(code),
+                "code": code,
+            }
         except OSError as exc:
             return {"error": i18n.t(
                 f"删除失败，文件可能正被其它程序占用：{exc}",
                 f"Delete failed; the file may be in use by another program: {exc}",
             )}
-        return {"ok": True}
+        return {
+            "ok": True,
+            "permanent": bool(permanent),
+            "recycled": not bool(permanent),
+        }
 
     def set_snapshot_note(self, path: str, note: str) -> dict:
         """把备注写入快照文件本身（``.db`` meta / ``.dbz`` meta.json）。"""
@@ -687,6 +724,82 @@ class Api:
             "ok": True,
             "search_memory_index": store.set_search_memory_index(bool(enabled)),
         }
+
+    def set_remember_window_size(self, enabled: bool) -> dict:
+        """设置是否记住窗口大小（写入 settings.yaml）。"""
+        return {
+            "ok": True,
+            "remember_window_size": store.set_remember_window_size(bool(enabled)),
+        }
+
+    def report_window_size(self, width: int = 0, height: int = 0) -> dict:
+        """前端/窗口尺寸稳定后上报；仅开启「记住窗口大小」时写入 YAML。
+
+        防抖在调用方完成（保持 15 秒不变再调）。尺寸未变则不写盘。
+        """
+        if not store.get_remember_window_size():
+            return {"ok": True, "saved": False, "remember_window_size": False}
+        try:
+            w, h = store.set_window_size(int(width), int(height), persist=True)
+        except (TypeError, ValueError) as exc:
+            return {"error": i18n.t(
+                f"保存窗口大小失败：{exc}",
+                f"Failed to save window size: {exc}",
+            )}
+        return {
+            "ok": True,
+            "saved": True,
+            "remember_window_size": True,
+            "window_width": w,
+            "window_height": h,
+        }
+
+
+    def _schedule_window_size_save(self, width: int, height: int) -> None:
+        """窗口尺寸变化：8 秒保持不变才写入 YAML（仅开启记住时）。
+
+        工具侧栏展开/收起引起的 resize 不计（见 ``_ignore_window_size_save``）。
+        """
+        if self._ignore_window_size_save:
+            return
+        if not store.get_remember_window_size():
+            return
+        try:
+            w, h = int(width), int(height)
+        except (TypeError, ValueError):
+            return
+        if w < 820 or h < 560:
+            return
+        with self._window_size_lock:
+            self._pending_window_size = (w, h)
+            if self._window_size_timer is not None:
+                try:
+                    self._window_size_timer.cancel()
+                except Exception:  # noqa: BLE001
+                    pass
+            t = threading.Timer(8.0, self._flush_window_size_save)
+            t.daemon = True
+            self._window_size_timer = t
+            t.start()
+
+    def _flush_window_size_save(self) -> None:
+        with self._window_size_lock:
+            pending = self._pending_window_size
+            self._window_size_timer = None
+            self._pending_window_size = None
+        if not pending or not store.get_remember_window_size():
+            return
+        w, h = pending
+        try:
+            store.set_window_size(w, h, persist=True)
+            applog.info(f"window size saved: {w}x{h}")
+            try:
+                self._emit("window-size-saved", {"width": w, "height": h})
+            except Exception:  # noqa: BLE001
+                pass
+        except Exception as exc:  # noqa: BLE001
+            applog.warn(f"save window size failed: {exc}")
+
 
     def reset_settings(self) -> dict:
         """恢复默认设置并删除 ``settings.yaml``（不删除快照文件）。
@@ -1279,13 +1392,45 @@ class Api:
                 applied = new_w - cur_w
                 new_x = wx
 
+        self._ignore_window_size_save = True
+        # 侧栏加宽时不要重刷标题栏：Resize 上的 DWM/FRAMECHANGED 会闪白
+        try:
+            self._titlebar.suppress_resize_apply(True)
+        except Exception:  # noqa: BLE001
+            pass
+        # 取消尚未落地的“记住窗口大小”计时，避免侧栏加宽后的尺寸被写入
+        with self._window_size_lock:
+            if self._window_size_timer is not None:
+                try:
+                    self._window_size_timer.cancel()
+                except Exception:  # noqa: BLE001
+                    pass
+                self._window_size_timer = None
+            self._pending_window_size = None
         try:
             if new_x != cur_x:
                 win.move(new_x, cur_y)
             win.resize(new_w, max(min_h, cur_h))
         except Exception as exc:  # noqa: BLE001
             applog.exception("set_tool_panel_open resize failed", exc)
+            self._ignore_window_size_save = False
+            try:
+                self._titlebar.suppress_resize_apply(False)
+            except Exception:  # noqa: BLE001
+                pass
             return {"error": str(exc)}
+        finally:
+            # 延迟解除：resized / 标题栏 Resize 回调可能略晚于 resize 返回
+            def _clear_ignore() -> None:
+                self._ignore_window_size_save = False
+                try:
+                    self._titlebar.suppress_resize_apply(False)
+                except Exception:  # noqa: BLE001
+                    pass
+
+            t = threading.Timer(0.45, _clear_ignore)
+            t.daemon = True
+            t.start()
 
         if open:
             self._tool_panel_boost = max(0, int(self._tool_panel_boost or 0) + applied)
@@ -1428,12 +1573,12 @@ class Api:
                     )
                     return
         except ScanCancelled:
-            store.delete_snapshot(db_path)  # 丢弃不完整快照
+            store.delete_snapshot(db_path, permanent=True)  # 丢弃不完整快照
             timer.finish(status="cancelled")
             applog.info("Scan cancelled")
             self._emit("scan-cancelled", {})
         except Exception as exc:  # noqa: BLE001 - 兜底，任何异常都不该让线程静默死掉
-            store.delete_snapshot(db_path)
+            store.delete_snapshot(db_path, permanent=True)
             # 不写扫描 root / 当前路径，避免隐私与日志膨胀
             applog.exception("Scan failed", exc)
             timer.finish(status="error")
@@ -1872,6 +2017,32 @@ def _primary_work_area() -> tuple[int, int, int, int] | None:
         return None
 
 
+
+def _default_window_size() -> tuple[int, int]:
+    """未记住尺寸时的默认窗口：高度取主屏工作区约一半，宽度按 1100:720 比例。"""
+    work = _primary_work_area()
+    if work is not None:
+        _x, _y, sw, sh = work
+    elif os.name == "nt":
+        try:
+            import ctypes
+
+            sw = int(ctypes.windll.user32.GetSystemMetrics(0))
+            sh = int(ctypes.windll.user32.GetSystemMetrics(1))
+        except Exception:  # noqa: BLE001
+            sw, sh = 1280, 800
+    else:
+        sw, sh = 1280, 800
+
+    # 高度 = 工作区高度的 50%，并夹在 min_size 与屏幕之间
+    h = int(round(sh * 0.5))
+    h = max(560, min(h, max(560, sh - 40)))
+    # 宽随高保持约 11:7.2，且不超过工作区
+    w = int(round(h * 1100 / 720))
+    w = max(820, min(w, max(820, sw - 40)))
+    return w, h
+
+
 def _window_is_maximized(win: "webview.Window") -> bool:
     """当前窗口是否最大化（Windows / pywebview winforms）。"""
     if win is None:
@@ -2241,35 +2412,64 @@ def main() -> None:
         return
 
     api = Api()
-    width, height = 1100, 720
+    # 开启「记住」且 YAML/内存里已有有效尺寸 → 用记住的；否则用屏幕推导默认
+    if store.get_remember_window_size() and store.has_saved_window_size():
+        width, height = store.get_window_size()
+    else:
+        width, height = _default_window_size()
     x, y = _centered_xy(width, height)
+    # 窗口底色与页面主题都以 settings.yaml 为准，避免默认 light 先白后黑。
+    # 主题经 URL 参数交给 index.html 首帧脚本，不写生成文件。
+    _boot_theme = store.get_theme()
+    if _boot_theme not in ("dark", "light"):
+        _boot_theme = "light"
+    _boot_bg = "#ffffff" if _boot_theme == "light" else "#14161a"
+    _boot_url = os.path.join(_WEB_DIR, "index.html") + "?theme=" + _boot_theme
     window = webview.create_window(
         title=_window_title(),
-        url=os.path.join(_WEB_DIR, "index.html"),
+        url=_boot_url,
         js_api=api,
         width=width,
         height=height,
         x=x,
         y=y,
         min_size=(820, 560),
-        background_color=(
-            "#ffffff" if store.get_theme() == "light" else "#0f1116"
-        ),
+        background_color=_boot_bg,
+        # loaded 后再 show，导航过程不可见
+        hidden=True,
+        # 关掉 ExtendFrameIntoClientArea，避免 DWM 客户区首帧发白
+        shadow=False,
     )
     api.set_window(window)
-    # 窗口一出现：hook 标题栏 + 图标；主题跟 store（YAML 已加载）走。
-    # 前端 set_theme 再对齐一次；启动阶段勿用默认 dark 覆盖用户 light。
+    _ui_shown = {"done": False}
+
+    def _on_resized(w, h) -> None:
+        try:
+            api._schedule_window_size_save(w, h)
+        except Exception:  # noqa: BLE001
+            pass
+
     try:
-        api._titlebar.dark = store.get_theme() != "light"
+        window.events.resized += _on_resized
     except Exception:  # noqa: BLE001
         pass
 
-    def _on_shown() -> None:
+    # 标题栏主题先跟 store，避免窗口显示后先浅色标题栏再跳暗色
+    try:
+        api._titlebar.dark = _boot_theme != "light"
+    except Exception:  # noqa: BLE001
+        pass
+
+    def _prepare_chrome() -> None:
         api._refresh_window_title()
         api._titlebar.hook()
         api._apply_icon(_ICON_PATH)
-        # 不 force_nudge：避免启动瞬间抖窗口；后续 set_theme / 延迟刷新补上。
+        # 首屏不要 force_nudge：尺寸 +1 微扰本身会造成可见闪动
         api._titlebar.apply(api._titlebar.dark, force_nudge=False)
+
+    def _on_shown() -> None:
+        # hidden 窗口内部也会走过 show/hide；这里只做壳准备，不主动显示
+        _prepare_chrome()
 
     try:
         window.events.shown += _on_shown
@@ -2282,11 +2482,17 @@ def main() -> None:
     except Exception:  # noqa: BLE001
         pass
     try:
-        # 页面就绪后再钉一次（前端多半已 set_theme）；只调度少量延迟刷新。
         def _on_loaded() -> None:
-            api._titlebar.hook()
-            api._titlebar.apply(api._titlebar.dark, force_nudge=False)
-            api._titlebar.schedule_refresh(delays_ms=(120,))
+            if _ui_shown["done"]:
+                return
+            _ui_shown["done"] = True
+            _prepare_chrome()
+            try:
+                window.show()
+            except Exception as exc:  # noqa: BLE001
+                applog.exception("window.show after loaded failed", exc)
+            # 显示后再轻量补一次标题栏，仍不做首帧尺寸微扰
+            api._titlebar.schedule_refresh(delays_ms=(200,), force_nudge=False)
 
         window.events.loaded += _on_loaded
     except Exception:  # noqa: BLE001

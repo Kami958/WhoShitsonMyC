@@ -22,7 +22,7 @@
 
 You clean up C: with a disk cleaner and everything stays fine for a while. Then one day a huge chunk of free space is gone, and you have no idea where the new junk came from. Open the cleaner again and it’s still the same “maybe safe to delete” list — more guessing. **You never know who snuck back and took a dump after the last cleanup**
 
-**WhoShitsOnMyC** is built for that exact problem
+**WhoShitsOnMyC is built for that exact problem — for users who prefer managing disk space by hand**
 
 > **Compared with last time, what changed?**
 
@@ -36,15 +36,11 @@ Instead of hunting junk by gut feeling every time, scan once while space still l
 ## Features
 
 - **Lightweight single-file**: one exe, no installer, no background service
-- **Clean uninstall**: clear local data from Settings; then delete the exe yourself
-- **Optional AI (half-baked experimental stuff)**: **we totally get the neat-freak instinct — not every tool should mindlessly bolt on AI, and we fully understand if all you want is a plain little utility.** The default build is the lightweight one without AI; there's also an experimental AI build if you want it. Features differ a bit. Honestly the AI side is maybe ~10% done — please don't expect it to be that helpful yet:
 
-| What differs | Default | with AI |
-| --- | :---: | :---: |
-| Snapshot scan / compare / search | ✓ | ✓ |
-| Pending delete (recycle bin / permanent) | ✓ | ✓ |
-| AI chat, ask AI from context menu, propose pending delete (experimental, ~10%) | — | ✓ |
-| Package size | Smaller | Larger |
+- **Clean uninstall**: clear local data from Settings; then delete the exe yourself
+
+- ~~**Optional AI (experimental)**: **we totally get the neat-freak instinct — not every tool should mindlessly bolt on AI, and we fully understand if all you want is a plain little utility.** The default build and the AI build used to be separate.~~
+> AI’s role and behavior here are still unclear or hard to control, so we are not planning to ship AI with this tool for now. We will not actively publish AI-enabled builds.
 
 ## Quick start
 
@@ -100,7 +96,7 @@ Grab a build from [Releases](https://github.com/Kami958/WhoShitsonMyC/releases)
 
 ## Data & uninstall
 
-### What data files we leave behind
+### 1. What data files we leave behind
 
 > Yes — we left a little 💩 on your C: drive too
 
@@ -115,17 +111,19 @@ Paste that path into File Explorer’s address bar and press Enter to open it
 | Snapshots | By default in the `snapshots` folder under the path above; you can change this to another location in Settings |
 | Settings | Stored as a config file in the same folder; saved after you change options and click **Done** |
 
-### How to uninstall WhoShitsOnMyC?
+### 2. How to uninstall WhoShitsOnMyC?
 
-**Open Settings → General, click the red Uninstall, then confirm in the dialog whether to delete data and finish cleanup**
+Settings → General → Uninstall
 
 - When data deletion is on, the app clears config and snapshots under the default data folder
 - **If you migrated the snapshot folder, that migrated location still needs to be deleted manually!**
 - After cleanup, delete the exe yourself
 
+
+
 ## Developers
 
-Run from source, tests, and packaging: [developer docs](assets/docs/Designed.md)
+Run from source, tests, and packaging: [developer docs (maintained by AI)](assets/docs/Designed.md). AI is off by default; to re-enable see [ai-reenable.md](assets/docs/ai-reenable.md)
 
 ## License
 

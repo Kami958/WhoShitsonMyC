@@ -41,6 +41,7 @@ async function loadSettings() {
     compress_snapshots: !!s.compress_snapshots,
     use_mft: !!s.use_mft,
     search_memory_index: s.search_memory_index !== false,
+    remember_window_size: s.remember_window_size !== false,
     log_sanitize: s.log_sanitize !== false,
     log_level: _normalizeLogLevel(s.log_level),
     // 空串 = 内置目录；非空 = 自定义绝对路径
@@ -195,6 +196,10 @@ function fillSettingsFormFromDraft() {
   const searchMemIdxChk = $("#searchMemIdxChk");
   if (searchMemIdxChk) {
     searchMemIdxChk.checked = d.search_memory_index !== false;
+  }
+  const rememberWinSizeChk = $("#rememberWinSizeChk");
+  if (rememberWinSizeChk) {
+    rememberWinSizeChk.checked = d.remember_window_size !== false;
   }
   const logSanitizeChk = $("#logSanitizeChk");
   if (logSanitizeChk) {
@@ -731,6 +736,7 @@ async function applySettingsAndClose() {
   const compressChk = $("#compressChk");
   const mftChk = $("#mftChk");
   const searchMemIdxChk = $("#searchMemIdxChk");
+  const rememberWinSizeChk = $("#rememberWinSizeChk");
   const logSanitizeChk = $("#logSanitizeChk");
   const logLevelSel = $("#logLevelSel");
   const payload = {
@@ -740,6 +746,9 @@ async function applySettingsAndClose() {
     search_memory_index: searchMemIdxChk
       ? !!searchMemIdxChk.checked
       : (_settingsDraft.search_memory_index !== false),
+    remember_window_size: rememberWinSizeChk
+      ? !!rememberWinSizeChk.checked
+      : (_settingsDraft.remember_window_size !== false),
     log_sanitize: logSanitizeChk
       ? !!logSanitizeChk.checked
       : (_settingsDraft.log_sanitize !== false),

@@ -41,6 +41,7 @@ class TitleBarTheme:
         # pywebview 会按 AppsUseLightTheme 重刷标题栏，Win10 上经常把我们刚设的盖掉。
         self.dark: bool = False
         self._hooked: bool = False
+        self._suppress_resize_apply = False
         # 上次已成功刷到标题栏的主题；相同主题的重复 set_theme 直接跳过，加快启动。
         self._applied: bool | None = None
         self._refresh_gen: int = 0
@@ -88,11 +89,19 @@ class TitleBarTheme:
             )
             # 最大化/还原会改尺寸，借这次系统重绘把标题栏颜色钉牢。
             form.Resize += (
-                lambda *a, **k: self._apply_hwnd(self.dark, force_nudge=False)
+                lambda *a, **k: (
+                    None
+                    if self._suppress_resize_apply
+                    else self._apply_hwnd(self.dark, force_nudge=False)
+                )
             )
             self._hooked = True
         except Exception:  # noqa: BLE001 - 钩不上就只靠主动 set_theme
             pass
+
+    def suppress_resize_apply(self, on: bool) -> None:
+        """侧栏展开/收起改窗宽时临时关闭 Resize 标题栏重刷。"""
+        self._suppress_resize_apply = bool(on)
 
     def apply(
         self, dark: bool | None = None, *, force_nudge: bool = False
@@ -105,6 +114,14 @@ class TitleBarTheme:
         else:
             self.dark = bool(dark)
 
+        # 已成功刷成同一主题且不要求微扰：跳过，避免重复 FRAMECHANGED / 重绘闪白
+        if (
+            not force_nudge
+            and self._applied is not None
+            and self._applied == bool(self.dark)
+        ):
+            return
+
         target = self.dark
         nudge = force_nudge
         self._run_on_ui(
@@ -112,12 +129,16 @@ class TitleBarTheme:
         )
 
     def schedule_refresh(
-        self, delays_ms: tuple[int, ...] = (100, 320)
+        self,
+        delays_ms: tuple[int, ...] = (100, 320),
+        *,
+        force_nudge: bool = True,
     ) -> None:
         """启动/切主题后延迟再刷（默认 2 次，够修 Win10，又不太拖首屏）。
 
         每次调度递增 generation，旧 timer 回调自动作废，避免 shown/loaded/set_theme
         叠在一起把 UI 线程打满。
+        force_nudge=False：首屏显示后只刷标题栏，不做尺寸微扰，避免可见闪动。
         """
         if os.name != "nt":
             return
@@ -142,7 +163,7 @@ class TitleBarTheme:
                         pass
                     if g != self._refresh_gen:
                         return
-                    self._apply_hwnd(self.dark, force_nudge=True)
+                    self._apply_hwnd(self.dark, force_nudge=force_nudge)
 
                 timer.Tick += _tick
                 timer.Start()
@@ -154,7 +175,7 @@ class TitleBarTheme:
                 if g != self._refresh_gen:
                     return
                 self._run_on_ui(
-                    lambda: self._apply_hwnd(self.dark, force_nudge=True)
+                    lambda: self._apply_hwnd(self.dark, force_nudge=force_nudge)
                 )
 
             for ms in delays_ms:
@@ -230,6 +251,14 @@ class TitleBarTheme:
         force_nudge：非最大化时对窗口宽做 +1/-1 像素抖动。Win10 上这和
         「点最大化」一样会逼 DWM 重画标题栏；Resize 回调里不要开，防抖死循环。
         """
+        # 延迟刷新 / Resize 也会走到这里；同主题且不微扰时直接跳过，
+        # 避免重复 FRAMECHANGED 把客户区刷白。
+        if (
+            not force_nudge
+            and self._applied is not None
+            and self._applied == bool(dark)
+        ):
+            return
         hwnd = self.hwnd()
         if not hwnd:
             return
@@ -282,15 +311,16 @@ class TitleBarTheme:
             user32.SendMessageW(wintypes.HWND(hwnd), WM_NCACTIVATE, 1, 0)
             user32.SendMessageW(wintypes.HWND(hwnd), WM_NCPAINT, 1, 0)
 
+            # 只重绘非客户区（标题栏）。不要 RDW_ALLCHILDREN：
+            # 会把 WebView 客户区整页 invalidate，暗色主题下常见白闪。
             RDW_INVALIDATE = 0x0001
             RDW_FRAME = 0x0400
             RDW_UPDATENOW = 0x0100
-            RDW_ALLCHILDREN = 0x0080
             user32.RedrawWindow(
                 wintypes.HWND(hwnd),
                 None,
                 None,
-                RDW_INVALIDATE | RDW_FRAME | RDW_UPDATENOW | RDW_ALLCHILDREN,
+                RDW_INVALIDATE | RDW_FRAME | RDW_UPDATENOW,
             )
 
             # 尺寸微扰：效果等同用户点一次最大化，是 Win10 上最靠谱的一招。

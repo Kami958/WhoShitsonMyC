@@ -6,6 +6,8 @@
 function selectSnapshot(which, path) {
   if (which === "old") state.oldPath = path;
   else state.newPath = path;
+  // 手动改基准/当前后离开占用浏览（需再点对比）
+  if (state.treeMode === "browse") state.treeMode = "compare";
   updatePickers();
   renderSnapshotList();
 }
@@ -80,7 +82,8 @@ function updatePickers() {
   setPick("old", state.oldPath, "pickOld");
   setPick("new", state.newPath, "pickNew");
 
-  const ok = state.oldPath && state.newPath && state.oldPath !== state.newPath;
+  // 同一快照也可点「对比」：进入占用展开
+  const ok = !!(state.oldPath && state.newPath);
   $("#compareBtn").disabled = !ok || state.comparing;
   $("#swapBtn").disabled = !(state.oldPath || state.newPath);
   $("#clearPickBtn").disabled = !(state.oldPath || state.newPath);
