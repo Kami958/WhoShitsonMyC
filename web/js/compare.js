@@ -135,31 +135,38 @@ function toggleTreeSelection(node, { range } = {}) {
   if (!state.treeSelected) state.treeSelected = {};
   const key = _treePathKey(node.path);
   if (range && state._treeSelectAnchor) {
-    // 同层可见节点：在 DOM 中找同一父级下的 .node 序列
-    const rows = Array.from(document.querySelectorAll("#tree .node"));
-    const paths = rows.map((r) => r.dataset.path || "");
-    const a = paths.indexOf(state._treeSelectAnchor);
-    const b = paths.indexOf(node.path);
-    if (a >= 0 && b >= 0) {
-      const lo = Math.min(a, b);
-      const hi = Math.max(a, b);
-      for (let i = lo; i <= hi; i++) {
-        const row = rows[i];
-        const p = row.dataset.path || "";
-        if (!p) continue;
-        // 用行上已有数据不够 size；只保证 path/name
-        const nameEl = row.querySelector(".node-name");
-        state.treeSelected[_treePathKey(p)] = {
-          path: p,
-          name: nameEl ? nameEl.textContent : p,
-          is_dir: row.classList.contains("dir"),
-          new_size: 0,
-          old_size: 0,
-        };
-        row.classList.add("is-selected");
+    // Shift 圈选只看同一层（同一父文件夹的直接子项）的行；
+    // 锚点或目标不在 DOM、或不在同一层时，回退为单选目标项。
+    const rows = siblingRows(state._treeSelectAnchor, node.path);
+    if (rows) {
+      const paths = rows.map((r) => r.dataset.path || "");
+      const a = paths.indexOf(state._treeSelectAnchor);
+      const b = paths.indexOf(node.path);
+      if (a >= 0 && b >= 0) {
+        const lo = Math.min(a, b);
+        const hi = Math.max(a, b);
+        for (let i = lo; i <= hi; i++) {
+          const row = rows[i];
+          const p = row.dataset.path || "";
+          if (!p) continue;
+          // 优先用会话索引里的完整节点数据（含大小字段）；
+          // 行数据本身不够 size，索引缺失时才降级为仅 path/name。
+          const fullNode = state._pathNodeMap && state._pathNodeMap[_treePathKey(p)];
+          const nameEl = row.querySelector(".node-name");
+          state.treeSelected[_treePathKey(p)] = fullNode
+            ? _nodeSelectPayload(fullNode)
+            : {
+                path: p,
+                name: nameEl ? nameEl.textContent : p,
+                is_dir: row.classList.contains("dir"),
+                new_size: 0,
+                old_size: 0,
+              };
+          row.classList.add("is-selected");
+        }
+        syncTreeSelectBar();
+        return;
       }
-      syncTreeSelectBar();
-      return;
     }
   }
   if (state.treeSelected[key]) {
@@ -169,6 +176,26 @@ function toggleTreeSelection(node, { range } = {}) {
   }
   state._treeSelectAnchor = node.path || "";
   applyTreeSelectionToDom();
+}
+
+/**
+ * Shift 圈选时取两行所在层的兄弟行序列。
+ * 每个节点一行、独占一个 .node-group；同一层的行，其 group 挂在同一个
+ * 容器下（顶层是 #tree，子层是父行的 .children）。两行须同在 DOM 且
+ * 各自 group 的父容器相同（同一层）；否则返回 null。
+ */
+function siblingRows(anchorPath, targetPath) {
+  if (!anchorPath || !targetPath) return null;
+  const sel = (p) => `#tree .node[data-path="${cssEscapeAttr(p)}"]`;
+  const anchorRow = document.querySelector(sel(anchorPath));
+  const targetRow = document.querySelector(sel(targetPath));
+  if (!anchorRow || !targetRow) return null;
+  const anchorGroup = anchorRow.parentElement;
+  const targetGroup = targetRow.parentElement;
+  if (!anchorGroup || !targetGroup) return null;
+  const container = anchorGroup.parentElement;
+  if (!container || container !== targetGroup.parentElement) return null;
+  return Array.from(container.querySelectorAll(":scope > .node-group > .node"));
 }
 
 
@@ -285,7 +312,14 @@ function fetchChildrenNodes(parentPath) {
   if (state._childrenInflight[key]) return state._childrenInflight[key];
 
   const req = (async () => {
-    const res = await state.api.get_children(state.oldPath, state.newPath, parentPath);
+    // 筛「新增/已删除」时下钻请求带上标记开关，保证子节点可作下钻入口
+    const needMarks = isSubtreeFilter();
+    const res = await state.api.get_children(
+      state.oldPath,
+      state.newPath,
+      parentPath,
+      needMarks
+    );
     if (res && res.error) {
       const err = new Error(String(res.error));
       throw err;
@@ -381,6 +415,9 @@ async function doCompare() {
       .join("\n");
     // 对比开始时已收起搜索；成功后再确保一次（防异步预热回调又撑开）
     if (typeof collapseTreeSearch === "function") collapseTreeSearch({ clear: true });
+    // 新一轮对比不沿用上一对的筛选状态，回到默认「全部变化」
+    resetTreeFilters();
+    state._marksLoaded = false;
     syncSummaryToolButtons();
     renderSummary(res.summary);
     renderTopLevel(res.nodes);
@@ -505,7 +542,14 @@ const FILTER_OPTIONS = [
   { value: "all", key: "filterAll" },
   { value: "grew", key: "filterGrew" },
   { value: "shrank", key: "filterShrank" },
+  { value: "added", key: "filterAdded", slowHint: "filterReRenderHint" },
+  { value: "removed", key: "filterRemoved", slowHint: "filterReRenderHint" },
 ];
+
+/** 是否启用依赖「目录子树含新增/删除」标记的筛选。 */
+function isSubtreeFilter() {
+  return state.filter === "added" || state.filter === "removed";
+}
 
 const SNAP_SORT_OPTIONS = [
   { value: "time-desc", key: "snapSortTimeDesc" },
@@ -524,8 +568,12 @@ function syncSummaryToolButtons() {
   const filterBtn = $("#filterMenuBtn");
   if (filterBtn) {
     // 占用浏览没有「变大/变小」筛选
+    const filterActive =
+      state.filter !== "all" ||
+      !!state.filterTime ||
+      !!(String(state.filterDeltaVal || "").trim());
     filterBtn.classList.toggle("hidden", isBrowseMode());
-    filterBtn.classList.toggle("is-active", !isBrowseMode() && state.filter !== "all");
+    filterBtn.classList.toggle("is-active", !isBrowseMode() && filterActive);
     filterBtn.setAttribute("aria-expanded", "false");
   }
   const snapSortBtn = $("#snapSortMenuBtn");
@@ -574,6 +622,224 @@ function _fillIconMenu(menu, options, current, onPick) {
       closeSummaryMenus();
     };
     menu.appendChild(item);
+  }
+}
+
+/** 筛选菜单：变化方向 + 修改时间组 + 变化量组（后两组各占一行）。 */
+function _fillFilterMenu(menu) {
+  menu.innerHTML = "";
+  for (const opt of FILTER_OPTIONS) {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "icon-menu-item" + (opt.value === state.filter ? " is-selected" : "");
+    item.setAttribute("role", "menuitemradio");
+    item.setAttribute("aria-checked", opt.value === state.filter ? "true" : "false");
+    item.textContent =
+      t(opt.key) + (opt.slowHint ? `（${t(opt.slowHint)}）` : "");
+    item.onclick = (e) => {
+      e.stopPropagation();
+      if (state.filter !== opt.value) {
+        setFilter(opt.value);
+        applyFilterToTree();
+      }
+      closeSummaryMenus();
+    };
+    menu.appendChild(item);
+  }
+
+  const divider = document.createElement("div");
+  divider.className = "filter-menu-divider";
+  menu.appendChild(divider);
+
+  // ---- 修改时间：今日 / 7天 / 30天 / 自定义天数（一行） ----
+  const timeRow = document.createElement("div");
+  timeRow.className = "filter-group-row";
+  const timeLabel = document.createElement("span");
+  timeLabel.className = "filter-group-label";
+  timeLabel.textContent = t("filterTimeGroup");
+  timeRow.appendChild(timeLabel);
+  for (const c of [
+    { v: "today", key: "filterTimeToday" },
+    { v: "7d", key: "filterTime7d" },
+    { v: "30d", key: "filterTime30d" },
+  ]) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "filter-chip" + (state.filterTime === c.v ? " is-active" : "");
+    chip.textContent = t(c.key);
+    chip.onclick = (e) => {
+      e.stopPropagation();
+      state.filterTime = state.filterTime === c.v ? "" : c.v;
+      applyFilterToTree();
+      // 刷新整行高亮
+      _fillFilterMenu(menu);
+    };
+    timeRow.appendChild(chip);
+  }
+  const customInput = document.createElement("input");
+  customInput.type = "number";
+  customInput.min = "1";
+  customInput.className = "filter-num";
+  customInput.placeholder = t("filterTimeCustom");
+  customInput.value = state.filterTime === "custom" ? String(state.filterTimeDays || "") : "";
+  customInput.onchange = (e) => {
+    e.stopPropagation();
+    const d = Math.floor(Number(customInput.value));
+    if (d > 0) {
+      state.filterTime = "custom";
+      state.filterTimeDays = d;
+    } else if (state.filterTime === "custom") {
+      state.filterTime = "";
+    }
+    applyFilterToTree();
+    _fillFilterMenu(menu);
+  };
+  timeRow.appendChild(customInput);
+  const daySuffix = document.createElement("span");
+  daySuffix.className = "filter-group-suffix";
+  daySuffix.textContent = t("filterTimeDays");
+  timeRow.appendChild(daySuffix);
+  menu.appendChild(timeRow);
+
+  // ---- 变化量：大于/小于 + 数字 + 单位（一行） ----
+  const deltaRow = document.createElement("div");
+  deltaRow.className = "filter-group-row";
+  const deltaLabel = document.createElement("span");
+  deltaLabel.className = "filter-group-label";
+  deltaLabel.textContent = t("filterDeltaGroup");
+  deltaRow.appendChild(deltaLabel);
+  const opSel = _filterSelect(
+    [
+      { v: "gt", key: "filterDeltaGt" },
+      { v: "lt", key: "filterDeltaLt" },
+    ],
+    state.filterDeltaOp,
+    (v) => {
+      state.filterDeltaOp = v;
+      applyFilterToTree();
+    }
+  );
+  deltaRow.appendChild(opSel);
+  const numInput = document.createElement("input");
+  numInput.type = "number";
+  numInput.min = "0";
+  numInput.step = "any";
+  numInput.className = "filter-num";
+  numInput.placeholder = t("filterDeltaValue");
+  numInput.value = String(state.filterDeltaVal || "");
+  numInput.onchange = (e) => {
+    e.stopPropagation();
+    state.filterDeltaVal = String(numInput.value || "").trim();
+    applyFilterToTree();
+  };
+  deltaRow.appendChild(numInput);
+  const unitSel = _filterSelect(
+    [
+      { v: "KB", key: "unitKB" },
+      { v: "MB", key: "unitMB" },
+      { v: "GB", key: "unitGB" },
+    ],
+    state.filterDeltaUnit,
+    (v) => {
+      state.filterDeltaUnit = v;
+      applyFilterToTree();
+    }
+  );
+  deltaRow.appendChild(unitSel);
+  menu.appendChild(deltaRow);
+
+  // ---- 底部：清除修改时间与变化量两组筛选 ----
+  const clearDivider = document.createElement("div");
+  clearDivider.className = "filter-menu-divider";
+  menu.appendChild(clearDivider);
+  const clearItem = document.createElement("button");
+  clearItem.type = "button";
+  clearItem.className = "icon-menu-item";
+  clearItem.textContent = t("filterClear");
+  clearItem.onclick = (e) => {
+    e.stopPropagation();
+    resetTimeDeltaFilters();
+    closeSummaryMenus();
+  };
+  menu.appendChild(clearItem);
+}
+
+/** 清除修改时间与变化量两组筛选并重渲染。 */
+function resetTimeDeltaFilters() {
+  state.filterTime = "";
+  state.filterTimeDays = 0;
+  state.filterDeltaOp = "gt";
+  state.filterDeltaVal = "";
+  state.filterDeltaUnit = "MB";
+  applyFilterToTree();
+}
+
+/** 对比会话级筛选状态全部重置（方向 + 时间 + 变化量），不触发重渲染。 */
+function resetTreeFilters() {
+  state.filter = "all";
+  state.filterTime = "";
+  state.filterTimeDays = 0;
+  state.filterDeltaOp = "gt";
+  state.filterDeltaVal = "";
+  state.filterDeltaUnit = "MB";
+}
+
+/** 组内下拉选择。 */
+function _filterSelect(items, current, onPick) {
+  const s = document.createElement("select");
+  s.className = "filter-select";
+  for (const it of items) {
+    const o = document.createElement("option");
+    o.value = it.v;
+    o.textContent = t(it.key);
+    s.appendChild(o);
+  }
+  s.value = current;
+  s.onchange = (e) => {
+    e.stopPropagation();
+    onPick(s.value);
+  };
+  return s;
+}
+
+/** 筛选条件变化后重渲染对比树。 */
+function applyFilterToTree() {
+  syncSummaryToolButtons();
+  if (state.compared && state._topNodes) {
+    collectOpenPathsFromDom();
+    // 筛「新增/已删除」需要后端下钻标记；本会话还没拉过就重拉顶层
+    if (
+      isSubtreeFilter() && !state._marksLoaded
+    ) {
+      refreshTopWithMarks();
+      return;
+    }
+    renderTopLevel(state._topNodes);
+  }
+}
+
+/** 筛「新增/已删除」时重拉带下钻标记的顶层数据（后端首次一次性计算）。 */
+async function refreshTopWithMarks() {
+  if (!state.compared) return;
+  state._marksLoaded = true; // 先置位防重入；失败再回退
+  const tree = $("#tree");
+  if (tree) tree.innerHTML = `<div class="child-loading">${t("loading")}</div>`;
+  try {
+    const res = await state.api.compare(state.oldPath, state.newPath, true);
+    if (res && res.error) {
+      toast(String(res.error), true);
+      throw new Error("marks_refresh_failed");
+    }
+    if (!Array.isArray(res && res.nodes)) throw new Error("marks_bad_response");
+    clearChildrenCache();
+    state._topNodes = res.nodes;
+    renderTopLevel(res.nodes);
+  } catch (err) {
+    if (err && err.message !== "marks_refresh_failed") {
+      toast(t("loadFailed", err && err.message ? err.message : String(err)));
+    }
+    state._marksLoaded = false;
+    if (state._topNodes) renderTopLevel(state._topNodes);
   }
 }
 
@@ -652,7 +918,8 @@ function openSummaryMenu(kind, anchor) {
   // 关掉其它图标菜单
   closeSummaryMenus();
 
-  _fillIconMenu(menu, cfg.options, cfg.current(), cfg.onPick);
+  if (kind === "filter") _fillFilterMenu(menu);
+  else _fillIconMenu(menu, cfg.options, cfg.current(), cfg.onPick);
 
   const r = anchor.getBoundingClientRect();
   menu.classList.remove("hidden");
@@ -934,10 +1201,63 @@ function matchFilter(node) {
   if (state._showAllForLocate) return true;
   // 占用浏览：展示整层，按 size 排序即可
   if (isBrowseMode()) return true;
-  if (node.kind === "incomparable") return state.filter !== "shrank";
-  if (state.filter === "grew") return node.delta > 0;
-  if (state.filter === "shrank") return node.delta < 0;
-  return node.delta !== 0; // all：隐藏「大小未变」的噪声
+  // 变化方向
+  if (state.filter === "grew") {
+    if (node.kind !== "incomparable" && node.delta <= 0) return false;
+  } else if (state.filter === "shrank") {
+    if (node.delta >= 0) return false;
+  } else if (state.filter === "added") {
+    // 目录大小是递归汇总的：深层文件新增不会让目录 kind 变 added，
+    // 靠 has_added 保留这类目录作下钻入口。
+    const isAdded = node.kind === "added";
+    const containsAdded = node.is_dir && node.has_added;
+    if (!isAdded && !containsAdded) return false;
+  } else if (state.filter === "removed") {
+    const isRemoved = node.kind === "removed";
+    const containsRemoved = node.is_dir && node.has_removed;
+    if (!isRemoved && !containsRemoved) return false;
+  } else if (node.kind === "incomparable") {
+    // all：不可比节点照常显示
+  } else if (node.delta === 0) {
+    return false; // all：隐藏「大小未变」的噪声
+  }
+  // 修改时间：早于门槛的隐藏（mtime 为 0 的旧数据视为无时间信息，同样隐藏）
+  const tl = filterTimeThreshold();
+  if (tl && (!node.mtime || node.mtime < tl)) return false;
+  // 变化量：|delta| 与阈值比较
+  const lim = filterDeltaLimitBytes();
+  if (lim != null) {
+    const d = Math.abs(node.delta);
+    if (state.filterDeltaOp === "lt" ? d > lim : d < lim) return false;
+  }
+  return true;
+}
+
+/** 修改时间过滤的门槛时间戳（秒）；未启用返回 0。 */
+function filterTimeThreshold() {
+  const f = state.filterTime;
+  if (!f) return 0;
+  let days = 0;
+  if (f === "today") {
+    const d = new Date();
+    const startOfDay = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime() / 1000;
+    return startOfDay;
+  }
+  if (f === "7d") days = 7;
+  else if (f === "30d") days = 30;
+  else if (f === "custom") days = Math.max(1, Math.floor(Number(state.filterTimeDays) || 0));
+  if (days <= 0) return 0;
+  return Date.now() / 1000 - days * 86400;
+}
+
+const DELTA_UNIT_MULT = { B: 1, KB: 1024, MB: 1024 * 1024, GB: 1024 * 1024 * 1024 };
+
+/** 变化量过滤的字节阈值；未启用返回 null。 */
+function filterDeltaLimitBytes() {
+  const v = Number(String(state.filterDeltaVal || "").trim());
+  if (!Number.isFinite(v) || v <= 0) return null;
+  const mult = DELTA_UNIT_MULT[state.filterDeltaUnit] || DELTA_UNIT_MULT.MB;
+  return v * mult;
 }
 
 // ---- 排序 ----
@@ -965,6 +1285,8 @@ const SORTERS = {
 
 function renderTopLevel(nodes) {
   state._topNodes = nodes;
+  // 会话索引：path → 完整节点数据，供圈选等场景按路径取回大小字段
+  state._pathNodeMap = {};
   // 顶层最大变化量/占用：作为「顶层基准」模式下整棵树统一的条长标尺，
   // 取全部顶层节点（不受筛选影响），保证切换筛选时条长不跳变。
   state._barRef = isBrowseMode()
@@ -1020,6 +1342,9 @@ function buildNode(node, depth, ref) {
   const group = document.createElement("div");
   group.className = "node-group";
   group.dataset.path = node.path || "";
+  if (state._pathNodeMap) {
+    state._pathNodeMap[_treePathKey(node.path)] = node;
+  }
 
   const browse = isBrowseMode();
   const sizeVal = nodeSize(node);
@@ -1656,18 +1981,6 @@ function waitForChildrenLoaded(childrenEl, timeoutMs = 8000) {
 function openCtxMenu(e, node) {
   state.ctxNode = node;
   const menu = $("#ctxMenu");
-  // 右键时若当前项未选中且无修饰键，单选此项
-  if (node && node.path && !(e && (e.ctrlKey || e.metaKey || e.shiftKey))) {
-    const key = _treePathKey(node.path);
-    if (!state.treeSelected || !state.treeSelected[key]) {
-      // 保持已有多选；仅当完全无选择时点亮当前项
-      if (!treeSelectionCount()) {
-        setTreeNodeSelected(node, true);
-        state._treeSelectAnchor = node.path || "";
-        syncTreeSelectBar();
-      }
-    }
-  }
   const bulk = menu.querySelector('[data-cmd="delete-selected"]');
   if (bulk) {
     const n = treeSelectionCount();

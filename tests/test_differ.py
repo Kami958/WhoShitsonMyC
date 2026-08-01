@@ -69,6 +69,118 @@ def test_added_and_removed(make_tree, tmp_path):
     assert nodes["keep.txt"].delta == 0
 
 
+def test_changed_dir_maps_ancestors(make_tree, tmp_path):
+    """深层文件新增/删除时，顶层目录带 has_added / has_removed 标记。
+
+    目录大小是递归汇总的，目录自身 kind 是 grew/shrank；筛「新增/已删除」
+    时靠标记保留目录作下钻入口。
+    """
+    old, new = _pair(
+        make_tree,
+        tmp_path,
+        {"a": {"keep.txt": 10, "gone.txt": 20}, "b": {"keep.txt": 10}},
+        {"a": {"keep.txt": 10, "fresh.txt": 30}, "b": {"keep.txt": 10}},
+    )
+
+    with Diff(old, new) as diff:
+        diff.ensure_marks()
+        nodes = {n.path: n for n in diff.compare_children("")}
+        assert nodes["a"].kind is ChangeKind.GREW
+        assert nodes["a"].has_added is True
+        assert nodes["a"].has_removed is True
+        assert nodes["b"].kind is ChangeKind.UNCHANGED
+        assert nodes["b"].has_added is False
+        assert nodes["b"].has_removed is False
+
+
+def _write_snapshot_rows(db_path, rows):
+    """按给定行序写快照：rows 为 (id, parent_id, name, size, is_dir, mtime)。"""
+    conn = sqlite3.connect(db_path)
+    conn.execute("DROP TABLE IF EXISTS entries")
+    conn.execute("DROP TABLE IF EXISTS meta")
+    conn.execute(
+        "CREATE TABLE entries ("
+        "  id INTEGER PRIMARY KEY,"
+        "  parent_id INTEGER,"
+        "  name TEXT NOT NULL,"
+        "  size INTEGER NOT NULL,"
+        "  is_dir INTEGER NOT NULL,"
+        "  mtime INTEGER NOT NULL DEFAULT 0"
+        ")"
+    )
+    conn.executemany(
+        "INSERT INTO entries VALUES (?,?,?,?,?,?)",
+        rows,
+    )
+    conn.execute("CREATE INDEX idx_entries_parent ON entries(parent_id)")
+    conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+    meta = {
+        "root": "C:\\probe",
+        "scanned_at": "0",
+        "total_size": str(sum(r[3] for r in rows)),
+        "file_count": str(sum(1 for r in rows if not r[4])),
+        "dir_count": str(sum(1 for r in rows if r[4])),
+        "format_version": "3",
+        "skipped": "[]",
+        "note": "",
+    }
+    conn.executemany("INSERT INTO meta VALUES (?,?)", list(meta.items()))
+    conn.commit()
+    conn.close()
+
+
+def test_changed_dir_marks_by_path_not_id(tmp_path):
+    """标记按相对路径判定，不受两侧快照条目 id 各自分配的影响。
+
+    两侧快照独立自增 id：同名同路径的条目 id 可能不同（这里 keep.txt 的
+    id 从 3 变 4），按路径差集它仍是「两侧都有」；若按 (parent_id, name)
+    或 id 判差集会把它误判成新增。同时验证：未 ensure_marks 时标记全关。
+    """
+    old_db = os.path.join(tmp_path, "old.db")
+    new_db = os.path.join(tmp_path, "new.db")
+    _write_snapshot_rows(
+        old_db,
+        [
+            (1, None, "", 0, 1, 0),
+            (2, 1, "a", 0, 1, 0),
+            (3, 2, "d", 0, 1, 0),
+            (4, 3, "keep.txt", 10, 0, 1),
+            (5, 2, "gone.txt", 20, 0, 1),
+        ],
+    )
+    _write_snapshot_rows(
+        new_db,
+        [
+            (1, None, "", 0, 1, 0),
+            (2, 1, "x", 0, 1, 0),          # 新增目录：让后续 id 整体偏移
+            (3, 1, "a", 0, 1, 0),
+            (4, 3, "d", 0, 1, 0),
+            (5, 4, "keep.txt", 10, 0, 1),  # 同路径 a\\d\\keep.txt，id 不同
+            (6, 3, "fresh.txt", 30, 0, 1),  # a 深层新增
+        ],
+    )
+
+    with Diff(old_db, new_db) as diff:
+        nodes = {n.path: n for n in diff.compare_children("")}
+        # 未启用标记：目录全不打标，不拖慢首屏
+        assert nodes["a"].has_added is False
+        assert nodes["a"].has_removed is False
+        assert nodes["x"].kind is ChangeKind.ADDED
+
+        diff.ensure_marks()
+        marked = {n.path: n for n in diff.compare_children("")}
+        a = marked["a"]
+        assert a.has_added is True      # a 深层有 fresh.txt
+        assert a.has_removed is True    # a 深层有 gone.txt
+        # 两侧都有的目录 d 不因 id 不同被误判（d 在 a 的子层，下钻取）
+        a_children = {n.path: n for n in diff.compare_children("a")}
+        assert a_children[os.path.join("a", "d")].has_added is False
+        assert a_children[os.path.join("a", "d")].has_removed is False
+
+        sub = {n.path: n for n in diff.compare_children(os.path.join("a", "d"))}
+        assert sub[os.path.join("a", "d", "keep.txt")].kind is ChangeKind.UNCHANGED
+
+
 def test_sorted_by_absolute_delta(make_tree, tmp_path):
     old, new = _pair(
         make_tree,

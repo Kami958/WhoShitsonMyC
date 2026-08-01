@@ -11,7 +11,15 @@ const state = {
   importedPaths: {},  // 手动导入的路径集合 path → true（刷新时保留）
   oldPath: "",        // 选作「基准」的快照路径
   newPath: "",        // 选作「当前」的快照路径
-  filter: "all",      // 当前过滤：all | grew | shrank
+  filter: "all",      // 变化方向过滤：all | grew | shrank | added | removed
+  // 修改时间过滤："" | today | 7d | 30d | custom；custom 用 filterTimeDays 天
+  filterTime: "",
+  filterTimeDays: 0,
+  // 变化量过滤（|delta| 与阈值比较）；filterDeltaVal 为空表示未启用
+  filterDeltaOp: "gt", // gt=大于 | lt=小于
+  filterDeltaVal: "",
+  filterDeltaUnit: "MB", // B | KB | MB | GB
+  _marksLoaded: false,  // 会话级：当前顶层数据是否已带「新增/已删除」下钻标记
   sort: "delta-desc", // 对比树排序，见 SORTERS
   browseSort: "size-desc", // 占用展开树排序（与对比独立）
   searchSort: "delta-desc", // 搜索结果排序（与变化树独立）

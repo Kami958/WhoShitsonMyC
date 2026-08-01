@@ -103,6 +103,11 @@ class DiffNode:
     delta: int
     kind: ChangeKind
     has_children: bool = False
+    # 递归范围内是否存在「新增/已删除」节点。目录的大小是递归汇总的，
+    # 深层文件的新增不会让目录自身 kind 变成 added；筛「新增/已删除」时
+    # 靠这两个标记保留目录作为下钻入口。
+    has_added: bool = False
+    has_removed: bool = False
     mtime: float = 0.0
 
     def to_dict(self) -> dict:
@@ -116,5 +121,7 @@ class DiffNode:
             "delta": self.delta,
             "kind": self.kind.value,
             "has_children": self.has_children,
+            "has_added": self.has_added,
+            "has_removed": self.has_removed,
             "mtime": self.mtime,
         }

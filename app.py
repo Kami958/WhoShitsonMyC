@@ -793,10 +793,6 @@ class Api:
         try:
             store.set_window_size(w, h, persist=True)
             applog.info(f"window size saved: {w}x{h}")
-            try:
-                self._emit("window-size-saved", {"width": w, "height": h})
-            except Exception:  # noqa: BLE001
-                pass
         except Exception as exc:  # noqa: BLE001
             applog.warn(f"save window size failed: {exc}")
 
@@ -1643,8 +1639,13 @@ class Api:
             "session_ready": False,
         }
 
-    def compare(self, old_path: str, new_path: str) -> dict:
+    def compare(self, old_path: str, new_path: str, need_marks: bool = False) -> dict:
         """对比两份快照，返回概览 + 顶层变化节点。
+
+        Args:
+            need_marks: 前端筛「新增/已删除」时传 True，后端启用「目录递归
+                范围内含新增/删除」下钻标记（首启一次性全量计算，之后复用）。
+                默认 False，首屏对比不为此额外扫库。
 
         Returns:
             成功：``{"summary": {...}, "nodes": [...]}``；
@@ -1654,6 +1655,8 @@ class Api:
             with self._diff_lock:
                 self._ensure_diff(old_path, new_path)
                 assert self._diff is not None
+                if need_marks:
+                    self._diff.ensure_marks()
                 nodes = self._diff.compare_children("")
                 return {
                     "summary": self._summary(self._diff),
@@ -1666,12 +1669,20 @@ class Api:
             applog.exception("Compare failed", exc)
             return {"error": i18n.t(f"对比失败：{exc}", f"Comparison failed: {exc}")}
 
-    def get_children(self, old_path: str, new_path: str, parent: str) -> dict:
-        """下钻：返回某父目录下的直接子节点对比结果。"""
+    def get_children(
+        self, old_path: str, new_path: str, parent: str, need_marks: bool = False
+    ) -> dict:
+        """下钻：返回某父目录下的直接子节点对比结果。
+
+        ``need_marks`` 语义同 :meth:`compare`：筛「新增/已删除」时的下钻
+        请求带上，保证子节点也带下钻标记。
+        """
         try:
             with self._diff_lock:
                 self._ensure_diff(old_path, new_path)
                 assert self._diff is not None
+                if need_marks:
+                    self._diff.ensure_marks()
                 nodes = self._diff.compare_children(parent)
                 return {"nodes": [n.to_dict() for n in nodes]}
         except (DiffError, SnapshotError, CompressError) as exc:

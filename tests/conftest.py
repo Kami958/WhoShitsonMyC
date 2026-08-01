@@ -15,13 +15,22 @@ def _reset_lang():
 
 
 @pytest.fixture(autouse=True)
-def _reset_scan_workers():
-    """每个用例前把会话级扫描线程数复位到默认，避免全局态在用例间泄漏。"""
+def _isolate_store(tmp_path, monkeypatch):
+    """每个用例前把应用数据根指到临时目录，避免读写真实 settings.yaml。"""
     from core import store
 
+    data_root = tmp_path / "wsmc-test-data"
+    data_root.mkdir(exist_ok=True)
+    monkeypatch.setattr(store, "_app_base_dir_path", lambda: str(data_root))
+    monkeypatch.setattr(store, "_app_base_dir", lambda: str(data_root))
+    monkeypatch.setattr(store, "app_data_dir", lambda: str(data_root))
+    store._data_wiped = False
+    store.reset_settings_to_defaults(lang="en")
     store._scan_workers = store.default_scan_workers()
     store._compress_snapshots = False
+    store._data_wiped = False
     yield
+    store._data_wiped = False
 
 
 @pytest.fixture

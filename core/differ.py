@@ -87,6 +87,119 @@ def _child_path(parent: str, name: str) -> str:
     return name if parent == "" else parent + os.sep + name
 
 
+def _max_entry_id(conn: sqlite3.Connection) -> int:
+    """entries 表最大 id；空表返回 0。"""
+    row = conn.execute("SELECT COALESCE(MAX(id), 0) FROM entries").fetchone()
+    return int(row[0]) if row else 0
+
+
+def _path_from_parent(dir_paths: list[str], pid: int, name: str) -> str:
+    """由父目录路径拼出当前条目相对路径；根直接子项即名字。"""
+    if pid < 1:
+        return name
+    parent_path = dir_paths[pid]
+    return name if not parent_path else parent_path + os.sep + name
+
+
+def _read_side_path_ids(
+    conn: sqlite3.Connection,
+) -> tuple[array, dict[str, int]]:
+    """流式读一侧快照，返回 (parent_of 数组, {相对路径: id})。
+
+    v3 快照由本程序写入，父行 id 恒小于子行 id，因此按 ``ORDER BY id``
+    顺序拼路径即可，无需在内存里再建 children 邻接表。``dir_paths`` 只保留
+    目录路径，文件路径进入 ``path_ids`` 后立即释放。
+    """
+    n = _max_entry_id(conn)
+    parents = array("q", [-1]) * (n + 1)
+    dir_paths: list[str] = [""] * (n + 1)
+    path_ids: dict[str, int] = {}
+    cur = conn.execute(
+        "SELECT id, parent_id, name, is_dir FROM entries ORDER BY id"
+    )
+    for eid, pid, name, is_dir in cur:
+        parents[eid] = -1 if pid is None else pid
+        path = _path_from_parent(dir_paths, parents[eid], name)
+        path_ids[path] = eid
+        if is_dir:
+            dir_paths[eid] = path
+    return parents, path_ids
+
+
+def _read_side_added_ids(
+    conn: sqlite3.Connection,
+    old_path_ids: dict[str, int],
+) -> tuple[array, list[int]]:
+    """流式读另一侧快照，返回 (parent_of 数组, 新增条目 id 列表)。
+
+    新增条目指路径不在旧侧；共同存在的路径从 ``old_path_ids`` 中移除，
+    调用方剩下的键就是已删除条目。
+    """
+    n = _max_entry_id(conn)
+    parents = array("q", [-1]) * (n + 1)
+    dir_paths: list[str] = [""] * (n + 1)
+    added_ids: list[int] = []
+    cur = conn.execute(
+        "SELECT id, parent_id, name, is_dir FROM entries ORDER BY id"
+    )
+    for eid, pid, name, is_dir in cur:
+        parents[eid] = -1 if pid is None else pid
+        path = _path_from_parent(dir_paths, parents[eid], name)
+        if path in old_path_ids:
+            old_path_ids.pop(path)
+        else:
+            added_ids.append(eid)
+        if is_dir:
+            dir_paths[eid] = path
+    return parents, added_ids
+
+
+def _propagate_ancestors(
+    diff_ids: list[int] | set[int],
+    parent_of: array,
+) -> set[int]:
+    """差异条目连同其各级祖先（沿 parent 链）的 id 集合。
+
+    parent_of 为按条目 id 索引的数组，根目录的父 id 记 -1。
+    """
+    up: set[int] = set()
+    stack = list(diff_ids)
+    while stack:
+        eid = stack.pop()
+        if eid in up:
+            continue
+        up.add(eid)
+        pid = parent_of[eid] if eid < len(parent_of) else -1
+        if pid > 0:
+            stack.append(pid)
+    return up
+
+
+def _subtree_change_id_sets(
+    old_db: str, new_db: str
+) -> tuple[set[int], set[int]]:
+    """两侧快照按相对路径差集，得 (新增侧子树 id 集, 删除侧子树 id 集)。
+
+    两侧快照各自独立分配条目 id，跨快照可比的是相对路径：各自拼出
+    id → 路径后做差集；返回的集合同时包含变更条目自身和它各级祖先，
+    前端据此保留目录作为「新增/已删除」筛选的下钻入口。一次读两侧各一遍，
+    added / removed 两个方向共用。
+    """
+    old = open_readonly(old_db)
+    new = open_readonly(new_db)
+    try:
+        old_parents, old_path_ids = _read_side_path_ids(old)
+        new_parents, added_ids = _read_side_added_ids(new, old_path_ids)
+        removed_values = old_path_ids.values()
+    finally:
+        old.close()
+        new.close()
+    return (
+        _propagate_ancestors(added_ids, new_parents),
+        _propagate_ancestors(removed_values, old_parents),
+    )
+
+
 # 搜索候选：(父路径, 名字, 旧侧行, 新侧行)；行为 (id, size, is_dir, mtime)
 _SideRow = tuple[int, int, int, int]
 _SearchEntry = tuple[str, str, "_SideRow | None", "_SideRow | None"]
@@ -391,6 +504,12 @@ class Diff:
         self._skipped: set[str] = set(self.old_meta.skipped) | set(
             self.new_meta.skipped
         )
+        # 「递归范围内含新增/已删除」下钻标记。默认关闭：差集要全量扫两侧
+        # 快照，放首屏会让解压到出树的时长上一个量级；前端筛「新增/已删除」
+        # 时才由接口参数触发（见 :meth:`ensure_marks`），首次一次性计算后复用。
+        self._marks_ready = False
+        self._subtree_added_ids: set[int] = set()
+        self._subtree_removed_ids: set[int] = set()
         # 搜索结果缓存：(关键词 casefold, 最宽候选, {(选项,排序): 排好的列表})。
         # 区分大小写/严格匹配是候选的子集，只在内存过滤，不另查库。
         # 快照只读，会话内无需失效；翻页/换排序直接复用排好的列表。
@@ -534,15 +653,13 @@ class Diff:
             DiffError: ``parent`` 在两份快照中都不存在。
         """
         old_pid, new_pid = self._resolve_dir(parent)
-
-        old_rows = _children_map(self._old, old_pid)
-        new_rows = _children_map(self._new, new_pid)
-
-        nodes: list[DiffNode] = []
-        for name in old_rows.keys() | new_rows.keys():
-            node = self._node_from_sides(parent, name, old_rows.get(name), new_rows.get(name))
-            if node is not None:
-                nodes.append(node)
+        nodes = _merge_child_nodes(
+            self._old,
+            old_pid,
+            self._new,
+            new_pid,
+            lambda name, o, n: self._node_from_sides(parent, name, o, n),
+        )
 
         if sort:
             nodes.sort(key=lambda d: abs(d.delta), reverse=True)
@@ -736,6 +853,27 @@ class Diff:
                         int(eid), int(size), int(is_dir), int(mtime)
                     )
 
+    def ensure_marks(self) -> None:
+        """启用「递归范围内含新增/已删除」下钻标记，首次一次性计算后复用。
+
+        ``self._subtree_added_ids`` / ``self._subtree_removed_ids``：条目 id
+        集合，包含变更条目自身及其祖先。目录的大小是递归汇总的，深层文件的
+        新增不会让目录 kind 变成 added；前端筛「新增/已删除」时据此保留目录
+        作下钻入口，否则树会整层被滤空。
+
+        线性算法，不做递归 CTE：递归 CTE 在 SQLite 里每层迭代都重扫全表，
+        大快照下慢一个数量级；这里两侧各一次全表扫描，栈式拼出条目路径，
+        按路径差集（两侧条目 id 各自分配，跨快照可比的是路径），再从差异
+        条目沿 parent 链向上传播。
+        """
+        if self._marks_ready:
+            return
+        old_db, new_db = self._db_paths
+        self._subtree_added_ids, self._subtree_removed_ids = _subtree_change_id_sets(
+            old_db, new_db
+        )
+        self._marks_ready = True
+
     def _node_from_sides(
         self,
         parent: str,
@@ -762,8 +900,20 @@ class Diff:
             has_children = _has_children(self._old, ids[0]) or _has_children(
                 self._new, ids[1]
             )
+            has_added = (
+                self._marks_ready
+                and ids[1] is not None
+                and ids[1] in self._subtree_added_ids
+            )
+            has_removed = (
+                self._marks_ready
+                and ids[0] is not None
+                and ids[0] in self._subtree_removed_ids
+            )
         else:
             has_children = False
+            has_added = False
+            has_removed = False
 
         return DiffNode(
             path=path,
@@ -774,6 +924,8 @@ class Diff:
             delta=delta,
             kind=kind,
             has_children=has_children,
+            has_added=has_added,
+            has_removed=has_removed,
             mtime=mtime,
         )
 
@@ -859,6 +1011,72 @@ def _children_map(
         (parent_id,),
     )
     return {name: (eid, size, is_dir, mtime) for name, eid, size, is_dir, mtime in cur}
+
+
+def _children_count(conn: sqlite3.Connection, parent_id: int | None) -> int:
+    """某父目录下的直接子节点数；parent_id 为 None 时返回 0。"""
+    if parent_id is None:
+        return 0
+    row = conn.execute(
+        "SELECT COUNT(*) FROM entries WHERE parent_id = ?", (parent_id,)
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def _merge_child_nodes(
+    conn_a: sqlite3.Connection,
+    parent_a: int | None,
+    conn_b: sqlite3.Connection,
+    parent_b: int | None,
+    make_node,
+) -> list:
+    """合并两侧直接子节点，只保留较小一侧的完整字典，另一侧流式处理。
+
+    ``make_node(name, old_row, new_row)`` 返回节点或 None；行形状与
+    :func:`_children_map` 一致。两侧各自独立分配 id，因此只能按名字合并。
+    """
+    count_a = _children_count(conn_a, parent_a)
+    count_b = _children_count(conn_b, parent_b)
+    nodes: list = []
+
+    if count_a <= count_b:
+        base_rows = _children_map(conn_a, parent_a)
+        if parent_b is not None:
+            cur = conn_b.execute(
+                "SELECT name, id, size, is_dir, mtime FROM entries "
+                "WHERE parent_id = ?",
+                (parent_b,),
+            )
+            for name, eid, size, is_dir, mtime in cur:
+                other_row = (eid, size, is_dir, mtime)
+                base_row = base_rows.pop(name, None)
+                node = make_node(name, base_row, other_row)
+                if node is not None:
+                    nodes.append(node)
+        for name, base_row in base_rows.items():
+            node = make_node(name, base_row, None)
+            if node is not None:
+                nodes.append(node)
+        return nodes
+
+    base_rows = _children_map(conn_b, parent_b)
+    if parent_a is not None:
+        cur = conn_a.execute(
+            "SELECT name, id, size, is_dir, mtime FROM entries "
+            "WHERE parent_id = ?",
+            (parent_a,),
+        )
+        for name, eid, size, is_dir, mtime in cur:
+            other_row = (eid, size, is_dir, mtime)
+            base_row = base_rows.pop(name, None)
+            node = make_node(name, other_row, base_row)
+            if node is not None:
+                nodes.append(node)
+    for name, base_row in base_rows.items():
+        node = make_node(name, None, base_row)
+        if node is not None:
+            nodes.append(node)
+    return nodes
 
 
 def _find_dir_id(

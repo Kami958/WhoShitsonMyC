@@ -930,13 +930,26 @@ function enqueuePendingFromAi(items) {
   return { added, skippedDup };
 }
 
+// 排序项：key + 默认方向。选中后再次点击同一项切换正倒序。
 const PENDING_SORT_OPTIONS = [
-  { value: "added-desc", key: "pendingSortAddedDesc" }, // 默认：加入时间
-  { value: "delta-desc", key: "pendingSortDeltaDesc" }, // 变化大小
-  { value: "pct-desc", key: "pendingSortPctDesc" },     // 变化比例
-  { value: "size-desc", key: "pendingSortSizeDesc" },   // 占用大小
-  { value: "name-asc", key: "pendingSortNameAsc" },     // 名称
+  { key: "added", dir: "desc", i18nKey: "pendingSortAdded" }, // 默认：加入时间
+  { key: "delta", dir: "desc", i18nKey: "pendingSortDelta" }, // 变化大小
+  { key: "pct", dir: "desc", i18nKey: "pendingSortPct" },     // 变化比例
+  { key: "size", dir: "desc", i18nKey: "pendingSortSize" },   // 占用大小
+  { key: "name", dir: "asc", i18nKey: "pendingSortName" },    // 名称
 ];
+
+/** 把 "added-desc" 拆成 { key, dir }。 */
+function _splitPendingSort(v) {
+  const s = String(v || "added-desc");
+  const i = s.lastIndexOf("-");
+  return i > 0 ? { key: s.slice(0, i), dir: s.slice(i + 1) } : { key: s, dir: "desc" };
+}
+
+/** 把 { key, dir } 拼成 "added-desc"。 */
+function _joinPendingSort(key, dir) {
+  return `${key}-${dir}`;
+}
 
 function _pendingDelta(it) {
   if (!it) return 0;
@@ -953,53 +966,51 @@ function _pendingPct(it) {
 
 function sortedPendingItems(items) {
   const list = Array.isArray(items) ? items.slice() : [];
-  const sort = (_tool && _tool.sort) || "added-desc";
+  const { key, dir } = _splitPendingSort((_tool && _tool.sort) || "added-desc");
   const loc = typeof cmpLocale === "function" ? cmpLocale() : undefined;
   const byPath = (a, b) =>
     String(a.full || a.rel || "").localeCompare(String(b.full || b.rel || ""), loc);
-  if (sort === "delta-desc") {
-    list.sort(
-      (a, b) =>
-        Math.abs(_pendingDelta(b)) - Math.abs(_pendingDelta(a)) ||
-        (Number(b.size) || 0) - (Number(a.size) || 0) ||
-        byPath(a, b)
-    );
-  } else if (sort === "pct-desc") {
-    list.sort(
-      (a, b) =>
-        _pendingPct(b) - _pendingPct(a) ||
-        Math.abs(_pendingDelta(b)) - Math.abs(_pendingDelta(a)) ||
-        byPath(a, b)
-    );
-  } else if (sort === "size-desc") {
-    list.sort(
-      (a, b) =>
-        (Number(b.size) || 0) - (Number(a.size) || 0) ||
-        byPath(a, b)
-    );
-  } else if (sort === "name-asc") {
-    const loc = typeof cmpLocale === "function" ? cmpLocale() : undefined;
-    list.sort(
-      (a, b) =>
-        String(a.name || a.rel || "").localeCompare(String(b.name || b.rel || ""), loc) ||
-        byPath(a, b)
-    );
+  // 先定义升序比较器，dir=desc 时整体取反。
+  let cmp;
+  if (key === "delta") {
+    cmp = (a, b) =>
+      Math.abs(_pendingDelta(a)) - Math.abs(_pendingDelta(b)) ||
+      (Number(a.size) || 0) - (Number(b.size) || 0) ||
+      byPath(a, b);
+  } else if (key === "pct") {
+    cmp = (a, b) =>
+      _pendingPct(a) - _pendingPct(b) ||
+      Math.abs(_pendingDelta(a)) - Math.abs(_pendingDelta(b)) ||
+      byPath(a, b);
+  } else if (key === "size") {
+    cmp = (a, b) =>
+      (Number(a.size) || 0) - (Number(b.size) || 0) ||
+      byPath(a, b);
+  } else if (key === "name") {
+    cmp = (a, b) =>
+      String(a.name || a.rel || "").localeCompare(String(b.name || b.rel || ""), loc) ||
+      byPath(a, b);
   } else {
-    // added-desc 默认：后加入的在上
-    list.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0) || byPath(a, b));
+    // added：先加入的在前
+    cmp = (a, b) => (a.addedAt || 0) - (b.addedAt || 0) || byPath(a, b);
   }
+  if (dir === "desc") {
+    const asc = cmp;
+    cmp = (a, b) => -asc(a, b);
+  }
+  list.sort(cmp);
   return list;
 }
 
 function syncPendingSortChrome() {
-  const sort = (_tool && _tool.sort) || "added-desc";
+  const { key, dir } = _splitPendingSort((_tool && _tool.sort) || "added-desc");
   const btn = $("#pendingSortBtn");
-  const opt = PENDING_SORT_OPTIONS.find((o) => o.value === sort) || PENDING_SORT_OPTIONS[0];
+  const opt = PENDING_SORT_OPTIONS.find((o) => o.key === key) || PENDING_SORT_OPTIONS[0];
   if (btn) {
-    btn.classList.toggle("is-active", sort !== "added-desc");
+    btn.classList.toggle("is-active", (_tool && _tool.sort) !== "added-desc");
     btn.setAttribute("aria-expanded", "false");
     // 复用 summary-icon-btn：只改 title，不改内部 SVG
-    const title = opt ? t(opt.key) : t("pendingSortTitle");
+    const title = opt ? `${t(opt.i18nKey)} · ${t(dir === "asc" ? "pendingSortAsc" : "pendingSortDesc")}` : t("pendingSortTitle");
     btn.title = title;
     btn.setAttribute("data-i18n-title", "pendingSortTitle");
   }
@@ -1027,23 +1038,32 @@ function openPendingSortMenu(anchor) {
     document.body.appendChild(menu);
   }
   menu.innerHTML = "";
-  const current = (_tool && _tool.sort) || "added-desc";
+  const current = _splitPendingSort((_tool && _tool.sort) || "added-desc");
   for (const opt of PENDING_SORT_OPTIONS) {
+    const isSelected = opt.key === current.key;
+    const dir = isSelected ? current.dir : opt.dir;
     const item = document.createElement("button");
     item.type = "button";
-    item.className =
-      "icon-menu-item" + (opt.value === current ? " is-selected" : "");
+    item.className = "icon-menu-item" + (isSelected ? " is-selected" : "");
     item.setAttribute("role", "menuitemradio");
-    item.setAttribute("aria-checked", opt.value === current ? "true" : "false");
-    item.textContent = t(opt.key);
+    item.setAttribute("aria-checked", isSelected ? "true" : "false");
+    // 文案 + 方向箭头（未选中的项显示其默认方向）
+    const label = document.createElement("span");
+    label.className = "sort-menu-label";
+    label.textContent = t(opt.i18nKey);
+    const arrow = document.createElement("span");
+    arrow.className = "sort-menu-arrow";
+    arrow.textContent = t(dir === "asc" ? "pendingSortAsc" : "pendingSortDesc");
+    item.appendChild(label);
+    item.appendChild(arrow);
     item.onclick = (e) => {
       e.preventDefault();
       e.stopPropagation();
-      if (_tool.sort !== opt.value) {
-        _tool.sort = opt.value;
-        syncPendingSortChrome();
-        renderPendingList();
-      }
+      // 再次点击同一项：切换正倒序；否则用该项默认方向
+      const nextDir = isSelected ? (current.dir === "asc" ? "desc" : "asc") : opt.dir;
+      _tool.sort = _joinPendingSort(opt.key, nextDir);
+      syncPendingSortChrome();
+      renderPendingList();
       closePendingSortMenu();
     };
     menu.appendChild(item);
@@ -1065,6 +1085,15 @@ function openPendingSortMenu(anchor) {
   menu.style.left = `${left}px`;
   menu.style.top = `${top}px`;
   if (btn) btn.setAttribute("aria-expanded", "true");
+}
+
+function pendingMetaLine(it) {
+  const size = Number(it && it.size) || 0;
+  const delta = _pendingDelta(it);
+  const parts = [];
+  if (size > 0) parts.push(fmtBytes(size));
+  parts.push(delta !== 0 ? fmtDelta(delta) : "±0");
+  return parts.join(" · ");
 }
 
 function renderPendingList() {
@@ -1090,9 +1119,10 @@ function renderPendingList() {
         `<span class="pending-item-icon" aria-hidden="true">${icon}</span>` +
         `<div class="pending-item-text">` +
         `<div class="pending-item-name" title="${escapeHtml(it.full)}">${escapeHtml(it.name)}</div>` +
-        `<div class="pending-item-path" title="${escapeHtml(it.full)}">${escapeHtml(it.full)}</div>` +
+        `<div class="pending-item-meta" title="${escapeHtml(it.full)}">${escapeHtml(pendingMetaLine(it))}</div>` +
         `</div></div>` +
         badge +
+        `<button type="button" class="btn-plain compact pending-item-locate" data-locate-id="${escapeHtml(it.id)}" data-i18n-title="pendingLocate" title="${escapeHtml(t("pendingLocate"))}">${escapeHtml(t("pendingLocate"))}</button>` +
         `<button type="button" class="btn-plain compact pending-item-remove" data-remove-id="${escapeHtml(it.id)}" data-i18n-title="pendingRemove" title="${escapeHtml(t("pendingRemove"))}">✕</button>` +
         `</div>`
       );
@@ -1104,9 +1134,39 @@ function renderPendingList() {
       removePendingItem(btn.getAttribute("data-remove-id"));
     };
   });
+  list.querySelectorAll("[data-locate-id]").forEach((btn) => {
+    btn.onclick = () => {
+      const id = btn.getAttribute("data-locate-id");
+      const it = _tool.items.find((x) => x.id === id);
+      if (it) locatePendingItem(it);
+    };
+  });
   updatePendingBadge();
   const chk = $("#pendingPermanentChk");
   if (chk) chk.checked = !!_tool.permanent;
+}
+
+/** 待删除项定位回对比树：逐段展开路径并高亮目标行。 */
+function locatePendingItem(it) {
+  if (!it || !it.rel) return;
+  if (!state.compared) {
+    toast(t("pendingLocateNoTree"), true);
+    return;
+  }
+  if (
+    it.root &&
+    state.compareRoot &&
+    _treePathKey(String(it.root).replace(/[\\/]+$/, "")) !==
+      _treePathKey(String(state.compareRoot).replace(/[\\/]+$/, ""))
+  ) {
+    toast(t("pendingLocateOtherRoot"), true);
+    return;
+  }
+  if (typeof locateTreePath === "function") {
+    locateTreePath(it.rel);
+  } else {
+    toast(t("pendingLocateNoTree"), true);
+  }
 }
 
 async function executePendingDeletes() {
