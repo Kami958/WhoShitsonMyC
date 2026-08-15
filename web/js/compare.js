@@ -298,6 +298,7 @@ function hydrateOpenDirs(rootEl, depth) {
     children.dataset.loaded = "1";
     children.classList.remove("hidden");
     if (twisty) twisty.classList.add("open");
+    row.classList.add("expanded");
     if (!children.querySelector(".node")) {
       children.innerHTML = `<div class="child-loading">${t("noMatchChild")}</div>`;
     } else {
@@ -959,12 +960,59 @@ function renderSummary(summary) {
 
   const skipped = summary.old.skipped_count + summary.new.skipped_count;
   const warn = $("#skipWarn");
-  if (skipped > 0) {
-    warn.textContent = t("skipWarn", skipped);
+  // 浏览单快照（自对比）时不显示 skipWarn：没有对比语境，「不可比较」无意义
+  if (skipped > 0 && state.treeMode !== "browse") {
+    warn.innerHTML = `<span class="skip-warn-text">${t("skipWarn", skipped)}</span><button class="skip-warn-show" type="button">${t("skippedShow")}</button>`;
     warn.classList.remove("hidden");
+    const btn = warn.querySelector(".skip-warn-show");
+    if (btn) btn.onclick = () => openSkippedOverlay(summary.old, summary.new);
   } else {
     warn.classList.add("hidden");
   }
+}
+
+/** 打开跳过目录列表弹窗。oldSnap/newSnap 为 summary 的 old/new 子对象。 */
+function openSkippedOverlay(oldSnap, newSnap) {
+  const ov = $("#skippedOverlay");
+  if (!ov) return;
+  $("#skippedDialogTitle").textContent = t("skippedDialogTitle");
+  $("#skippedHint").textContent = t("skippedHint");
+  const body = $("#skippedBody");
+  body.innerHTML = "";
+  const oldList = (oldSnap && oldSnap.skipped) || [];
+  const newList = (newSnap && newSnap.skipped) || [];
+  // 合并去重，标注来源：1=基准，2=当前，3=两者
+  const map = new Map();
+  for (const p of oldList) map.set(p, (map.get(p) || 0) | 1);
+  for (const p of newList) map.set(p, (map.get(p) || 0) | 2);
+  const paths = Array.from(map.keys()).sort();
+  if (paths.length === 0) {
+    body.innerHTML = `<div class="skipped-empty">${t("skippedEmpty")}</div>`;
+  } else {
+    for (const p of paths) {
+      const flag = map.get(p);
+      const tags = [];
+      if (flag & 1) tags.push(`<span class="skipped-tag tag-old">${t("setAsBase")}</span>`);
+      if (flag & 2) tags.push(`<span class="skipped-tag tag-new">${t("setAsCurrent")}</span>`);
+      const baseName = p.split(/[\\/]/).pop() || p;
+      const row = document.createElement("div");
+      row.className = "skipped-item";
+      row.innerHTML = `<span class="skipped-path" title="${escapeHtml(p)}">${escapeHtml(baseName)}</span>${tags.join("")}`;
+      row.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        const root = (flag & 2) ? newSnap.root : oldSnap.root;
+        openCtxMenu(e, { path: p, _revealRoot: root });
+      });
+      body.appendChild(row);
+    }
+  }
+  ov.classList.remove("hidden");
+}
+
+/** 关闭跳过目录列表弹窗。 */
+function closeSkippedOverlay() {
+  const ov = $("#skippedOverlay");
+  if (ov) ov.classList.add("hidden");
 }
 
 let _preheatReadyTimer = 0;
@@ -1359,6 +1407,8 @@ function buildNode(node, depth, ref) {
   row.className = `node ${kindClass}${node.is_dir ? " dir" : ""}`;
   row.dataset.path = node.path || "";
   row.style.paddingLeft = `${14 + depth * 20}px`;
+  // 间隔线左端对齐子级引导线位置，不超出
+  row.style.setProperty("--sep-left", `${14 + (depth + 1) * 20 - 10}px`);
 
   const canExpand = node.is_dir && node.has_children;
   const metric = browse ? sizeVal : Math.abs(node.delta);
@@ -1380,10 +1430,12 @@ function buildNode(node, depth, ref) {
     ${tag}
     <span class="node-fill"></span>
     <span class="node-bar"><i style="width:${barPct}%"></i></span>
-    <span class="node-delta">${deltaText}</span>`;
+    <span class="node-delta"><span class="delta-val">${deltaText}</span>${canExpand ? '<span class="delta-arrow"></span>' : ''}</span>`;
 
   const children = document.createElement("div");
   children.className = "children hidden";
+  // 层级引导线（UI 设置可开）：竖线位置对齐子行 twisty 缩进
+  children.style.setProperty("--gleft", `${14 + (depth + 1) * 20 - 10}px`);
 
   // 多选模式 / Ctrl / Shift：勾选；否则目录单击展开
   row.onclick = (e) => {
@@ -1428,6 +1480,9 @@ function collapseAllTree() {
   }
   for (const tw of tree.querySelectorAll(".twisty.open")) {
     tw.classList.remove("open");
+  }
+  for (const r of tree.querySelectorAll(".node.expanded")) {
+    r.classList.remove("expanded");
   }
 }
 
@@ -1981,10 +2036,17 @@ function waitForChildrenLoaded(childrenEl, timeoutMs = 8000) {
 function openCtxMenu(e, node) {
   state.ctxNode = node;
   const menu = $("#ctxMenu");
-  const bulk = menu.querySelector('[data-cmd="delete-selected"]');
-  if (bulk) {
-    const n = treeSelectionCount();
-    bulk.classList.toggle("hidden", n <= 1);
+  const isSkipped = !!(node && node._revealRoot);
+  // skipped 项只保留 reveal，其余用 ctx-skipped-hide 临时隐藏（不破坏原有 hidden 状态）
+  menu.querySelectorAll('[data-cmd]').forEach((el) => {
+    el.classList.toggle("ctx-skipped-hide", isSkipped && el.dataset.cmd !== "reveal");
+  });
+  if (!isSkipped) {
+    const bulk = menu.querySelector('[data-cmd="delete-selected"]');
+    if (bulk) {
+      const n = treeSelectionCount();
+      bulk.classList.toggle("hidden", n <= 1);
+    }
   }
   menu.classList.remove("hidden");
   // 贴着鼠标放，出界则往回收。
@@ -2003,7 +2065,8 @@ async function ctxCommand(cmd) {
   closeCtxMenu();
   if (!node) return;
   if (cmd === "reveal") {
-    const res = await state.api.reveal_path(state.compareRoot, node.path);
+    const root = (node && node._revealRoot) || state.compareRoot;
+    const res = await state.api.reveal_path(root, node.path);
     if (res.error) toast(res.error, true);
     else if (res.message) toast(res.message);
   } else if (cmd === "copy") {
@@ -2047,12 +2110,14 @@ async function toggleDir(node, row, children, depth) {
     // 只藏 DOM，不卸子节点、不清 cache —— 再展开零请求
     children.classList.add("hidden");
     if (twisty) twisty.classList.remove("open");
+    row.classList.remove("expanded");
     markPathOpen(node.path, false);
     return;
   }
 
   if (twisty) twisty.classList.add("open");
   children.classList.remove("hidden");
+  row.classList.add("expanded");
   markPathOpen(node.path, true);
 
   // 已在 DOM 装过：直接显示
@@ -2103,3 +2168,68 @@ async function toggleDir(node, row, children, depth) {
     children.dataset.loaded = "";
   }
 }
+
+// ---- 悬停分组框（UI 设置「对比树悬停分组框」可开关）----
+
+let _hoverGroupTimer = 0;
+let _hoverGroupTarget = null;
+
+/** 行所在的子级块（当前目录+兄弟目录整块）；最顶级行返回 null。 */
+function _hoverGroupOf(el) {
+  const group = el && el.closest ? el.closest(".node-group") : null;
+  const parent = group ? group.parentElement : null;
+  return parent && parent.classList && parent.classList.contains("children")
+    ? parent
+    : null;
+}
+
+function _clearHoverGroup() {
+  clearTimeout(_hoverGroupTimer);
+  if (_hoverGroupTarget) {
+    _hoverGroupTarget.classList.remove("hover-group");
+    _hoverGroupTarget = null;
+  }
+}
+
+function _hoverGroupEnabled() {
+  const s = state._settings;
+  return !!s && s.ui_hover_group_outline === true;
+}
+
+/** 块内行数（自己+兄弟）需超过设置的阈值才显示分组框；0 = 总是显示。 */
+function _hoverGroupBigEnough(box) {
+  const s = state._settings;
+  const min = s && Number.isFinite(Number(s.ui_hover_group_min))
+    ? Math.max(0, Number(s.ui_hover_group_min))
+    : 2;
+  if (min <= 0) return true;
+  const rows = box.querySelectorAll(":scope > .node-group").length;
+  return rows > min;
+}
+
+/** 树上事件委托：悬停行 → 60ms 防抖 → 描边该行所在块；划过别处平滑换框。 */
+(function bindTreeHoverGroup() {
+  const tree = $("#tree");
+  if (!tree) return;
+  tree.addEventListener("mouseover", (e) => {
+    if (!_hoverGroupEnabled()) {
+      _clearHoverGroup();
+      return;
+    }
+    const row = e.target && e.target.closest ? e.target.closest(".node") : null;
+    if (!row || !tree.contains(row)) return;
+    const box = _hoverGroupOf(row);
+    const next = box && _hoverGroupBigEnough(box) ? box : null;
+    if (next === _hoverGroupTarget) return;
+    clearTimeout(_hoverGroupTimer);
+    _hoverGroupTimer = setTimeout(() => {
+      if (next === _hoverGroupTarget) return;
+      _clearHoverGroup();
+      if (next) {
+        next.classList.add("hover-group");
+        _hoverGroupTarget = next;
+      }
+    }, 60);
+  });
+  tree.addEventListener("mouseleave", _clearHoverGroup);
+})();

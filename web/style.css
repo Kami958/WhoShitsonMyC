@@ -214,6 +214,7 @@ body.is-sidebar-resizing .main {
 }
 .snapshot-list {
   flex: 1; overflow-y: auto; min-height: 0;
+  scrollbar-gutter: stable;
   border-top: 1px solid var(--border-soft);
 }
 .snap {
@@ -248,6 +249,8 @@ body.is-sidebar-resizing .main {
   color: var(--text-dim); font-size: 13px; margin-top: 2px;
   font-variant-numeric: tabular-nums;
 }
+.snap-ago { color: var(--text); }
+.snap-free { color: var(--text); }
 .snap-role { font-size: 12px; font-weight: 700; margin-left: 6px; }
 .snap-zip {
   font-size: 11px; font-weight: 700; margin-left: 6px;
@@ -294,7 +297,7 @@ body.is-sidebar-resizing .main {
 }
 .snap-folder-name {
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 400;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -303,11 +306,7 @@ body.is-sidebar-resizing .main {
   font-size: 11px;
   color: var(--text-muted);
   flex-shrink: 0;
-}
-.snap-folder-acts {
-  display: flex;
-  gap: 8px;
-  flex-shrink: 0;
+  margin-left: auto;
 }
 .snap-folder-empty {
   color: var(--text-muted);
@@ -316,7 +315,7 @@ body.is-sidebar-resizing .main {
   font-style: italic;
 }
 .snap-folder-root .snap-folder-name {
-  font-weight: 500;
+  font-weight: 400;
   color: var(--text-dim);
 }
 .folder-name-input {
@@ -332,7 +331,7 @@ body.is-sidebar-resizing .main {
   gap: 4px;
   max-height: 240px;
   overflow-y: auto;
-  margin: 4px 0 8px;
+  margin: 6px 18px 10px;
 }
 .folder-pick-item {
   text-align: left;
@@ -427,13 +426,6 @@ body.is-sidebar-resizing .main {
   color: var(--grow);
   border-color: var(--grow);
 }
-/* 文件夹行内的改名/删除仍用按钮组，但容器不是 .snap-acts 时单独圆角 */
-.snap-folder-acts .snap-act {
-  border-radius: 4px;
-}
-.snap-folder-acts .snap-act + .snap-act {
-  margin-left: 4px;
-}
 .side-empty {
   color: var(--text-muted); font-size: 13px; padding: 12px; line-height: 1.7;
 }
@@ -483,6 +475,13 @@ body.is-sidebar-resizing .main {
   display: block;
 }
 .worker-sel { padding: 2px 6px; min-width: 5.5em; }
+.hover-outline-actions { gap: 8px; }
+.hover-min-label {
+  font-size: 12px; color: var(--text-muted); cursor: default; white-space: nowrap;
+}
+.hover-min-input {
+  padding: 2px 6px; width: 4.5em; text-align: right;
+}
 
 /* ---- 设置面板 ---- */
 .settings-card {
@@ -1032,10 +1031,6 @@ body.is-sidebar-resizing .main {
   font-size: 12px;
   color: var(--text-dim);
 }
-.node.is-selected {
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
-  outline: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
-}
 .pending-toolbar {
   display: flex;
   align-items: center;
@@ -1047,6 +1042,57 @@ body.is-sidebar-resizing .main {
   padding: 7px 14px;
   border-bottom: 1px solid var(--border-soft);
   color: var(--warn); font-size: 13px;
+  display: flex; align-items: center; gap: 10px;
+}
+.skip-warn-text { flex: 1; min-width: 0; }
+.skip-warn-show {
+  flex: 0 0 auto;
+  padding: 2px 10px;
+  font-size: 12px;
+  color: var(--warn);
+  background: transparent;
+  border: 1px solid var(--warn);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.skip-warn-show:hover { background: var(--warn); color: var(--bg); }
+
+/* 跳过目录列表弹窗 */
+.skipped-card { max-width: 560px; }
+.skipped-body {
+  max-height: 50vh; overflow-y: auto;
+  margin: 4px 0;
+  padding: 4px 0;
+  border-top: 1px solid var(--border-soft);
+  border-bottom: 1px solid var(--border-soft);
+}
+.skipped-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 6px;
+  font-size: 13px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.skipped-item:last-child { border-bottom: none; }
+.skipped-path {
+  flex: 1; min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-family: var(--mono, ui-monospace, monospace);
+  word-break: break-all;
+}
+.skipped-tag {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  font-size: 11px;
+  border-radius: 3px;
+  border: 1px solid currentColor;
+}
+.skipped-tag.tag-old { color: var(--old); }
+.skipped-tag.tag-new { color: var(--new); }
+.skipped-empty {
+  padding: 16px 4px;
+  color: var(--text-dim);
+  font-size: 13px;
+  text-align: center;
 }
 
 /* ---- 对比树搜索：默认图标，展开后向左变宽 ----
@@ -1378,6 +1424,7 @@ body.is-search-panel-resizing .main {
   display: flex; align-items: center; gap: 8px;
   padding: 5px 14px; cursor: default;
   font-variant-numeric: tabular-nums;
+  position: relative; z-index: 1;
 }
 .node.dir { cursor: pointer; }
 .node:hover { background: var(--bg-hover); }
@@ -1416,6 +1463,76 @@ body.is-search-panel-resizing .main {
 .node.incomparable .node-delta { color: var(--warn); font-size: 12px; }
 .node.unchanged .node-delta { color: var(--text-muted); }
 
+/* 展开父行：方向色淡背景，标记汇总行 */
+.node.expanded { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.node.expanded.grow { background: color-mix(in srgb, var(--grow) 6%, transparent); }
+.node.expanded.shrink { background: color-mix(in srgb, var(--shrink) 6%, transparent); }
+.node.expanded:hover { background: var(--bg-hover); }
+.node.expanded.grow:hover { background: var(--bg-hover); }
+.node.expanded.shrink:hover { background: var(--bg-hover); }
+
+/* 父级展开后：条形图和数字淡化，让子级明细更突出 */
+.node.expanded .node-bar { opacity: 0.4; }
+.node.expanded .node-delta { opacity: 0.5; }
+
+/* 可展开目录：数字右侧下三角形，展开时旋转 */
+.delta-arrow {
+  display: none; width: 0; height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid currentColor;
+  margin-left: 4px; opacity: 0.55;
+  transition: transform 0.12s;
+}
+.node.dir .delta-arrow { display: inline-block; }
+.node.expanded .delta-arrow { transform: rotate(180deg); }
+.node-delta { display: inline-flex; align-items: center; justify-content: flex-end; gap: 0; }
+.node.expanded .node-delta { padding-right: 12px; }
+
+/* 选中高亮 */
+.node.is-selected {
+  background: color-mix(in srgb, var(--accent) 20%, transparent) !important;
+  outline: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+/* UI 设置「界面」页签父级行样式各自的关闭态 */
+/* 行背景关 */
+.ui-pbg-off .node.expanded:not(:hover),
+.ui-pbg-off .node.expanded.grow:not(:hover),
+.ui-pbg-off .node.expanded.shrink:not(:hover) { background: transparent; }
+/* 淡化关 */
+.ui-pdim-off .node.expanded .node-bar { opacity: 1; }
+.ui-pdim-off .node.expanded .node-delta { opacity: 1; }
+
+/* UI 设置开启「父级行下方间隔线」时：展开父行底部分隔线，左端对齐内容起始 */
+.ui-psep-on .node.expanded {
+  border-bottom: 1px solid transparent;
+}
+.ui-psep-on .node.expanded::after {
+  content: ""; position: absolute;
+  left: var(--sep-left, 14px); right: 14px; bottom: 0;
+  height: 1px; background: color-mix(in srgb, var(--text-muted) 30%, transparent);
+  pointer-events: none;
+}
+
+/* 悬停分组框：当前目录+同级目录整块描边，带过渡 */
+.children {
+  box-shadow: 0 0 0 1.5px transparent;
+  transition: box-shadow 0.18s ease;
+}
+.children.hover-group {
+  box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+/* UI 设置开启「对比树层级引导线」时：子级块左侧竖线，嵌套呈阶梯 */
+.ui-guide-on .children { position: relative; }
+.ui-guide-on .children::before {
+  content: ""; position: absolute;
+  left: var(--gleft, 24px); top: 0; bottom: 0;
+  width: 1px; background: color-mix(in srgb, var(--text-muted) 28%, transparent);
+  pointer-events: none; z-index: 0;
+}
+
 .show-more {
   padding: 6px 14px; color: var(--accent); font-size: 13px; cursor: pointer;
 }
@@ -1438,16 +1555,25 @@ body.is-search-panel-resizing .main {
   max-height: 340px; overflow-y: auto; min-width: 260px;
 }
 .dd-item {
-  padding: 8px 12px; cursor: pointer;
+  padding: 8px 12px 8px 9px; cursor: pointer;
   border-bottom: 1px solid var(--border-soft);
+  border-left: 3px solid transparent;
 }
 .dd-item:last-child { border-bottom: none; }
 .dd-item:hover { background: var(--bg-hover); }
+/* 当前已选快照高亮：基准=琥珀左边线，当前=蓝左边线 */
+.dd-item.is-current-old { border-left-color: var(--old); background: var(--bg-hover); }
+.dd-item.is-current-new { border-left-color: var(--new); background: var(--bg-hover); }
+.dd-item.is-current-old.is-current-new {
+  border-left-color: var(--new);
+  box-shadow: inset 3px 0 0 var(--old);
+}
 .dd-item .t {
   color: var(--text); font-weight: 600; font-size: 14px;
   font-variant-numeric: tabular-nums;
 }
 .dd-item .m { color: var(--text-muted); font-size: 12px; margin-top: 2px; word-break: break-all; }
+.dd-item .m .dd-free { color: var(--text); font-weight: 600; }
 .dd-item .n {
   color: var(--accent); font-size: 12px; margin-top: 2px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -1456,7 +1582,7 @@ body.is-search-panel-resizing .main {
 
 /* ---- 右键菜单 ---- */
 .ctx-menu {
-  position: fixed; z-index: 60; background: var(--bg-side);
+  position: fixed; z-index: 200; background: var(--bg-side);
   border: 1px solid var(--border); border-radius: 4px; box-shadow: var(--shadow);
   min-width: 200px; padding: 4px 0;
 }
@@ -1464,6 +1590,7 @@ body.is-search-panel-resizing .main {
   padding: 7px 14px; font-size: 13px; color: var(--text); cursor: pointer;
 }
 .ctx-item:hover { background: var(--bg-hover); }
+.ctx-item.ctx-skipped-hide { display: none; }
 .ctx-item.ctx-danger { color: #c0392b; }
 .ctx-item.ctx-danger:hover { background: rgba(192, 57, 43, 0.1); }
 .blacklist-select {
@@ -2337,6 +2464,13 @@ select.ai-settings-input:focus {
 .confirm-card .btn-danger {
   border: 1px solid transparent;
 }
+#confirmOkBtn.btn-danger,
+#confirmOkBtn.btn-primary {
+  padding: 6px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  border: 1px solid transparent;
+}
 #pendingChecklistOverlay { z-index: 126; }
 #aiToolsSettingsOverlay { z-index: 127; }
 .pending-checklist-card {
@@ -2620,19 +2754,20 @@ select.ai-settings-input:focus {
   padding: 0;
   overflow: hidden;
 }
+.folder-card { width: min(360px, 92vw); }
 .note-head {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 12px 14px 8px;
+  padding: 14px 18px 10px;
   border-bottom: 1px solid var(--border-soft);
 }
 .note-title { margin: 0; font-size: 15px; font-weight: 600; color: var(--text); }
 .note-hint {
-  margin: 0; padding: 8px 14px 0;
+  margin: 0; padding: 10px 18px 0;
   font-size: 12px; color: var(--text-muted);
   word-break: break-all; line-height: 1.4;
 }
 .note-input {
-  margin: 10px 14px;
+  margin: 12px 18px;
   padding: 8px 10px;
   min-height: 72px;
   resize: vertical;
@@ -2644,13 +2779,20 @@ select.ai-settings-input:focus {
   font-family: inherit;
   line-height: 1.45;
 }
+.note-card .folder-name-input {
+  min-height: 0;
+  padding: 8px 10px;
+  resize: none;
+  margin: 12px 0;
+}
+#folderNameRow { padding: 0 18px; }
 .note-input:focus {
   outline: none;
   border-color: var(--accent);
 }
 .note-foot {
   display: flex; align-items: center; justify-content: flex-end; gap: 8px;
-  padding: 8px 14px 14px;
+  padding: 10px 18px 14px;
   border-top: 1px solid var(--border-soft);
 }
 .note-foot-spacer { flex: 1; }

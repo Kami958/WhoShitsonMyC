@@ -36,6 +36,17 @@ function wireEvents() {
       if (e.target === noteOverlay) closeNoteDialog();
     };
   }
+  // 跳过目录列表弹窗
+  const skippedClose = $("#skippedCloseBtn");
+  if (skippedClose) skippedClose.onclick = closeSkippedOverlay;
+  const skippedDone = $("#skippedDoneBtn");
+  if (skippedDone) skippedDone.onclick = closeSkippedOverlay;
+  const skippedOverlay = $("#skippedOverlay");
+  if (skippedOverlay) {
+    skippedOverlay.onclick = (e) => {
+      if (e.target === skippedOverlay) closeSkippedOverlay();
+    };
+  }
   const noteInput = $("#noteInput");
   if (noteInput) {
     noteInput.addEventListener("keydown", (e) => {
@@ -99,6 +110,47 @@ function wireEvents() {
   if (mftChk) {
     mftChk.onchange = (e) => {
       if (_settingsDraft) _settingsDraft.use_mft = !!e.target.checked;
+    };
+  }
+  const uiThemeSel = $("#uiThemeSel");
+  if (uiThemeSel) uiThemeSel.onchange = onUiThemeChange;
+  const uiParentBgChk = $("#uiParentBgChk");
+  if (uiParentBgChk) {
+    uiParentBgChk.onchange = (e) => {
+      if (_settingsDraft) _settingsDraft.ui_parent_row_bg = !!e.target.checked;
+    };
+  }
+  const uiParentDimChk = $("#uiParentDimChk");
+  if (uiParentDimChk) {
+    uiParentDimChk.onchange = (e) => {
+      if (_settingsDraft) _settingsDraft.ui_parent_row_dim = !!e.target.checked;
+    };
+  }
+  const uiHoverOutlineChk = $("#uiHoverOutlineChk");
+  if (uiHoverOutlineChk) {
+    uiHoverOutlineChk.onchange = (e) => {
+      if (_settingsDraft) _settingsDraft.ui_hover_group_outline = !!e.target.checked;
+    };
+  }
+  const uiHoverGroupMin = $("#uiHoverGroupMin");
+  if (uiHoverGroupMin) {
+    uiHoverGroupMin.onchange = (e) => {
+      if (_settingsDraft) {
+        _settingsDraft.ui_hover_group_min = _normalizeHoverGroupMin(e.target.value);
+        e.target.value = String(_settingsDraft.ui_hover_group_min);
+      }
+    };
+  }
+  const uiTreeGuideChk = $("#uiTreeGuideChk");
+  if (uiTreeGuideChk) {
+    uiTreeGuideChk.onchange = (e) => {
+      if (_settingsDraft) _settingsDraft.ui_tree_guide = !!e.target.checked;
+    };
+  }
+  const uiParentSepChk = $("#uiParentSepChk");
+  if (uiParentSepChk) {
+    uiParentSepChk.onchange = (e) => {
+      if (_settingsDraft) _settingsDraft.ui_parent_sep = !!e.target.checked;
     };
   }
   const snapDirChoose = $("#snapDirChooseBtn");
@@ -291,8 +343,11 @@ function wireEvents() {
     searchExactChk.onchange = () => setSearchOption("exact", searchExactChk.checked);
   }
 
-  for (const item of document.querySelectorAll(".ctx-item")) {
+  for (const item of document.querySelectorAll(".ctx-item:not(.folder-ctx-item)")) {
     item.onclick = () => ctxCommand(item.dataset.cmd);
+  }
+  for (const item of document.querySelectorAll(".folder-ctx-item")) {
+    item.onclick = () => folderCtxCommand(item.dataset.cmd);
   }
 
   // 点击空白关闭下拉与右键菜单
@@ -303,7 +358,10 @@ function wireEvents() {
         !e.target.closest(".pick")) {
       dd.classList.add("hidden");
     }
-    if (!e.target.closest(".ctx-menu")) closeCtxMenu();
+    if (!e.target.closest(".ctx-menu")) {
+      closeCtxMenu();
+      closeFolderCtxMenu();
+    }
     if (
       !e.target.closest(".summary-icon-btn") &&
       !e.target.closest(".search-tool-btn") &&
@@ -327,6 +385,7 @@ function wireEvents() {
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
       closeCtxMenu();
+      closeFolderCtxMenu();
       closeSummaryMenus();
       const co = $("#confirmOverlay");
       if (co && !co.classList.contains("hidden")) {

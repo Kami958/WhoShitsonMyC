@@ -5,11 +5,15 @@
 
 function syncTitlebarTheme() {
   // 原生标题栏归系统画。不 await：界面先可点，主题在后台跟上。
-  // 后端对相同主题会 short-circuit，启动连打也不贵。
-  const dark = document.documentElement.dataset.theme === "dark";
+  // 传原始偏好（auto/dark/light）：后端存偏好、标题栏拿解析值；
+  // 相同偏好会 short-circuit，启动连打也不贵。
+  let pref = state._settings && state._settings.theme;
+  if (pref !== "auto" && pref !== "dark" && pref !== "light") {
+    pref = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+  }
   try {
     if (state.api && state.api.set_theme) {
-      state.api.set_theme(dark ? "dark" : "light");
+      state.api.set_theme(pref);
     }
   } catch (e) {}
 }
@@ -27,19 +31,36 @@ function applyThemeButton(syncBackend = true) {
 
 function toggleTheme() {
   const html = document.documentElement;
-  html.dataset.theme = html.dataset.theme === "dark" ? "light" : "dark";
-  try { localStorage.setItem("theme", html.dataset.theme); } catch (e) {}
+  const next = html.dataset.theme === "dark" ? "light" : "dark";
+  // 主界面按钮切换 = 固定该主题（覆盖「跟随系统」）
+  html.dataset.theme = next;
+  if (state._settings) state._settings.theme = next;
+  try { localStorage.setItem("theme", next); } catch (e) {}
   applyThemeButton(true);
   // 后端 set_theme 会写入 store / YAML（若开启持久化）
 }
 
+/** 主题偏好解析：auto 读系统深浅色（仅调用时判断，不监听变化）。 */
+function resolveThemeValue(theme) {
+  const v = String(theme || "").trim().toLowerCase();
+  if (v === "dark" || v === "light") return v;
+  try {
+    return window.matchMedia("(prefers-color-scheme: dark)").matches
+      ? "dark"
+      : "light";
+  } catch (e) {
+    return "light";
+  }
+}
+
 /**
  * 应用主题到页面（并缓存 localStorage，供下次首屏闪一下用）。
+ * ``theme`` 可为 light/dark/auto；auto 由 resolveThemeValue 解析。
  * 权威来源是 settings.yaml；启动时由 reconcileLang 调用。
  */
 function applyThemeValue(theme) {
   const html = document.documentElement;
-  const v = theme === "dark" ? "dark" : "light";
+  const v = resolveThemeValue(theme);
   html.dataset.theme = v;
   // 清掉启动脚本可能留下的内联底色，统一走 CSS 变量
   html.style.backgroundColor = "";

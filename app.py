@@ -22,10 +22,12 @@ import webview  # pywebview
 
 from core.compress import (
     CompressError,
+    clear_session_cache,
     compress_db,
     drop_cache_for,
     ensure_db_path,
     is_session_cached,
+    sweep_stale_temp_dbs,
 )
 from core.differ import Diff, DiffError, SearchCancelled
 from core import fs_delete
@@ -283,19 +285,22 @@ class Api:
         name: str,
         force: bool = False,
         permanent: bool = False,
+        move_out: bool = False,
     ) -> dict:
         """删除归纳文件夹；默认仅空夹，``force`` 时连同内含快照删除。
 
         ``permanent`` 仅作用于夹内快照文件：默认进回收站。
+        ``move_out`` 时把夹内快照移回快照根（未归类），不删除文件。
         """
         # 若对比会话持有夹内文件，先关
         with self._diff_lock:
             self._close_diff()
         try:
-            store.delete_snapshot_folder(
+            result = store.delete_snapshot_folder(
                 str(name or ""),
                 force=bool(force),
                 permanent=bool(permanent),
+                move_out=bool(move_out),
             )
         except ValueError as exc:
             return {"error": str(exc)}
@@ -311,7 +316,12 @@ class Api:
             return {"error": i18n.t(
                 f"删除文件夹失败：{exc}",
                 f"Failed to delete folder: {exc}")}
-        return {"ok": True, "permanent": bool(permanent)}
+        return {
+            "ok": True,
+            "permanent": bool(permanent),
+            "count": int(result.get("processed", 0)),
+            "renamed": list(result.get("renamed", [])),
+        }
 
     def read_snapshot_infos(self, paths: list | None = None) -> dict:
         """读取任意路径上的快照摘要（用于「从其它位置导入」）。
@@ -812,7 +822,7 @@ class Api:
                 f"恢复默认失败：{exc}", f"Failed to restore defaults: {exc}")}
         i18n.set_lang(store.get_lang())
         try:
-            self._titlebar.set_theme(store.get_theme())
+            self._titlebar.set_theme(store.resolve_theme(store.get_theme()))
         except Exception:  # noqa: BLE001
             pass
         # 可选模块各自 reset（如 AI：清运行中请求、删旧 ai.json）
@@ -1126,14 +1136,18 @@ class Api:
         return result
 
     def set_theme(self, theme: str) -> dict:
-        """前端切换主题：记入 store（可写 YAML）并同步标题栏。"""
+        """前端切换主题：记入 store（可写 YAML）并同步标题栏。
+
+        ``theme`` 可为 ``light``/``dark``/``auto``（auto=跟随系统，
+        启动时解析一次）。标题栏需要实际值，auto 会被解析成 dark/light。
+        """
         code = store.set_theme(theme)
-        # 标题栏：dark/light
+        resolved = store.resolve_theme(code)
         try:
-            self._titlebar.set_theme(code)
+            self._titlebar.set_theme(resolved)
         except Exception:  # noqa: BLE001
             pass
-        return {"ok": True, "theme": code}
+        return {"ok": True, "theme": code, "resolved": resolved}
 
     def _apply_icon(self, ico_path: str) -> None:
         """把窗口标题栏/任务栏图标设成指定的 .ico（仅 Windows）。"""
@@ -1905,6 +1919,28 @@ class Api:
                 except Exception:  # noqa: BLE001 - 清临时文件失败不影响关会话
                     pass
 
+    def _shutdown(self) -> None:
+        """窗口关闭后、解释器退出前的收尾清理。
+
+        顺序关键：先关对比会话释放 sqlite 对临时解压文件的只读句柄，
+        再删临时文件；顺序反了会在 Windows 上触发 WinError 32，文件
+        删除静默失败并遗留（这正是此前 temp 里 wsmc_*.db 不断堆积的
+        根因，atexit 清理时 Diff 连接还开着）。由 :func:`main` 在
+        ``webview.start()`` 返回后调用，先于 atexit 执行。
+        设置页关闭「临时文件清理」时不删，文件留给下次启动或手动处理。
+        """
+        cleanup = store.get_temp_cleanup()
+        try:
+            with self._diff_lock:
+                self._close_diff(drop_decompress_cache=cleanup)
+        except Exception as exc:  # noqa: BLE001 - 清理失败不阻断退出
+            applog.exception("shutdown close diff failed", exc)
+        if cleanup:
+            try:
+                clear_session_cache()
+            except Exception as exc:  # noqa: BLE001
+                applog.exception("shutdown clear session cache failed", exc)
+
     @staticmethod
     def _summary(diff: Diff) -> dict:
         """组装界面顶部概览所需的数据。"""
@@ -1914,12 +1950,14 @@ class Api:
                 "scanned_at": diff.old_meta.scanned_at,
                 "total_size": diff.old_meta.total_size,
                 "skipped_count": len(diff.old_meta.skipped),
+                "skipped": list(diff.old_meta.skipped or []),
             },
             "new": {
                 "root": diff.new_meta.root,
                 "scanned_at": diff.new_meta.scanned_at,
                 "total_size": diff.new_meta.total_size,
                 "skipped_count": len(diff.new_meta.skipped),
+                "skipped": list(diff.new_meta.skipped or []),
             },
             "total_delta": diff.total_delta,
         }
@@ -2305,6 +2343,7 @@ def _settings_field_log_value(key: str, data: dict) -> str:
         "compress_snapshots",
         "use_mft",
         "search_memory_index",
+        "temp_cleanup",
         "log_sanitize",
         "snapshot_dir_is_custom",
     ):
@@ -2334,6 +2373,7 @@ def _diff_common_settings(before: dict, after: dict) -> list[str]:
         "compress_snapshots",
         "use_mft",
         "search_memory_index",
+        "temp_cleanup",
         "log_sanitize",
         "log_level",
         "snapshot_dir_configured",
@@ -2370,6 +2410,7 @@ def _diff_common_settings(before: dict, after: dict) -> list[str]:
             "compress_snapshots",
             "use_mft",
             "search_memory_index",
+            "temp_cleanup",
             "log_sanitize",
         ):
             if bool(before.get(key)) == bool(after.get(key)):
@@ -2397,6 +2438,107 @@ def _diff_common_settings(before: dict, after: dict) -> list[str]:
     return parts
 
 
+# ---- 单实例（Windows 命名互斥量） ---------------------------------------
+
+_SINGLE_INSTANCE_MUTEX = "Local\\WhoShitsOnMyC_SingleInstance"
+# 互斥量句柄持有到进程退出，由 OS 回收，无需显式释放。
+_single_instance_handle = None
+
+
+def _acquire_single_instance() -> bool:
+    """登记本进程为唯一实例；已有实例在运行返回 False。
+
+    非 Windows 平台不做检测恒返回 True；互斥量申请失败也放行，
+    不让检测本身拦住启动。
+    """
+    global _single_instance_handle
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.restype = ctypes.c_void_p
+        kernel32.CreateMutexW.argtypes = [
+            ctypes.c_void_p, wintypes.BOOL, ctypes.c_wchar_p
+        ]
+        handle = kernel32.CreateMutexW(None, True, _SINGLE_INSTANCE_MUTEX)
+        if not handle:
+            return True
+        if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+            kernel32.CloseHandle(ctypes.c_void_p(handle))
+            return False
+        _single_instance_handle = handle
+        return True
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def _activate_existing_window() -> bool:
+    """把已运行实例的主窗口还原并带到前台；找不到返回 False。"""
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        found: list[int] = []
+
+        @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        def on_window(hwnd, _lparam):
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length > 0 and user32.IsWindowVisible(hwnd):
+                buf = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(hwnd, buf, length + 1)
+                title = buf.value
+                if title == "WhoShitsOnMyC" or title.startswith("WhoShitsOnMyC "):
+                    found.append(hwnd)
+                    return False
+            return True
+
+        if not user32.EnumWindows(on_window, 0) or not found:
+            return False
+        hwnd = found[0]
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        user32.SetForegroundWindow(hwnd)
+        return True
+    except Exception:  # noqa: BLE001 - 激活失败退回弹提示，不拦退出
+        return False
+
+
+def _warn_already_running() -> None:
+    """已有实例但找不到其窗口（可能仍在启动中）时弹原生提示。"""
+    msg = i18n.t(
+        "WhoShitsOnMyC 已经在运行，请查看任务栏中的已有窗口。",
+        "WhoShitsOnMyC is already running; see the existing window in the taskbar.",
+    )
+    title = "WhoShitsOnMyC"
+    try:
+        import ctypes
+
+        # MB_OK | MB_ICONINFORMATION
+        ctypes.windll.user32.MessageBoxW(0, msg, title, 0x40)
+    except Exception:  # noqa: BLE001
+        applog.warn(f"already running (MessageBox failed): {msg}")
+
+
+def _start_temp_sweep() -> None:
+    """后台清扫上次异常退出遗留的临时解压快照（``wsmc_*.db``）。"""
+
+    def _run() -> None:
+        try:
+            removed = sweep_stale_temp_dbs()
+            if removed:
+                applog.info(f"startup temp sweep removed {removed} stale db(s)")
+        except Exception as exc:  # noqa: BLE001 - 清扫失败不影响启动
+            applog.warn(f"startup temp sweep failed: {exc}")
+
+    threading.Thread(target=_run, daemon=True, name="temp-sweep").start()
+
+
 def main() -> None:
     """创建窗口并启动应用。"""
     # 语言 / 主题：settings.yaml 显式写入则用它；语言缺省用系统语言。
@@ -2405,6 +2547,18 @@ def main() -> None:
     _sync_log_sanitize_to_applog()
     _sync_log_level_to_applog()
     applog.note_startup(APP_VERSION)
+    # 单实例检测须在临时文件清扫之前：第二个实例直接退出，
+    # 不去碰第一个实例正在使用的解压临时文件。
+    if not _acquire_single_instance():
+        applog.warn("another instance is already running; exiting")
+        i18n.set_lang(_detect_lang())
+        if not _activate_existing_window():
+            _warn_already_running()
+        return
+    # 兜底清掉上次异常退出（被强杀 / 崩溃）遗留的解压临时文件；
+    # 正常退出由 _shutdown() 自删；设置页「临时文件清理」可整体关闭。
+    if store.get_temp_cleanup():
+        _start_temp_sweep()
     # 语言在 common.lang（旧扁平顶层 lang 亦经 _common_view 合并），
     # 不能写 ``"lang" in _disk``——分节 YAML 顶层只有 common/ai，会误判成「无语言」
     # 从而用系统 UI 语言覆盖配置文件。
@@ -2431,9 +2585,8 @@ def main() -> None:
     x, y = _centered_xy(width, height)
     # 窗口底色与页面主题都以 settings.yaml 为准，避免默认 light 先白后黑。
     # 主题经 URL 参数交给 index.html 首帧脚本，不写生成文件。
-    _boot_theme = store.get_theme()
-    if _boot_theme not in ("dark", "light"):
-        _boot_theme = "light"
+    # auto 在此解析一次系统深浅色（仅启动时判断，运行中不监听变化）。
+    _boot_theme = store.resolve_theme(store.get_theme())
     _boot_bg = "#ffffff" if _boot_theme == "light" else "#14161a"
     _boot_url = os.path.join(_WEB_DIR, "index.html") + "?theme=" + _boot_theme
     window = webview.create_window(
@@ -2517,14 +2670,19 @@ def main() -> None:
         start_kwargs["debug"] = True
         applog.info("DevTools enabled (--devtools / WSMC_DEVTOOLS)")
     try:
-        webview.start(**start_kwargs)
-    except TypeError:
-        # 个别后端不接受 icon/debug 组合，逐步降级
-        start_kwargs.pop("icon", None)
         try:
             webview.start(**start_kwargs)
         except TypeError:
-            webview.start()
+            # 个别后端不接受 icon/debug 组合，逐步降级
+            start_kwargs.pop("icon", None)
+            try:
+                webview.start(**start_kwargs)
+            except TypeError:
+                webview.start()
+    finally:
+        # 消息循环退出（窗口关闭）后先关 Diff、再删临时解压文件，
+        # 必须赶在 atexit 之前：那时 sqlite 句柄已释放，删除才会成功。
+        api._shutdown()
 
 
 if __name__ == "__main__":

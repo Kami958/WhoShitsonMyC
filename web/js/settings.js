@@ -41,6 +41,7 @@ async function loadSettings() {
     compress_snapshots: !!s.compress_snapshots,
     use_mft: !!s.use_mft,
     search_memory_index: s.search_memory_index !== false,
+    temp_cleanup: s.temp_cleanup !== false,
     remember_window_size: s.remember_window_size !== false,
     log_sanitize: s.log_sanitize !== false,
     log_level: _normalizeLogLevel(s.log_level),
@@ -54,6 +55,13 @@ async function loadSettings() {
     is_admin: !!s.is_admin,
     cpu_count: s.cpu_count,
     delete_blacklist: _normalizeBlacklistDraft(s.delete_blacklist),
+    theme: _normalizeUiTheme(s.theme),
+    ui_parent_row_bg: s.ui_parent_row_bg === true,
+    ui_parent_row_dim: s.ui_parent_row_dim === true,
+    ui_hover_group_outline: s.ui_hover_group_outline === true,
+    ui_hover_group_min: _normalizeHoverGroupMin(s.ui_hover_group_min),
+    ui_tree_guide: s.ui_tree_guide !== false,
+    ui_parent_sep: s.ui_parent_sep === true,
   };
   fillAppVersionLabel(s.version || "");
   fillSettingsFormFromDraft();
@@ -64,6 +72,39 @@ function _normalizeLogLevel(raw) {
   if (s === "WARNING") return "WARN";
   if (s === "DEBUG" || s === "INFO" || s === "WARN" || s === "ERROR") return s;
   return "INFO";
+}
+
+/** 主题偏好：light|dark|auto；非法值回落 auto。 */
+function _normalizeUiTheme(raw) {
+  const v = String(raw || "").trim().toLowerCase();
+  return v === "light" || v === "dark" ? v : "auto";
+}
+
+/** 悬停分组框最少行数：0-50 收拢，非法回落 2。 */
+function _normalizeHoverGroupMin(raw) {
+  const n = Math.round(Number(raw));
+  if (!Number.isFinite(n)) return 2;
+  return Math.max(0, Math.min(50, n));
+}
+
+/** 把 UI 设置开关落到 <html>：关闭项加 class 供 CSS 反向覆盖。 */
+function applyUiSettingFlags(s) {
+  const root = document.documentElement;
+  root.classList.toggle("ui-pbg-off", !!(s && s.ui_parent_row_bg === false));
+  root.classList.toggle("ui-pdim-off", !!(s && s.ui_parent_row_dim === false));
+  root.classList.toggle("ui-guide-on", !!(s && s.ui_tree_guide === true));
+  root.classList.toggle("ui-psep-on", !!(s && s.ui_parent_sep === true));
+}
+
+/** 设置页「界面」页签：主题选择即时生效（light/dark/auto）。 */
+async function onUiThemeChange() {
+  const sel = $("#uiThemeSel");
+  if (!sel) return;
+  const pref = _normalizeUiTheme(sel.value);
+  if (state._settings) state._settings.theme = pref;
+  if (_settingsDraft) _settingsDraft.theme = pref;
+  applyThemeValue(pref);
+  applyThemeButton(true);
 }
 
 function _normalizeBlacklistDraft(raw) {
@@ -201,6 +242,10 @@ function fillSettingsFormFromDraft() {
   if (rememberWinSizeChk) {
     rememberWinSizeChk.checked = d.remember_window_size !== false;
   }
+  const tempCleanupChk = $("#tempCleanupChk");
+  if (tempCleanupChk) {
+    tempCleanupChk.checked = d.temp_cleanup !== false;
+  }
   const logSanitizeChk = $("#logSanitizeChk");
   if (logSanitizeChk) {
     logSanitizeChk.checked = d.log_sanitize !== false;
@@ -209,6 +254,20 @@ function fillSettingsFormFromDraft() {
   if (logLevelSel) {
     logLevelSel.value = _normalizeLogLevel(d.log_level);
   }
+  const uiThemeSel = $("#uiThemeSel");
+  if (uiThemeSel) uiThemeSel.value = _normalizeUiTheme(d.theme);
+  const uiParentBgChk = $("#uiParentBgChk");
+  if (uiParentBgChk) uiParentBgChk.checked = d.ui_parent_row_bg === true;
+  const uiParentDimChk = $("#uiParentDimChk");
+  if (uiParentDimChk) uiParentDimChk.checked = d.ui_parent_row_dim === true;
+  const uiHoverOutlineChk = $("#uiHoverOutlineChk");
+  if (uiHoverOutlineChk) uiHoverOutlineChk.checked = d.ui_hover_group_outline === true;
+  const uiHoverGroupMin = $("#uiHoverGroupMin");
+  if (uiHoverGroupMin) uiHoverGroupMin.value = String(_normalizeHoverGroupMin(d.ui_hover_group_min));
+  const uiTreeGuideChk = $("#uiTreeGuideChk");
+  if (uiTreeGuideChk) uiTreeGuideChk.checked = d.ui_tree_guide !== false;
+  const uiParentSepChk = $("#uiParentSepChk");
+  if (uiParentSepChk) uiParentSepChk.checked = d.ui_parent_sep === true;
   fillBlacklistSelect();
   updateSnapDirLine({
     snapshot_dir: d.snapshot_dir_display || d.snapshot_dir_builtin || "",
@@ -737,8 +796,11 @@ async function applySettingsAndClose() {
   const mftChk = $("#mftChk");
   const searchMemIdxChk = $("#searchMemIdxChk");
   const rememberWinSizeChk = $("#rememberWinSizeChk");
+  const tempCleanupChk = $("#tempCleanupChk");
   const logSanitizeChk = $("#logSanitizeChk");
   const logLevelSel = $("#logLevelSel");
+  const uiParentStyleChk = $("#uiParentStyleChk");
+  const uiHoverOutlineChk = $("#uiHoverOutlineChk");
   const payload = {
     scan_workers: workerSel ? Number(workerSel.value) : _settingsDraft.scan_workers,
     compress_snapshots: compressChk ? !!compressChk.checked : _settingsDraft.compress_snapshots,
@@ -749,12 +811,33 @@ async function applySettingsAndClose() {
     remember_window_size: rememberWinSizeChk
       ? !!rememberWinSizeChk.checked
       : (_settingsDraft.remember_window_size !== false),
+    temp_cleanup: tempCleanupChk
+      ? !!tempCleanupChk.checked
+      : (_settingsDraft.temp_cleanup !== false),
     log_sanitize: logSanitizeChk
       ? !!logSanitizeChk.checked
       : (_settingsDraft.log_sanitize !== false),
     log_level: logLevelSel
       ? _normalizeLogLevel(logLevelSel.value)
       : _normalizeLogLevel(_settingsDraft.log_level),
+    ui_parent_row_bg: $("#uiParentBgChk")
+      ? !!$("#uiParentBgChk").checked
+      : (_settingsDraft.ui_parent_row_bg === true),
+    ui_parent_row_dim: $("#uiParentDimChk")
+      ? !!$("#uiParentDimChk").checked
+      : (_settingsDraft.ui_parent_row_dim === true),
+    ui_hover_group_outline: uiHoverOutlineChk
+      ? !!uiHoverOutlineChk.checked
+      : (_settingsDraft.ui_hover_group_outline === true),
+    ui_hover_group_min: $("#uiHoverGroupMin")
+      ? _normalizeHoverGroupMin($("#uiHoverGroupMin").value)
+      : _normalizeHoverGroupMin(_settingsDraft.ui_hover_group_min),
+    ui_tree_guide: $("#uiTreeGuideChk")
+      ? !!$("#uiTreeGuideChk").checked
+      : _settingsDraft.ui_tree_guide !== false,
+    ui_parent_sep: $("#uiParentSepChk")
+      ? !!$("#uiParentSepChk").checked
+      : _settingsDraft.ui_parent_sep === true,
     snapshot_dir: _settingsDraft.snapshot_dir_is_custom
       ? (_settingsDraft.snapshot_dir || "")
       : "",
@@ -828,6 +911,7 @@ async function applySettingsAndClose() {
     } else if (kick && Object.prototype.hasOwnProperty.call(kick, "search_memory_index")) {
       state.searchMemoryIndex = kick.search_memory_index !== false;
     }
+    applyUiSettingFlags(state._settings);
     toast(t("settingsApplied"));
     if (payload.use_mft && state._settings && !state._settings.is_admin) {
       toast(t("mftNeedAdmin"));
@@ -855,6 +939,7 @@ async function applySettingsAndClose() {
   } else if (Object.prototype.hasOwnProperty.call(res || {}, "search_memory_index")) {
     state.searchMemoryIndex = res.search_memory_index !== false;
   }
+  applyUiSettingFlags(state._settings);
   const dirChanged = !!(res && res.snapshot_dir_changed);
   const mig = (res && res.migrate) || {};
 
@@ -900,9 +985,8 @@ async function resetSettingsToDefaults() {
     } catch (e) {}
   }
   // 主题 / 语言与后端对齐
-  if (res.theme === "dark" || res.theme === "light") {
-    applyThemeValue(res.theme);
-  }
+  applyThemeValue(res.theme);
+  applyUiSettingFlags(res);
   const lang = res.lang === "zh" || res.lang === "en" ? res.lang : "en";
   // setLang 会 syncBackend；后端已是默认，值相同不写盘
   if (lang !== LANG) setLang(lang);
@@ -916,6 +1000,7 @@ async function resetSettingsToDefaults() {
     compress_snapshots: !!res.compress_snapshots,
     use_mft: !!res.use_mft,
     search_memory_index: res.search_memory_index !== false,
+    temp_cleanup: res.temp_cleanup !== false,
     log_sanitize: res.log_sanitize !== false,
     log_level: _normalizeLogLevel(res.log_level),
     snapshot_dir: "",
@@ -927,6 +1012,13 @@ async function resetSettingsToDefaults() {
     is_admin: !!res.is_admin,
     cpu_count: res.cpu_count,
     delete_blacklist: _normalizeBlacklistDraft(res.delete_blacklist),
+    theme: _normalizeUiTheme(res.theme),
+    ui_parent_row_bg: res.ui_parent_row_bg === true,
+    ui_parent_row_dim: res.ui_parent_row_dim === true,
+    ui_hover_group_outline: res.ui_hover_group_outline === true,
+    ui_hover_group_min: _normalizeHoverGroupMin(res.ui_hover_group_min),
+    ui_tree_guide: res.ui_tree_guide !== false,
+    ui_parent_sep: res.ui_parent_sep === true,
   };
   fillSettingsFormFromDraft();
   toast(t("resetSettingsDone"));

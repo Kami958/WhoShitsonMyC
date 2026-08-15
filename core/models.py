@@ -52,6 +52,7 @@ class SnapshotMeta:
             对比时用于诚实标记「一侧缺数据、不可比较」。
         format_version: 快照格式版本号。
         note: 用户备注（写在快照文件内，随文件移动/复制）。
+        free_size: 扫描时该盘的剩余空间（字节）。旧快照无此字段，默认 0。
     """
 
     root: str
@@ -62,6 +63,7 @@ class SnapshotMeta:
     skipped: list[str] = field(default_factory=list)
     format_version: int = SNAPSHOT_FORMAT_VERSION
     note: str = ""
+    free_size: int = 0
 
 
 class ChangeKind(enum.Enum):

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import sys
+import tempfile
 
 import pytest
 
@@ -11,6 +13,7 @@ from core.compress import (
     ensure_db_path,
     is_compressed_path,
     read_meta_any,
+    sweep_stale_temp_dbs,
 )
 from core.differ import Diff
 from core.models import Entry, SnapshotMeta
@@ -154,6 +157,36 @@ def test_note_roundtrip_db_and_dbz(tmp_path):
     assert set_note(dbz, "  after zip  ") == "after zip"
     assert snapshot_info(dbz).note == "after zip"
     assert read_meta_any(dbz).note == "after zip"
+
+
+def test_sweep_stale_temp_dbs(tmp_path, monkeypatch):
+    """启动清扫：删遗留 wsmc_*.db；会话在用与无关文件不动。"""
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    db = os.path.join(tmp_path, "s.db")
+    meta = _write_sample(db)
+    dbz = compress_db(db, meta)
+    live = ensure_db_path(dbz)  # 登记进本进程会话 → 不能被清扫
+    stale = os.path.join(tmp_path, "wsmc_abandoned.db")
+    open(stale, "wb").close()
+    unrelated = os.path.join(tmp_path, "other.db")
+    open(unrelated, "wb").close()
+
+    removed = sweep_stale_temp_dbs()
+
+    assert removed == 1
+    assert os.path.isfile(live)
+    assert not os.path.exists(stale)
+    assert os.path.isfile(unrelated)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="占用跳过依赖 Windows 共享冲突")
+def test_sweep_skips_file_held_open(tmp_path, monkeypatch):
+    """被其它进程/实例占用的 wsmc_*.db 删除失败 → 视为在用，跳过。"""
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    held = os.path.join(tmp_path, "wsmc_inuse.db")
+    with open(held, "wb"):
+        assert sweep_stale_temp_dbs() == 0
+        assert os.path.isfile(held)
 
 
 def test_compress_setting_roundtrip():

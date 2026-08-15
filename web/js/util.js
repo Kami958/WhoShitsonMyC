@@ -171,6 +171,7 @@ function closeConfirmDialog(result) {
  * @param {string} [opts.okText]
  * @param {boolean} [opts.danger]
  * @param {string} [opts.checkboxLabel] 有值时在底栏显示轻量勾选
+ * @param {string} [opts.checkboxLabelChecked] 勾选后的标签文字，默认同 checkboxLabel
  * @param {boolean} [opts.checkboxDefault]
  * @param {string} [opts.okTextChecked] 勾选后确定按钮文案
  * @returns {Promise<boolean|{checked:boolean}>} 取消为 false；无勾选确定为 true；有勾选确定为 {checked}
@@ -201,11 +202,12 @@ function showConfirmDialog(opts) {
   _confirmHasCheckbox = hasCheckbox;
   const okText = options.okText || t("confirmOk");
   const okTextChecked = options.okTextChecked || okText;
+  const checkboxLabelChecked = options.checkboxLabelChecked || options.checkboxLabel;
 
   function syncOkFromCheckbox() {
     const checked = !!(chk && chk.checked);
     okBtn.textContent = checked ? okTextChecked : okText;
-    // 彻底删除用危险色；默认回收站也用 danger（删除动作）
+    if (labelEl) labelEl.textContent = checked ? checkboxLabelChecked : options.checkboxLabel;
     const danger = !!options.danger || checked;
     okBtn.classList.toggle("btn-danger", danger);
     okBtn.classList.toggle("btn-primary", !danger);

@@ -326,6 +326,12 @@
     <div class="ctx-item module-off hidden" data-cmd="cleanup-ai" data-module="ai" data-i18n="ctxCleanupAi" hidden>AI 清理分析（实验）</div>
   </div>
 
+  <!-- 文件夹右键菜单（重命名 / 删除） -->
+  <div id="folderCtxMenu" class="ctx-menu hidden">
+    <div class="ctx-item folder-ctx-item" data-cmd="rename" data-i18n="folderRename">重命名</div>
+    <div class="ctx-item ctx-danger folder-ctx-item" data-cmd="delete" data-i18n="folderDelete">删除文件夹</div>
+  </div>
+
   <!-- 扫描进度遮罩 -->
   <div id="scanOverlay" class="overlay hidden">
     <div class="scan-card">
@@ -366,6 +372,22 @@
     </div>
   </div>
 
+  <!-- 跳过的目录列表 -->
+  <div id="skippedOverlay" class="overlay hidden">
+    <div class="note-card skipped-card" role="dialog" aria-modal="true" aria-labelledby="skippedDialogTitle">
+      <div class="note-head">
+        <h2 id="skippedDialogTitle" class="note-title"></h2>
+        <button id="skippedCloseBtn" class="btn-plain settings-close" type="button" data-i18n-title="settingsClose" title="关闭">✕</button>
+      </div>
+      <p id="skippedHint" class="note-hint"></p>
+      <div id="skippedBody" class="skipped-body"></div>
+      <div class="note-foot">
+        <span class="note-foot-spacer"></span>
+        <button id="skippedDoneBtn" class="btn-primary compact" type="button" data-i18n="close">关闭</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 文件夹：新建 / 重命名 / 移动目标选择 -->
   <div id="folderOverlay" class="overlay hidden">
     <div class="note-card folder-card" role="dialog" aria-modal="true" aria-labelledby="folderDialogTitle">
@@ -397,6 +419,7 @@
       </div>
       <div class="settings-tabs" role="tablist" aria-label="Settings tabs">
         <button type="button" class="settings-tab active" role="tab" aria-selected="true" data-settings-tab="general" data-i18n="settingsTabGeneral">通用</button>
+        <button type="button" class="settings-tab" role="tab" aria-selected="false" data-settings-tab="ui" data-i18n="settingsTabUi">界面</button>
         <button type="button" class="settings-tab" role="tab" aria-selected="false" data-settings-tab="log" data-i18n="settingsTabLog">日志</button>
         <button type="button" class="settings-tab module-off" role="tab" aria-selected="false" data-settings-tab="ai" data-module="ai" data-i18n="settingsTabAi">AI</button>
       </div>
@@ -451,6 +474,16 @@
               <input id="rememberWinSizeChk" type="checkbox" checked />
             </div>
             <p class="settings-help-panel hidden" data-help-panel="rememberWinSize" data-i18n="rememberWinSizeTitle">窗口大小保持 8 秒不变后写入设置，下次启动沿用</p>
+          </div>
+          <div class="settings-field">
+            <div class="settings-row">
+              <span class="settings-label">
+                <label for="tempCleanupChk" data-i18n="tempCleanup">快照解压临时文件清理</label>
+                <button type="button" class="settings-q" data-help="tempCleanup" data-i18n-title="tempCleanupTitle" title="压缩快照对比时会在系统临时目录 TEMP 解压出快照副本；开启后工具启动和退出时会自动清理；关闭后这些文件留在临时目录，需手动删除" aria-label="?">?</button>
+              </span>
+              <input id="tempCleanupChk" type="checkbox" checked />
+            </div>
+            <p class="settings-help-panel hidden" data-help-panel="tempCleanup" data-i18n="tempCleanupTitle">压缩快照对比时会在系统临时目录 TEMP 解压出快照副本；开启后工具启动和退出时会自动清理；关闭后这些文件留在临时目录，需手动删除</p>
           </div>
           <div class="settings-field">
             <div class="settings-row">
@@ -518,6 +551,76 @@
               <button id="uninstallBtn" class="btn-danger compact" type="button" data-i18n="uninstallBtn">卸载</button>
             </div>
             <p class="settings-help-panel hidden" data-help-panel="uninstall" data-i18n="uninstallTitle">不再使用本软件时，可清理它在本机留下的配置和默认位置的快照。您自行指定的快照目录不会被删除</p>
+          </div>
+        </div>
+        <div class="settings-pane hidden" data-settings-pane="ui" role="tabpanel">
+          <div class="settings-field">
+            <div class="settings-row">
+              <span class="settings-label">
+                <label for="uiThemeSel" data-i18n="uiTheme">主题</label>
+                <button type="button" class="settings-q" data-help="uiTheme" data-i18n-title="uiThemeTitle" title="跟随系统会在每次启动时读取系统的深浅色设置" aria-label="?">?</button>
+              </span>
+              <select id="uiThemeSel" class="sort-sel worker-sel">
+                <option value="auto" data-i18n="uiThemeAuto">跟随系统</option>
+                <option value="light" data-i18n="uiThemeLight">浅色</option>
+                <option value="dark" data-i18n="uiThemeDark">深色</option>
+              </select>
+            </div>
+            <p class="settings-help-panel hidden" data-help-panel="uiTheme" data-i18n="uiThemeTitle">跟随系统会在每次启动时读取系统的深浅色设置</p>
+          </div>
+          <div class="settings-field">
+            <div class="settings-row">
+              <span class="settings-label">
+                <label for="uiParentBgChk" data-i18n="uiParentBg">父级行方向色背景</label>
+                <button type="button" class="settings-q" data-help="uiParentBg" data-i18n-title="uiParentBgTitle" title="目录展开后，父级行铺方向色淡背景（增长红、减少绿、浏览蓝），标记汇总行" aria-label="?">?</button>
+              </span>
+              <input id="uiParentBgChk" type="checkbox" />
+            </div>
+            <p class="settings-help-panel hidden" data-help-panel="uiParentBg" data-i18n="uiParentBgTitle">目录展开后，父级行铺方向色淡背景（增长红、减少绿、浏览蓝），标记汇总行</p>
+          </div>
+          <div class="settings-field">
+            <div class="settings-row">
+              <span class="settings-label">
+                <label for="uiParentDimChk" data-i18n="uiParentDim">父级行淡化</label>
+                <button type="button" class="settings-q" data-help="uiParentDim" data-i18n-title="uiParentDimTitle" title="目录展开后，父级行的条形图和数字淡化显示，突出子级明细" aria-label="?">?</button>
+              </span>
+              <input id="uiParentDimChk" type="checkbox" />
+            </div>
+            <p class="settings-help-panel hidden" data-help-panel="uiParentDim" data-i18n="uiParentDimTitle">目录展开后，父级行的条形图和数字淡化显示，突出子级明细</p>
+          </div>
+          <div class="settings-field">
+            <div class="settings-row">
+              <span class="settings-label">
+                <label for="uiParentSepChk" data-i18n="uiParentSep">父级行下方间隔线</label>
+                <button type="button" class="settings-q" data-help="uiParentSep" data-i18n-title="uiParentSepTitle" title="目录展开后，父级行底部画一条分隔线，隔开父级与子级" aria-label="?">?</button>
+              </span>
+              <input id="uiParentSepChk" type="checkbox" />
+            </div>
+            <p class="settings-help-panel hidden" data-help-panel="uiParentSep" data-i18n="uiParentSepTitle">目录展开后，父级行底部画一条分隔线，隔开父级与子级</p>
+          </div>
+          <div class="settings-field">
+            <div class="settings-row">
+              <span class="settings-label">
+                <label for="uiHoverOutlineChk" data-i18n="uiHoverOutline">对比树悬停分组框</label>
+                <button type="button" class="settings-q" data-help="uiHoverOutline" data-i18n-title="uiHoverOutlineTitle" title="鼠标悬停某目录时，把该目录和同级目录所在的范围描边，最顶层不触发；行数超过最少行数才显示，0 表示总是显示" aria-label="?">?</button>
+              </span>
+              <span class="settings-row-actions hover-outline-actions">
+                <label class="hover-min-label" for="uiHoverGroupMin" data-i18n="uiHoverGroupMin">最少行数</label>
+                <input id="uiHoverGroupMin" class="hover-min-input" type="number" min="0" max="50" step="1" value="10" />
+                <input id="uiHoverOutlineChk" type="checkbox" />
+              </span>
+            </div>
+            <p class="settings-help-panel hidden" data-help-panel="uiHoverOutline" data-i18n="uiHoverOutlineTitle">鼠标悬停某目录时，把该目录和同级目录所在的范围描边，最顶层不触发；行数超过最少行数才显示，0 表示总是显示</p>
+          </div>
+          <div class="settings-field">
+            <div class="settings-row">
+              <span class="settings-label">
+                <label for="uiTreeGuideChk" data-i18n="uiTreeGuide">对比树层级引导线</label>
+                <button type="button" class="settings-q" data-help="uiTreeGuide" data-i18n-title="uiTreeGuideTitle" title="每层子目录块左侧画竖线，嵌套目录呈阶梯状边界" aria-label="?">?</button>
+              </span>
+              <input id="uiTreeGuideChk" type="checkbox" checked />
+            </div>
+            <p class="settings-help-panel hidden" data-help-panel="uiTreeGuide" data-i18n="uiTreeGuideTitle">每层子目录块左侧画竖线，嵌套目录呈阶梯状边界</p>
           </div>
         </div>
         <div class="settings-pane hidden" data-settings-pane="log" role="tabpanel">

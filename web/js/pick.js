@@ -3,6 +3,9 @@
 
 // ---- 对比对象选择 ----
 
+// 当前下拉打开的 anchor；同一 anchor 再次点击时收起，点另一个则切换
+let _ddAnchor = null;
+
 function selectSnapshot(which, path) {
   if (which === "old") state.oldPath = path;
   else state.newPath = path;
@@ -89,9 +92,15 @@ function updatePickers() {
   $("#clearPickBtn").disabled = !(state.oldPath || state.newPath);
 }
 
-/** 打开快照选择下拉。 */
+/** 打开快照选择下拉。同一 anchor 再次点击则收起，点另一个则切换内容。 */
 function openDropdown(which, anchor) {
   const dd = $("#dropdown");
+  if (!dd.classList.contains("hidden") && _ddAnchor === anchor) {
+    dd.classList.add("hidden");
+    _ddAnchor = null;
+    return;
+  }
+  _ddAnchor = anchor;
   dd.innerHTML = "";
   if (state.snapshots.length === 0) {
     dd.innerHTML = `<div class="dd-empty">${t("noSnapshots")}</div>`;
@@ -99,12 +108,21 @@ function openDropdown(which, anchor) {
     for (const s of state.snapshots) {
       const item = document.createElement("div");
       item.className = "dd-item";
+      if (state.oldPath && s.path === state.oldPath) {
+        item.classList.add("is-current-old");
+      }
+      if (state.newPath && s.path === state.newPath) {
+        item.classList.add("is-current-new");
+      }
       const noteText = (s.note || "").trim();
       const noteHtml = noteText
         ? `<div class="n">${escapeHtml(noteText)}</div>`
         : "";
+      const freeText = s.free_size > 0
+        ? `${t("freeLabel")} ${fmtBytes(s.free_size)}`
+        : `${t("freeLabel")} ${t("freeUnknown")}`;
       item.innerHTML = `<div class="t">${fmtTime(s.scanned_at)}（${fmtAgo(s.scanned_at)}）</div>
-        <div class="m">${escapeHtml(s.root)} · ${fmtBytes(s.total_size)}</div>
+        <div class="m">${escapeHtml(s.root)} · <span class="dd-free">${freeText}</span> · ${fmtBytes(s.total_size)}</div>
         ${noteHtml}`;
       item.onclick = () => {
         selectSnapshot(which, s.path);
