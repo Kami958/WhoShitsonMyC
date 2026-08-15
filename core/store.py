@@ -188,6 +188,8 @@ class SnapshotInfo:
     note: str = ""            # 用户备注（写在快照文件内：.db meta / .dbz meta.json）
     # 相对快照根的一层归纳文件夹名；空串表示在根目录（未归入文件夹）
     folder: str = ""
+    # 扫描时该盘剩余空间（字节）；旧快照无此字段，为 0
+    free_size: int = 0
 
     @property
     def content_key(self) -> str:
@@ -212,6 +214,7 @@ class SnapshotInfo:
             "content_key": self.content_key,
             "note": self.note or "",
             "folder": self.folder or "",
+            "free_size": self.free_size,
         }
 
 
@@ -403,7 +406,38 @@ def _delete_blacklist_to_yaml(entries: list) -> str:
 
 
 def _normalize_theme(raw: str) -> str:
-    return "dark" if str(raw).strip().lower() == "dark" else "light"
+    """主题偏好：light|dark|auto；非法值回落 light。"""
+    v = str(raw or "").strip().lower()
+    if v in ("dark", "auto"):
+        return v
+    return "light"
+
+
+def _normalize_ui_hover_group_min(raw) -> int:
+    """悬停分组框最少行数阈值：0-50 收拢，非法回落 2。"""
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return 2
+    return max(0, min(50, n))
+
+
+def resolve_theme(preference: str) -> str:
+    """把主题偏好解析成实际主题：auto 读系统深浅色，失败默认 light。"""
+    pref = _normalize_theme(preference)
+    if pref != "auto":
+        return pref
+    try:
+        import winreg
+
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+        ) as key:
+            val, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+        return "light" if int(val) else "dark"
+    except Exception:
+        return "light"
 
 
 def _normalize_log_level(raw) -> str:
@@ -590,13 +624,14 @@ def _write_settings_yaml(path: str, data: dict) -> None:
     ]
     lines = [
         "# WhoShitsOnMyC settings — auto-written when settings change",
-        "# Sections map to settings tabs (common = 通用, ai = AI).",
+        "# Sections map to settings tabs (common = 通用, ui = 界面, ai = AI).",
         "# Missing keys use built-in defaults on load.",
         "common:",
         f"  scan_workers: {int(data['scan_workers'])}",
         f"  compress_snapshots: {'true' if data.get('compress_snapshots') else 'false'}",
         f"  use_mft: {'true' if data.get('use_mft') else 'false'}",
         f"  search_memory_index: {'true' if data.get('search_memory_index', True) else 'false'}",
+        f"  temp_cleanup: {'true' if data.get('temp_cleanup', True) else 'false'}",
         f"  remember_window_size: {'true' if data.get('remember_window_size', True) else 'false'}",
         f"  window_width: {int(data.get('window_width') or 0)}",
         f"  window_height: {int(data.get('window_height') or 0)}",
@@ -606,6 +641,13 @@ def _write_settings_yaml(path: str, data: dict) -> None:
         f"  theme: {_normalize_theme(data.get('theme', 'light'))}",
         f"  snapshot_dir: {_yaml_quote(snap)}",
         f"  delete_blacklist: {_yaml_quote(_delete_blacklist_to_yaml(data.get('delete_blacklist') or []))}",
+        "ui:",
+        f"  ui_parent_row_bg: {'true' if data.get('ui_parent_row_bg', False) else 'false'}",
+        f"  ui_parent_row_dim: {'true' if data.get('ui_parent_row_dim', False) else 'false'}",
+        f"  ui_hover_group_outline: {'true' if data.get('ui_hover_group_outline', False) else 'false'}",
+        f"  ui_hover_group_min: {_normalize_ui_hover_group_min(data.get('ui_hover_group_min', 10))}",
+        f"  ui_tree_guide: {'true' if data.get('ui_tree_guide', True) else 'false'}",
+        f"  ui_parent_sep: {'true' if data.get('ui_parent_sep', False) else 'false'}",
         "ai:",
         f"  enabled: {'true' if _as_bool(ai.get('enabled'), False) else 'false'}",
         f"  base_url: {_yaml_quote(base_url)}",
@@ -639,6 +681,7 @@ _scan_workers = default_scan_workers()
 _compress_snapshots = True
 _use_mft = True  # 默认开：盘符根 + NTFS 优先 MFT，失败回退 scandir
 _search_memory_index = True  # 默认开：打开搜索时预热内存索引
+_temp_cleanup = True  # 默认开：退出删除+启动清扫解压临时文件
 _remember_window_size = True  # 默认开：记住窗口大小
 _window_width = 0
 _window_height = 0
@@ -653,6 +696,19 @@ _lang = "en"  # 启动时 app 会按系统语言再设；YAML 优先覆盖
 _theme = "light"
 # 自定义快照目录；空串 = 使用 builtin_snapshot_dir()
 _snapshot_dir = ""
+# UI 设置（settings.yaml 的 ui: 节，设置页「界面」页签）
+# 对比树父级行方向色背景；默认关
+_ui_parent_row_bg = False
+# 对比树父级行淡化；默认关
+_ui_parent_row_dim = False
+# 对比树悬停分组框（描边当前与同级目录）；默认关
+_ui_hover_group_outline = False
+# 悬停分组框：块内行数（自己+兄弟）超过该值才显示；0-50，默认 10
+_ui_hover_group_min = 10
+# 对比树层级引导线：子级块左侧竖线；默认开
+_ui_tree_guide = True
+# 展开父级下方间隔线：父行底边画分隔线；默认关
+_ui_parent_sep = False
 # AI 设置（与通用设置同文件 settings.yaml 的 ai: 节）
 _ai_enabled = False
 _ai_base_url = str(_AI_DEFAULTS["base_url"])
@@ -738,6 +794,17 @@ def _common_view(data: dict) -> dict:
     return common
 
 
+def _ui_view(data: dict) -> dict:
+    """取出界面设置视图：优先 ``ui`` 节，兼容旧 common/顶层位置的 ``ui_*`` 键。"""
+    ui: dict = {}
+    if isinstance(data.get("ui"), dict):
+        ui.update(data["ui"])
+    for k, v in _common_view(data).items():
+        if k.startswith("ui_") and k not in ui:
+            ui[k] = v
+    return ui
+
+
 def _apply_loaded(data: dict) -> None:
     """用 YAML 字典覆盖内存设置。
 
@@ -752,9 +819,13 @@ def _apply_loaded(data: dict) -> None:
     global _log_sanitize, _log_sanitize_explicit
     global _log_level, _log_level_explicit
     global _lang, _theme, _snapshot_dir, _delete_blacklist
+    global _ui_parent_row_bg, _ui_parent_row_dim
+    global _ui_hover_group_outline, _ui_hover_group_min, _ui_tree_guide, _ui_parent_sep
+    global _temp_cleanup
     if not data:
         return
     common = _common_view(data)
+    ui = _ui_view(data)
     if "scan_workers" in common:
         n = _as_int(common.get("scan_workers"))
         if n is not None:
@@ -771,6 +842,10 @@ def _apply_loaded(data: dict) -> None:
         b = _as_bool(common.get("search_memory_index"))
         if b is not None:
             _search_memory_index = b
+    if "temp_cleanup" in common:
+        b = _as_bool(common.get("temp_cleanup"))
+        if b is not None:
+            _temp_cleanup = b
     if "remember_window_size" in common:
         b = _as_bool(common.get("remember_window_size"))
         if b is not None:
@@ -794,6 +869,28 @@ def _apply_loaded(data: dict) -> None:
         _theme = _normalize_theme(_as_str(common.get("theme"), "light"))
     if "snapshot_dir" in common:
         _snapshot_dir = _normalize_snapshot_dir(_as_str(common.get("snapshot_dir"), ""))
+    if "ui_parent_row_bg" in ui:
+        b = _as_bool(ui.get("ui_parent_row_bg"))
+        if b is not None:
+            _ui_parent_row_bg = b
+    if "ui_parent_row_dim" in ui:
+        b = _as_bool(ui.get("ui_parent_row_dim"))
+        if b is not None:
+            _ui_parent_row_dim = b
+    if "ui_hover_group_outline" in ui:
+        b = _as_bool(ui.get("ui_hover_group_outline"))
+        if b is not None:
+            _ui_hover_group_outline = b
+    if "ui_hover_group_min" in ui:
+        _ui_hover_group_min = _normalize_ui_hover_group_min(ui.get("ui_hover_group_min"))
+    if "ui_tree_guide" in ui:
+        b = _as_bool(ui.get("ui_tree_guide"))
+        if b is not None:
+            _ui_tree_guide = b
+    if "ui_parent_sep" in ui:
+        b = _as_bool(ui.get("ui_parent_sep"))
+        if b is not None:
+            _ui_parent_sep = b
     if "delete_blacklist" in common:
         # _put_raw_pair 已去引号，此处多为 JSON 字符串
         _delete_blacklist = _normalize_delete_blacklist(common.get("delete_blacklist"))
@@ -823,6 +920,7 @@ def _settings_payload() -> dict:
         "compress_snapshots": _compress_snapshots,
         "use_mft": _use_mft,
         "search_memory_index": _search_memory_index,
+        "temp_cleanup": _temp_cleanup,
         "remember_window_size": bool(_remember_window_size),
         "window_width": int(_window_width),
         "window_height": int(_window_height),
@@ -832,6 +930,12 @@ def _settings_payload() -> dict:
         "theme": _theme,
         "snapshot_dir": _snapshot_dir,
         "delete_blacklist": list(_delete_blacklist or []),
+        "ui_parent_row_bg": _ui_parent_row_bg,
+        "ui_parent_row_dim": _ui_parent_row_dim,
+        "ui_hover_group_outline": _ui_hover_group_outline,
+        "ui_hover_group_min": _ui_hover_group_min,
+        "ui_tree_guide": _ui_tree_guide,
+        "ui_parent_sep": _ui_parent_sep,
         "ai": _ai_payload(),
     }
 
@@ -912,6 +1016,21 @@ def set_search_memory_index(enabled: bool) -> bool:
         _search_memory_index = new
         _persist()
     return _search_memory_index
+
+
+def get_temp_cleanup() -> bool:
+    """是否自动清理对比解压产生的临时文件（默认 True）。"""
+    return _temp_cleanup
+
+
+def set_temp_cleanup(enabled: bool) -> bool:
+    """设置是否自动清理临时解压文件；值变化时写 YAML。"""
+    global _temp_cleanup
+    new = bool(enabled)
+    if new != _temp_cleanup:
+        _temp_cleanup = new
+        _persist()
+    return _temp_cleanup
 
 
 
@@ -1271,9 +1390,11 @@ def apply_settings(
     ``progress`` 会在迁移过程中被调用（见 :func:`migrate_snapshots`）。
 
     可识别键：``scan_workers``、``compress_snapshots``、``use_mft``、
-    ``search_memory_index``、``remember_window_size``、``window_width``、
-    ``window_height``、``log_sanitize``、``log_level``、
-    ``snapshot_dir``（空串=内置目录）、``delete_blacklist``。
+    ``search_memory_index``、``temp_cleanup``、``remember_window_size``、
+    ``window_width``、``window_height``、``log_sanitize``、``log_level``、
+    ``snapshot_dir``（空串=内置目录）、``delete_blacklist``、
+    ``ui_parent_row_bg``、``ui_parent_row_dim``、``ui_hover_group_outline``、
+    ``ui_hover_group_min``、``ui_tree_guide``、``ui_parent_sep``。
     缺省键保持当前值。
     """
     global _scan_workers, _compress_snapshots, _use_mft, _search_memory_index
@@ -1281,6 +1402,9 @@ def apply_settings(
     global _log_sanitize, _log_sanitize_explicit
     global _log_level, _log_level_explicit
     global _snapshot_dir, _delete_blacklist
+    global _ui_parent_row_bg, _ui_parent_row_dim
+    global _ui_hover_group_outline, _ui_hover_group_min, _ui_tree_guide, _ui_parent_sep
+    global _temp_cleanup
 
     if not isinstance(payload, dict):
         payload = {}
@@ -1296,6 +1420,8 @@ def apply_settings(
         _use_mft = bool(payload["use_mft"])
     if "search_memory_index" in payload:
         _search_memory_index = bool(payload["search_memory_index"])
+    if "temp_cleanup" in payload:
+        _temp_cleanup = bool(payload["temp_cleanup"])
     if "remember_window_size" in payload:
         _remember_window_size = bool(payload["remember_window_size"])
     if "window_width" in payload or "window_height" in payload:
@@ -1310,6 +1436,18 @@ def apply_settings(
         _log_level_explicit = True
     if "delete_blacklist" in payload:
         _delete_blacklist = _normalize_delete_blacklist(payload.get("delete_blacklist"))
+    if "ui_parent_row_bg" in payload:
+        _ui_parent_row_bg = bool(payload["ui_parent_row_bg"])
+    if "ui_parent_row_dim" in payload:
+        _ui_parent_row_dim = bool(payload["ui_parent_row_dim"])
+    if "ui_hover_group_outline" in payload:
+        _ui_hover_group_outline = bool(payload["ui_hover_group_outline"])
+    if "ui_hover_group_min" in payload:
+        _ui_hover_group_min = _normalize_ui_hover_group_min(payload.get("ui_hover_group_min"))
+    if "ui_tree_guide" in payload:
+        _ui_tree_guide = bool(payload["ui_tree_guide"])
+    if "ui_parent_sep" in payload:
+        _ui_parent_sep = bool(payload["ui_parent_sep"])
     if "snapshot_dir" in payload:
         raw = _normalize_snapshot_dir(payload.get("snapshot_dir"))
         if not raw:
@@ -1356,11 +1494,13 @@ def reset_settings_to_defaults(*, lang: str | None = None) -> dict:
     global _ai_enabled, _ai_base_url, _ai_model, _ai_api_key
     global _ai_extra_prompt, _ai_consented, _ai_model_options
     global _ai_cleanup_max_depth, _ai_enabled_tools
+    global _temp_cleanup
 
     _scan_workers = default_scan_workers()
     _compress_snapshots = True
     _use_mft = True
     _search_memory_index = True
+    _temp_cleanup = True
     _remember_window_size = True
     _window_width = 0
     _window_height = 0
@@ -1371,6 +1511,12 @@ def reset_settings_to_defaults(*, lang: str | None = None) -> dict:
     _theme = "light"
     _snapshot_dir = ""
     _delete_blacklist = []
+    _ui_parent_row_bg = False
+    _ui_parent_row_dim = False
+    _ui_hover_group_outline = False
+    _ui_hover_group_min = 10
+    _ui_tree_guide = True
+    _ui_parent_sep = False
     _lang = _normalize_lang(lang) if lang is not None else "en"
     _ai_enabled = False
     _ai_base_url = str(_AI_DEFAULTS["base_url"])
@@ -1542,6 +1688,7 @@ def settings_dict() -> dict:
         "compress_snapshots": _compress_snapshots,
         "use_mft": _use_mft,
         "search_memory_index": _search_memory_index,
+        "temp_cleanup": _temp_cleanup,
         "remember_window_size": bool(_remember_window_size),
         "window_width": int(_window_width),
         "window_height": int(_window_height),
@@ -1559,6 +1706,12 @@ def settings_dict() -> dict:
         "snapshot_dir_builtin": builtin_snapshot_dir(),
         "snapshot_dir_is_custom": bool(_snapshot_dir),
         "delete_blacklist": get_delete_blacklist(),
+        "ui_parent_row_bg": _ui_parent_row_bg,
+        "ui_parent_row_dim": _ui_parent_row_dim,
+        "ui_hover_group_outline": _ui_hover_group_outline,
+        "ui_hover_group_min": _ui_hover_group_min,
+        "ui_tree_guide": _ui_tree_guide,
+        "ui_parent_sep": _ui_parent_sep,
         # AI 配置与通用设置同文件；模块层再决定是否暴露明文 key
         "ai": _ai_payload(),
     }
@@ -1705,6 +1858,7 @@ def snapshot_info(path: str, *, base_dir: str | None = None) -> SnapshotInfo:
         file_size=file_size,
         note=(meta.note or "").strip()[:_NOTE_MAX_LEN],
         folder=folder,
+        free_size=meta.free_size,
     )
 
 
@@ -1866,14 +2020,21 @@ def delete_snapshot_folder(
     out_dir: str | None = None,
     force: bool = False,
     permanent: bool = False,
-) -> None:
+    move_out: bool = False,
+) -> dict:
     """删除快照根下的一层归纳文件夹。
 
-    默认仅允许空目录；``force=True`` 时连同其中快照文件一并删除
-    （不递归删除更深子目录以外的内容——本产品只维护一层）。
-    ``permanent`` 仅影响夹内快照文件：False 进回收站，True 永久删除。
-    空目录本身始终 ``rmdir``。
+    - 默认仅允许空目录；``force=True`` 时直接对整个文件夹执行删除
+      （``permanent=False`` 送回收站，``True`` 永久删除）。
+    - ``move_out=True`` 时把夹内快照逐个移回快照根（未归类），不删除文件；
+      遇到未归类下同名快照时自动重命名（在扩展名前插入 ``_1``、``_2``...）。
+    - 空目录本身始终 ``rmdir``。
+
+    Returns:
+        ``{"processed": int, "renamed": [{"from": str, "to": str}, ...]}``。
     """
+    from .fs_delete import delete_path
+
     safe = sanitize_folder_name(name)
     if not safe:
         raise ValueError("empty folder name")
@@ -1885,25 +2046,77 @@ def delete_snapshot_folder(
         names = os.listdir(path)
     except OSError as exc:
         raise OSError(f"cannot list folder: {exc}") from exc
-    if not force and names:
-        raise OSError("folder is not empty")
-    if force:
+
+    snap_names = [n for n in names if is_snapshot_filename(n)]
+    processed = 0
+    renamed: list[dict[str, str]] = []
+
+    if move_out:
         for n in names:
             p = os.path.join(path, n)
             if os.path.isfile(p) and is_snapshot_filename(n):
-                delete_snapshot(p, permanent=permanent)
+                dest_name = _unique_snapshot_name(base, n)
+                if dest_name != n:
+                    renamed.append({"from": n, "to": dest_name})
+                dest = os.path.join(base, dest_name)
+                try:
+                    drop_cache_for(p)
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    os.replace(p, dest)
+                except OSError:
+                    import shutil
+
+                    shutil.copy2(p, dest)
+                    try:
+                        drop_cache_for(p)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    os.remove(p)
+                processed += 1
             elif os.path.isdir(p) and not os.path.islink(p):
-                # 不递归清深层；若有意外子目录则拒绝
                 raise OSError(f"unexpected subfolder: {n}")
             else:
                 try:
                     os.remove(p)
                 except OSError as exc:
                     raise OSError(f"cannot remove {n}: {exc}") from exc
-        names = os.listdir(path) if os.path.isdir(path) else []
-        if names:
+        leftover = os.listdir(path) if os.path.isdir(path) else []
+        if leftover:
             raise OSError("folder is not empty")
+        os.rmdir(path)
+        return {"processed": processed, "renamed": renamed}
+
+    if not force and names:
+        raise OSError("folder is not empty")
+
+    if force:
+        # 整个夹直接送回收站或永久删除
+        try:
+            drop_cache_for(path)
+        except Exception:  # noqa: BLE001
+            pass
+        delete_path(path, permanent=bool(permanent))
+        return {"processed": len(snap_names), "renamed": []}
+
     os.rmdir(path)
+    return {"processed": 0, "renamed": []}
+
+
+def _unique_snapshot_name(base: str, name: str) -> str:
+    """在 ``base`` 下找一个不冲突的快照文件名；同名时插入 ``_1``、``_2``..."""
+    if not os.path.exists(os.path.join(base, name)):
+        return name
+    stem, ext = os.path.splitext(name)
+    if ext.lower() == ".dbz":
+        ext = ".dbz"  # 保持原扩展名大小写
+    i = 1
+    while True:
+        cand = f"{stem}_{i}{ext}"
+        if not os.path.exists(os.path.join(base, cand)):
+            return cand
+        i += 1
 
 
 def list_snapshots(out_dir: str | None = None) -> list[SnapshotInfo]:

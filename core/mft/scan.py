@@ -240,6 +240,10 @@ def scan_mft_to_snapshot(
 
     letter, drive_root = _drive_letter_and_root(root)  # type: ignore[misc]
     meta = SnapshotMeta(root=drive_root, scanned_at=now or time.time())
+    # 走 MFT 的根必是盘符根；用 drive_root 取剩余空间
+    from ..scanner import query_free_size
+
+    meta.free_size = query_free_size(drive_root)
     pg = _Progress(progress)
 
     if _mark:

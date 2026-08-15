@@ -358,12 +358,15 @@ function buildSnapEl(s) {
   const noteLine = noteText
     ? `<div class="snap-note" data-act="note" title="${escapeHtml(t("noteTitle"))}">${escapeHtml(noteText)}</div>`
     : `<div class="snap-note snap-note-empty" data-act="note" title="${escapeHtml(t("noteTitle"))}">${escapeHtml(t("notePlaceholder"))}</div>`;
-  // 顺序：扫描路径 → 时间（含角色/压缩）→ 备注 → 相对时间与大小 → 操作
+  // 顺序：扫描路径 → 备注 → 相对时间 + 剩余空间 → 创建时间 + 文件数量与大小 → 操作
+  const freeText = s.free_size > 0
+    ? `${t("freeLabel")} ${fmtBytes(s.free_size)}`
+    : `${t("freeLabel")} ${t("freeUnknown")}`;
   el.innerHTML = `
     <div class="snap-root">${escapeHtml(s.root)}${role}${zipTag}</div>
-    <div class="snap-time">${fmtTime(s.scanned_at)}</div>
     ${noteLine}
-    <div class="snap-meta">${fmtAgo(s.scanned_at)} · ${fmtBytes(s.total_size)} · ${t("filesN", (s.file_count || 0).toLocaleString())}${s.compressed && s.file_size ? " · " + fmtBytes(s.file_size) : ""}</div>
+    <div class="snap-time"><span class="snap-ago">${fmtAgo(s.scanned_at)}</span> <span class="snap-free">${freeText}</span></div>
+    <div class="snap-meta">${fmtTime(s.scanned_at)} · ${t("filesN", (s.file_count || 0).toLocaleString())}占 ${fmtBytes(s.total_size)}</div>
     <div class="snap-acts">
       <button class="snap-act old" data-act="old">${t("setAsBase")}</button>
       <button class="snap-act new" data-act="new">${t("setAsCurrent")}</button>
@@ -442,32 +445,16 @@ function renderSnapshotList() {
         <span class="snap-folder-caret">${caret}</span>
         <span class="snap-folder-name">${escapeHtml(label)}</span>
         <span class="snap-folder-count">${escapeHtml(t("folderCount", items.length))}</span>
-      </button>
-      <div class="snap-folder-acts"></div>`;
+      </button>`;
     const toggleBtn = head.querySelector('[data-act="toggle"]');
     if (toggleBtn) {
       toggleBtn.onclick = () => toggleFolderCollapsed(fname);
     }
-    const acts = head.querySelector(".snap-folder-acts");
-    if (acts && fname) {
-      const ren = document.createElement("button");
-      ren.type = "button";
-      ren.className = "snap-act";
-      ren.textContent = t("folderRename");
-      ren.onclick = (e) => {
-        e.stopPropagation();
-        openRenameFolderDialog(fname);
-      };
-      const del = document.createElement("button");
-      del.type = "button";
-      del.className = "snap-act del";
-      del.textContent = t("folderDelete");
-      del.onclick = (e) => {
-        e.stopPropagation();
-        deleteSnapshotFolder(fname, items.length);
-      };
-      acts.appendChild(ren);
-      acts.appendChild(del);
+    if (fname) {
+      head.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        openFolderCtxMenu(e, fname, items.length);
+      });
     }
     section.appendChild(head);
 
@@ -751,22 +738,50 @@ function _remapSelectionAfterMove(oldPathSet) {
   updatePickers();
 }
 
+// ---- 文件夹右键菜单 ----
+
+let _folderCtx = null; // { folder, count }
+
+function openFolderCtxMenu(e, folder, count) {
+  _folderCtx = { folder, count };
+  const menu = $("#folderCtxMenu");
+  menu.classList.remove("hidden");
+  const mw = menu.offsetWidth, mh = menu.offsetHeight;
+  menu.style.left = `${Math.min(e.clientX, window.innerWidth - mw - 6)}px`;
+  menu.style.top = `${Math.min(e.clientY, window.innerHeight - mh - 6)}px`;
+}
+
+function closeFolderCtxMenu() {
+  $("#folderCtxMenu").classList.add("hidden");
+  _folderCtx = null;
+}
+
+function folderCtxCommand(cmd) {
+  const ctx = _folderCtx;
+  closeFolderCtxMenu();
+  if (!ctx) return;
+  if (cmd === "rename") {
+    openRenameFolderDialog(ctx.folder);
+  } else if (cmd === "delete") {
+    deleteSnapshotFolder(ctx.folder, ctx.count);
+  }
+}
+
 async function deleteSnapshotFolder(name, itemCount) {
   if (!name) return;
   const count = Math.max(0, Number(itemCount) || 0);
-  let permanent = false;
+  let deleteSnapshots = false;
   if (count > 0) {
     const result = await showConfirmDialog({
       title: t("folderDelete"),
       message: t("folderDeleteConfirmWithItems", name, count),
-      okText: t("deleteToRecycle"),
-      okTextChecked: t("deletePermanent"),
-      danger: true,
-      checkboxLabel: t("pendingPermanent"),
+      okText: t("folderDelete"),
+      checkboxLabel: t("folderDeleteSnapshots"),
+      checkboxLabelChecked: t("folderDeleteSnapshotsChecked"),
       checkboxDefault: false,
     });
     if (!result) return;
-    permanent = !!(result && result.checked);
+    deleteSnapshots = !!(result && result.checked);
   } else {
     const ok = await showConfirmDialog({
       title: t("folderDelete"),
@@ -785,7 +800,11 @@ async function deleteSnapshotFolder(name, itemCount) {
 
   let res;
   try {
-    res = await state.api.delete_snapshot_folder(name, count > 0, permanent);
+    if (deleteSnapshots) {
+      res = await state.api.delete_snapshot_folder(name, true, false, false);
+    } else {
+      res = await state.api.delete_snapshot_folder(name, false, false, true);
+    }
   } catch (e) {
     toast(t("folderDeleteFailed", e), true);
     return;
@@ -800,7 +819,20 @@ async function deleteSnapshotFolder(name, itemCount) {
   if (state.compared && hitCompare) resetCompareView();
   delete state.folderCollapsed[name];
   await loadSnapshots({ quiet: true });
-  toast(t("folderDeleted"));
+  const moved = Number((res && res.count) || 0);
+  if (moved > 0) {
+    if (deleteSnapshots) {
+      toast(t("folderDeletedRemoved", moved));
+    } else {
+      toast(t("folderDeletedMoved", moved));
+    }
+  } else {
+    toast(t("folderDeleted"));
+  }
+  const renamed = (res && res.renamed) || [];
+  if (renamed.length) {
+    setTimeout(() => toast(t("folderDeletedRenamed", renamed), false, 5200), 600);
+  }
 }
 
 function openNoteDialog(s) {

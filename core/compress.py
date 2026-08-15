@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import atexit
+import glob
 import json
 import os
 import tempfile
@@ -32,7 +33,8 @@ _DATA_MEMBER = "data.db"
 DBZ_SUFFIX = ".dbz"
 
 # 进程内解压登记：abspath(dbz) → (temp_db_path, mtime, size)
-# 不写 %LOCALAPPDATA%\...\cache；软件关闭后系统清临时文件。
+# 正常退出：app 侧先关 Diff（释放 sqlite 句柄）再调 clear_session_cache()；
+# 异常退出（被强杀 / 崩溃）遗留的文件由启动时 sweep_stale_temp_dbs() 兜底。
 _session_lock = threading.Lock()
 _session_db: dict[str, tuple[str, float, int]] = {}
 _atexit_registered = False
@@ -65,6 +67,7 @@ def _meta_to_json(meta: SnapshotMeta) -> str:
             "skipped": meta.skipped,
             "format_version": meta.format_version,
             "note": (meta.note or "").strip(),
+            "free_size": meta.free_size,
         },
         ensure_ascii=False,
         separators=(",", ":"),
@@ -89,6 +92,7 @@ def _meta_from_json(text: str) -> SnapshotMeta:
             skipped=list(data.get("skipped") or []),
             format_version=int(data.get("format_version", 0)),
             note=str(data.get("note") or "").strip(),
+            free_size=int(data.get("free_size", 0)),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise SnapshotError(
@@ -196,7 +200,11 @@ def _register_atexit_once() -> None:
 
 
 def clear_session_cache() -> None:
-    """删除本进程解压出的全部临时 ``.db``（退出时自动调用）。"""
+    """删除本进程解压出的全部临时 ``.db``（退出时自动调用）。
+
+    注意：调用前须先关闭对这些文件的 SQLite 连接，否则 Windows 上
+    文件被占用，删除会静默失败（上次泄漏事故的根因）。
+    """
     with _session_lock:
         items = list(_session_db.values())
         _session_db.clear()
@@ -206,6 +214,32 @@ def clear_session_cache() -> None:
                 os.remove(temp_path)
         except OSError:
             pass
+
+
+def sweep_stale_temp_dbs(directory: str | None = None) -> int:
+    """删除临时目录里遗留的 ``wsmc_*.db``，返回删除个数。
+
+    兜底清理进程被强杀 / 崩溃等 atexit 未执行时留下的解压副本，
+    在启动时调用。跳过本进程会话登记中的文件；删除失败（如另一
+    实例正通过 SQLite 占用）视为在用，静默跳过。
+    """
+    target = directory or tempfile.gettempdir()
+    try:
+        candidates = glob.glob(os.path.join(target, "wsmc_*.db"))
+    except OSError:
+        return 0
+    with _session_lock:
+        live = {entry[0] for entry in _session_db.values()}
+    removed = 0
+    for path in candidates:
+        if path in live:
+            continue
+        try:
+            os.remove(path)
+            removed += 1
+        except OSError:
+            continue
+    return removed
 
 
 def is_session_cached(path: str) -> bool:

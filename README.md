@@ -63,13 +63,13 @@
 | 项目依赖 | 说明 |
 | --- | --- |
 | 系统 | Windows 10 / 11 |
-| WebView2 | 界面需要 [Microsoft Edge WebView2](https://developer.microsoft.com/microsoft-edge/webview2/)。**Windows 11 和多数 Windows 10 一般已经预装**；若缺失，启动时会提示并打开下载页，装好常青版再打开程序 |
+| WebView2 | 界面需要 [Microsoft Edge WebView2](https://developer.microsoft.com/microsoft-edge/webview2/)  **Windows 11 和多数 Windows 10 一般已经预装**；若缺失，启动时会提示并打开下载页，装好常青版再打开程序 |
 
 ## 常见问题
 
 > 遇到bug？
 >
-> 本工具由grok4.5与Fable5混合开发，~~遇到问题推荐发送email询问马斯克和Dario Amodei如何解决~~，推荐将代码发给AI来解决问题，当然也可以提出issue
+> 本工具由模型grok4.5、fable5、dpskv4、glm5.x混用开发，~~遇到问题推荐发送email询问马斯克和梁子如何解决~~，推荐将代码发给AI来解决问题，当然也可以提出issue
 
 **Q：扫描进度很久是怎么回事？**  
 **A：扫描时间主要取决于你选择的路径下有多少文件和电脑配置**

@@ -222,6 +222,7 @@ class SnapshotWriter:
             "skipped": json.dumps(meta.skipped, ensure_ascii=False),
             "format_version": str(meta.format_version),
             "note": (meta.note or "").strip(),
+            "free_size": str(meta.free_size),
         }
         self._conn.executemany(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
@@ -292,6 +293,7 @@ def read_meta(db_path: str) -> SnapshotMeta:
             skipped=json.loads(rows.get("skipped", "[]")),
             format_version=version,
             note=(rows.get("note") or "").strip(),
+            free_size=int(rows.get("free_size", "0")),
         )
     finally:
         conn.close()

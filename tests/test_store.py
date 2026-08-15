@@ -25,6 +25,7 @@ from core.store import (
     get_theme,
     get_use_mft,
     get_search_memory_index,
+    get_temp_cleanup,
     is_log_level_explicit,
     is_log_sanitize_explicit,
     list_snapshot_folders,
@@ -44,6 +45,7 @@ from core.store import (
     set_theme,
     set_use_mft,
     set_search_memory_index,
+    set_temp_cleanup,
     settings_path,
     snapshot_content_key,
     snapshot_info,
@@ -61,6 +63,7 @@ def _isolate_settings(tmp_path, monkeypatch):
     store._use_mft = True
     store._compress_snapshots = True
     store._search_memory_index = True
+    store._temp_cleanup = True
     store._log_sanitize = True
     store._log_sanitize_explicit = None
     store._log_level = "INFO"
@@ -297,6 +300,13 @@ def test_search_memory_index_defaults_on():
     assert set_search_memory_index(True) is True
 
 
+def test_temp_cleanup_defaults_on():
+    assert get_temp_cleanup() is True
+    assert set_temp_cleanup(False) is False
+    assert get_temp_cleanup() is False
+    assert set_temp_cleanup(True) is True
+
+
 def test_log_sanitize_defaults_on_and_explicit_flag():
     assert get_log_sanitize() is True
     assert is_log_sanitize_explicit() is False
@@ -326,6 +336,7 @@ def test_yaml_roundtrip_helpers(tmp_path):
         "compress_snapshots": False,
         "use_mft": True,
         "search_memory_index": False,
+        "temp_cleanup": False,
         "log_sanitize": False,
         "log_level": "DEBUG",
         "lang": "zh",
@@ -339,6 +350,7 @@ def test_yaml_roundtrip_helpers(tmp_path):
     assert "persist" not in raw
     assert "\n  scan_workers:" in raw or "\n  scan_workers: " in raw
     assert "search_memory_index: false" in raw
+    assert "temp_cleanup: false" in raw
     assert "log_sanitize: false" in raw
     assert "log_level: DEBUG" in raw
     assert "log_to_file" not in raw
@@ -350,6 +362,7 @@ def test_yaml_roundtrip_helpers(tmp_path):
     assert common["compress_snapshots"] == "false"
     assert common["use_mft"] == "true"
     assert common["search_memory_index"] == "false"
+    assert common["temp_cleanup"] == "false"
     assert common["log_sanitize"] == "false"
     assert common["log_level"] == "DEBUG"
     assert "log_to_file" not in common
@@ -362,6 +375,7 @@ def test_yaml_roundtrip_helpers(tmp_path):
     assert get_compress_snapshots() is False
     assert get_use_mft() is True
     assert get_search_memory_index() is False
+    assert get_temp_cleanup() is False
     assert get_log_sanitize() is False
     assert is_log_sanitize_explicit() is True
     assert get_log_level() == "DEBUG"

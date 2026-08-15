@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import itertools
 import os
+import shutil
 import stat
 import queue
 import threading
@@ -98,6 +99,17 @@ def _is_reparse_point(stat) -> bool:
 def _child_rel(parent_rel: str, name: str) -> str:
     """拼出子项的相对路径。根（parent_rel == ""）的子项即其名字。"""
     return name if parent_rel == "" else parent_rel + os.sep + name
+
+
+def query_free_size(path: str) -> int:
+    """查询 ``path`` 所在盘的剩余空间（字节）。失败返回 0。
+
+    供扫描入口在 ``scanned_at`` 附近调用，把结果写入 ``SnapshotMeta.free_size``。
+    """
+    try:
+        return shutil.disk_usage(path).free
+    except (OSError, ValueError):
+        return 0
 
 
 class _Scan:
@@ -407,6 +419,7 @@ def scan_to_snapshot(
                         _mark("mft_fallback")
                 # ScanCancelled 等向上抛
     meta = SnapshotMeta(root=os.path.abspath(root), scanned_at=now or time.time())
+    meta.free_size = query_free_size(root)
 
     root_abs = _long_path(root)
     try:
