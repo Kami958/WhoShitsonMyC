@@ -2,10 +2,16 @@
 
 一份快照 = 一个 ``.db`` 文件，含两张表：
 
-- ``entries(id, parent_id, name, size, is_dir, mtime)``：每个文件/目录一行，
-  **邻接表**结构——只存本段名字与父行 id，不存完整路径（v3 起，体积约为
-  存完整路径方案的 1/5）。根目录 id 固定为 1、``parent_id`` 为 NULL。
+- ``entries(id, parent_id, name, size, is_dir, mtime[, reparse_tag[, link_target]])``：
+  每个文件/目录一行，**邻接表**结构——只存本段名字与父行 id，不存完整
+  路径（v3 起，体积约为存完整路径方案的 1/5）。根目录 id 固定为 1、
+  ``parent_id`` 为 NULL。v4 起新增 ``reparse_tag`` 列，v5 起新增
+  ``link_target`` 列。
 - ``meta(key, value)``：键值对形式的元信息（root、时间、计数、skipped 列表、版本号）。
+
+**版本分派**：写入侧一律写当前版本（v5）；读取侧按 meta 里的
+``format_version`` 选列清单（:func:`entry_columns`），旧快照缺的列
+（v3 无 ``reparse_tag``、v4 无 ``link_target``）读出为默认值，仍可读取、对比。
 
 写入侧（:class:`SnapshotWriter`）针对「百万级记录一次性写入」做了性能调优：
 关闭同步、日志走内存、分批 ``executemany``、**索引最后一次性建立**。
@@ -29,6 +35,28 @@ from .models import (
 # 每积累这么多条 entry 就 flush 一次到数据库，兼顾写入速度与内存占用。
 _BATCH_SIZE = 10_000
 
+# 各版本 entries 表的 SELECT 列清单。v4 起含 reparse_tag，v5 起含 link_target。
+# 解析器按快照 format_version 分派：读旧快照不带新列，读出的新字段补默认值。
+_ENTRY_COLS_V3 = "id, parent_id, name, size, is_dir, mtime"
+_ENTRY_COLS_V4 = "id, parent_id, name, size, is_dir, mtime, reparse_tag"
+_ENTRY_COLS_V5 = (
+    "id, parent_id, name, size, is_dir, mtime, reparse_tag, link_target"
+)
+
+
+def entry_columns(version: int) -> str:
+    """按快照格式版本返回 entries 表 SELECT 列清单。
+
+    这是读取侧的**统一解析分派**：任何读 entries 的 SQL 都用它选列。
+    v5 及以上走 8 列，v4 走 7 列，低于 v4（v3）走 6 列。
+    """
+    v = int(version)
+    if v >= 5:
+        return _ENTRY_COLS_V5
+    if v >= 4:
+        return _ENTRY_COLS_V4
+    return _ENTRY_COLS_V3
+
 
 class EntryRow(NamedTuple):
     """写入缓冲的一行，字段顺序与 SQLite ``entries`` 表完全一致。
@@ -47,6 +75,8 @@ class EntryRow(NamedTuple):
     size: int
     is_dir: int  # 0=文件，1=目录（与 entries.is_dir 列一致）
     mtime: int = 0
+    reparse_tag: int = 0  # Windows 重解析点标签；0=普通项，非 0=链接
+    link_target: str = ""  # 链接指向的真实路径；非链接为空串
 
     @staticmethod
     def file(
@@ -55,9 +85,13 @@ class EntryRow(NamedTuple):
         name: str,
         size: int,
         mtime: int = 0,
+        reparse_tag: int = 0,
+        link_target: str = "",
     ) -> EntryRow:
         """构造文件行（``is_dir=0``）。"""
-        return EntryRow(id, parent_id, name, size, 0, mtime)
+        return EntryRow(
+            id, parent_id, name, size, 0, mtime, reparse_tag, link_target
+        )
 
     @staticmethod
     def directory(
@@ -66,9 +100,13 @@ class EntryRow(NamedTuple):
         name: str,
         size: int,
         mtime: int = 0,
+        reparse_tag: int = 0,
+        link_target: str = "",
     ) -> EntryRow:
         """构造目录行（``is_dir=1``）。"""
-        return EntryRow(id, parent_id, name, size, 1, mtime)
+        return EntryRow(
+            id, parent_id, name, size, 1, mtime, reparse_tag, link_target
+        )
 
     @staticmethod
     def from_entry(entry: Entry) -> EntryRow:
@@ -80,6 +118,8 @@ class EntryRow(NamedTuple):
             entry.size,
             1 if entry.is_dir else 0,
             entry.mtime,
+            entry.reparse_tag,
+            entry.link_target,
         )
 
 
@@ -143,7 +183,9 @@ class SnapshotWriter:
             "  name TEXT NOT NULL,"
             "  size INTEGER NOT NULL,"
             "  is_dir INTEGER NOT NULL,"
-            "  mtime INTEGER NOT NULL DEFAULT 0"
+            "  mtime INTEGER NOT NULL DEFAULT 0,"
+            "  reparse_tag INTEGER NOT NULL DEFAULT 0,"
+            "  link_target TEXT NOT NULL DEFAULT ''"
             ")"
         )
         cur.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
@@ -170,8 +212,9 @@ class SnapshotWriter:
                 chunk = self._buffer[:_BATCH_SIZE]
                 del self._buffer[:_BATCH_SIZE]
                 self._conn.executemany(
-                    "INSERT INTO entries (id, parent_id, name, size, is_dir, mtime)"
-                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO entries"
+                    " (id, parent_id, name, size, is_dir, mtime, reparse_tag, link_target)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     chunk,
                 )
 
@@ -190,8 +233,9 @@ class SnapshotWriter:
         if not self._buffer:
             return
         self._conn.executemany(
-            "INSERT INTO entries (id, parent_id, name, size, is_dir, mtime)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO entries"
+            " (id, parent_id, name, size, is_dir, mtime, reparse_tag, link_target)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             self._buffer,
         )
         self._buffer.clear()
@@ -329,23 +373,54 @@ def write_meta_note(db_path: str, note: str) -> str:
     return text
 
 
+class _SnapshotConnection(sqlite3.Connection):
+    """可携带快照格式版本的只读连接。
+
+    ``sqlite3.Connection`` 原生不可挂自定义属性，故子类化并加
+    ``_wmc_version``：读侧解析（:func:`entry_columns`）按它分派列清单。
+    """
+
+    _wmc_version: int = SNAPSHOT_FORMAT_VERSION
+
+
 def open_readonly(db_path: str) -> sqlite3.Connection:
     """以只读方式打开一个快照连接（供 differ 做 ATTACH 对比或查询子节点）。
 
     调用方负责 ``close()``。
+
+    返回的连接携带 ``_wmc_version`` 属性（快照的 format_version）：
+    读侧解析按它分派列清单，旧 v3 快照自动用 v3 列（无 ``reparse_tag``）。
+    读取失败/缺 meta 时按最新版本兜底（新写入的都是当前版）。
 
     ``check_same_thread=False``：pywebview 的每次 JS-API 调用都可能在
     不同线程上执行，对比会话（:class:`~core.differ.Diff`）会跨调用复用
     连接，故必须允许跨线程使用；调用方（app.Api）以锁保证同一时刻
     只有一个线程在用。
     """
-    return sqlite3.connect(
-        f"file:{db_path}?mode=ro", uri=True, check_same_thread=False
+    conn = sqlite3.connect(
+        f"file:{db_path}?mode=ro",
+        uri=True,
+        check_same_thread=False,
+        factory=_SnapshotConnection,
     )
+    version = 0
+    try:
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key = 'format_version'"
+        ).fetchone()
+        if row:
+            version = int(row[0])
+    except (sqlite3.Error, ValueError, TypeError):  # pragma: no cover - 依赖文件
+        version = 0
+    conn._wmc_version = version or SNAPSHOT_FORMAT_VERSION  # type: ignore[attr-defined]
+    return conn
 
 
 def children_of(conn: sqlite3.Connection, parent_id: int | None) -> Iterator[Entry]:
-    """查询某个父目录的直接子节点（懒加载下钻用，仅支持 v3 快照）。
+    """查询某个父目录的直接子节点（懒加载下钻用）。
+
+    v3/v4/v5 快照均支持：按连接携带的版本号选列，旧快照缺的列读出为
+    默认值（``reparse_tag`` 为 0、``link_target`` 为空串）。
 
     Args:
         conn: 由 :func:`open_readonly` 打开的连接。
@@ -354,18 +429,17 @@ def children_of(conn: sqlite3.Connection, parent_id: int | None) -> Iterator[Ent
     Yields:
         该父目录下的每个 :class:`Entry`。
     """
+    cols = entry_columns(
+        getattr(conn, "_wmc_version", SNAPSHOT_FORMAT_VERSION)
+    )
     if parent_id is None:
-        cur = conn.execute(
-            "SELECT id, parent_id, name, size, is_dir, mtime"
-            " FROM entries WHERE parent_id IS NULL"
-        )
+        cur = conn.execute(f"SELECT {cols} FROM entries WHERE parent_id IS NULL")
     else:
         cur = conn.execute(
-            "SELECT id, parent_id, name, size, is_dir, mtime"
-            " FROM entries WHERE parent_id = ?",
+            f"SELECT {cols} FROM entries WHERE parent_id = ?",
             (parent_id,),
         )
-    for eid, pid, name, size, is_dir, mtime in cur:
+    for eid, pid, name, size, is_dir, mtime, *rest in cur:
         yield Entry(
             id=eid,
             parent_id=pid,
@@ -373,6 +447,8 @@ def children_of(conn: sqlite3.Connection, parent_id: int | None) -> Iterator[Ent
             size=size,
             is_dir=bool(is_dir),
             mtime=mtime,
+            reparse_tag=int(rest[0]) if rest else 0,
+            link_target=str(rest[1]) if len(rest) > 1 else "",
         )
 
 

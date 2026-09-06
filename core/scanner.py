@@ -31,7 +31,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from .i18n import t
-from .models import SnapshotMeta
+from .models import SnapshotMeta, clean_link_target
 from .snapshot import EntryRow, SnapshotWriter
 
 # 进度回调：progress(files_scanned: int, current_dir: str)
@@ -47,6 +47,8 @@ _PROGRESS_MIN_INTERVAL = 0.22
 _ROWS_DONE = object()
 # 任务队列上的退出标记：通知 worker 收工。
 _TASK_DONE = object()
+# reparse 目录行的哨兵前缀：drain 侧据此识别并累计目录数。
+_REPARSE_DIR = "reparse_dir"
 
 
 class ScanCancelled(Exception):
@@ -86,14 +88,33 @@ def _long_path(path: str) -> str:
     return "\\\\?\\" + norm
 
 
+def _reparse_tag(stat) -> int:
+    """取一个目录项的重解析点标签（Windows ``st_reparse_tag``）；非链接为 0。
+
+    0xA0000003=junction（mklink /J），0xA000000C=符号链接（mklink /D），
+    其它非零=其它重解析点。非 Windows / 无该字段时返回 0。
+    """
+    return int(getattr(stat, "st_reparse_tag", 0) or 0)
+
+
 def _is_reparse_point(stat) -> bool:
     """判断一个目录项是否为符号链接 / junction / 其它重解析点。
     这类项默认不深入，以免死循环或重复计算。尽量稳健地跨版本判断。
     """
-    #Windows 定义的一个文件属性常量
-    attrs = int(getattr(stat, "st_file_attributes",0))
-    FILE_ATTRIBUTE_REPARSE_POINT = 0x400
-    return bool(attrs & FILE_ATTRIBUTE_REPARSE_POINT)
+    return _reparse_tag(stat) != 0
+
+
+def _link_target(path: str) -> str:
+    """读出链接指向的真实路径；读不到返回空串。
+
+    ``os.readlink`` 对 junction 与符号链接都可用（junction 上
+    ``os.path.islink`` 为 False，不能用它判断），返回值带 ``\\\\?\\``
+    前缀，交给 :func:`clean_link_target` 剥掉。
+    """
+    try:
+        return clean_link_target(os.readlink(path))
+    except (OSError, ValueError):
+        return ""
 
 
 def _child_rel(parent_rel: str, name: str) -> str:
@@ -105,11 +126,21 @@ def query_free_size(path: str) -> int:
     """查询 ``path`` 所在盘的剩余空间（字节）。失败返回 0。
 
     供扫描入口在 ``scanned_at`` 附近调用，把结果写入 ``SnapshotMeta.free_size``。
+    ``path`` 可能尚不存在（如迁移的目标目录），此时沿路径向上找最近的已存在
+    祖先（通常是盘符根）再查询。
     """
-    try:
-        return shutil.disk_usage(path).free
-    except (OSError, ValueError):
+    if not path:
         return 0
+    cur = os.path.abspath(os.path.expanduser(path))
+    for _ in range(64):
+        try:
+            return shutil.disk_usage(cur).free
+        except (OSError, ValueError):
+            parent = os.path.dirname(cur)
+            if not parent or parent == cur:
+                return 0
+            cur = parent
+    return 0
 
 
 class _Scan:
@@ -187,11 +218,17 @@ class _Scan:
                 try:
                     # 每项一次 stat：权限/类型/大小/mtime 一并拿到内存再分支。
                     st = entry.stat(follow_symlinks=False)
-                    descend = stat.S_ISDIR(st.st_mode) and (
-                        self.follow or not _is_reparse_point(st)
-                    )
+                    tag = _reparse_tag(st)
+                    # 目录判定：S_ISDIR 之外再认 FILE_ATTRIBUTE_DIRECTORY。
+                    # 目录符号链接（mklink /D）的 lstat 上 S_ISDIR 为 False，
+                    # 但属性位正确；只认 S_ISDIR 会把目录链接记成文件。
+                    attrs = int(getattr(st, "st_file_attributes", 0))
+                    is_dir = stat.S_ISDIR(st.st_mode) or bool(attrs & 0x10)
+                    descend = is_dir and (self.follow or not tag)
                 except OSError:
                     descend = False
+                    is_dir = False
+                    tag = 0
                     st = None  # type: ignore[assignment]
 
                 if descend:
@@ -209,15 +246,44 @@ class _Scan:
                             mtime=dir_mtime,
                         )
                     )
+                elif is_dir:
+                    # 不深入的目录 = 重解析点（junction / 符号链接 / 其它）。
+                    # 记为目录行（is_dir=1、size=0、带 tag），不建子节点——
+                    # 避免把链接目录记成 0 字节文件。
+                    try:
+                        dir_mtime = int(st.st_mtime)
+                    except (OSError, AttributeError):
+                        dir_mtime = 0
+                    self.rows.put(
+                        (
+                            _REPARSE_DIR,
+                            EntryRow.directory(
+                                next(self.ids),
+                                parent_id,
+                                entry.name,
+                                0,
+                                dir_mtime,
+                                reparse_tag=tag,
+                                link_target=_link_target(entry.path),
+                            ),
+                        )
+                    )
                 else:
-                    # 文件、或不深入的符号链接/重解析点：取自身大小。
+                    # 文件、或不深入的符号链接/重解析点文件：取自身大小。
                     try:
                         size, mtime = st.st_size, int(st.st_mtime)
                     except (OSError, ValueError, AttributeError):
                         size, mtime = 0, 0
                     file_batch.append(
                         EntryRow.file(
-                            next(self.ids), parent_id, entry.name, size, mtime
+                            next(self.ids),
+                            parent_id,
+                            entry.name,
+                            size,
+                            mtime,
+                            reparse_tag=tag,
+                            # 只有链接才多一次 readlink，普通文件零开销
+                            link_target=_link_target(entry.path) if tag else "",
                         )
                     )
                     files_size += size
@@ -322,6 +388,11 @@ class _Scan:
                 if progress is not None:
                     progress(max(self.meta.file_count, self.files_found), self.current)
                 return
+            if isinstance(item, tuple) and item and item[0] == _REPARSE_DIR:
+                # 重解析点目录行（is_dir=1）：不计入文件数，单独累计目录数。
+                writer.add_row(item[1])
+                self.meta.dir_count += 1
+                continue
             if isinstance(item, list):
                 # 文件批：条数即文件数，不必再逐条看 is_dir
                 writer.add_rows(item)

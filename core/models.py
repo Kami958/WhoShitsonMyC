@@ -13,8 +13,49 @@ from dataclasses import dataclass, field
 # 快照文件格式版本号。结构不兼容变更时递增，加载旧快照时用于校验。
 # v2：entries 表新增 mtime 列。
 # v3：邻接表结构——不再存完整路径，每行只存本段名字 + 父行 id，
-#     体积缩到约 1/5；mtime 改为整数秒。v1/v2 快照仍可列举，但不可对比。
-SNAPSHOT_FORMAT_VERSION = 3
+#     体积缩到约 1/5；mtime 改为整数秒。
+# v4：entries 表新增 reparse_tag 列。
+# v5：entries 表新增 link_target 列（链接指向的真实路径）。
+# v3/v4 快照仍可读取、对比（缺的字段按默认值补），由读取侧按
+# format_version 分派列清单（见 snapshot.entry_columns）。
+# v1/v2 快照仍可列举，但不可对比。
+SNAPSHOT_FORMAT_VERSION = 5
+
+# Windows 重解析点标签（st_reparse_tag）——区分链接类型。
+# 目录联接（mklink /J）与符号链接（mklink /D）是两种最常见的重解析点；
+# 其它非零标签（OneDrive、WSL、AppX 等）归为「重解析点」。
+# mklink /H 是硬链接，不是重解析点，无此标签，本程序不覆盖。
+REPARSE_TAG_MOUNT_POINT = 0xA0000003
+REPARSE_TAG_SYMLINK = 0xA000000C
+
+
+def reparse_kind(tag: int) -> str:
+    """把 reparse tag 归类为 ``junction`` / ``symlink`` / ``reparse``；非链接为 ``""``。"""
+    if not tag:
+        return ""
+    if tag == REPARSE_TAG_MOUNT_POINT:
+        return "junction"
+    if tag == REPARSE_TAG_SYMLINK:
+        return "symlink"
+    return "reparse"
+
+
+def clean_link_target(target: str) -> str:
+    """去掉链接目标路径上的内核前缀，得到可显示的路径。
+
+    ``os.readlink`` 返回 ``\\\\?\\D:\\x``，MFT 里的 SubstituteName 为
+    ``\\??\\D:\\x``，两种前缀都不该给用户看。PrintName 本身没有前缀，原样返回。
+    """
+    s = (target or "").strip()
+    if not s:
+        return ""
+    for prefix in ("\\??\\UNC\\", "\\\\?\\UNC\\"):
+        if s.startswith(prefix):
+            return "\\\\" + s[len(prefix):]
+    for prefix in ("\\??\\", "\\\\?\\"):
+        if s.startswith(prefix):
+            return s[len(prefix):]
+    return s
 
 
 @dataclass(slots=True)
@@ -28,6 +69,10 @@ class Entry:
         size: 字节数。文件为其自身大小；目录为其递归聚合总大小。
         is_dir: True=目录，False=文件。
         mtime: 最后修改时间的 Unix 时间戳（整数秒）；获取失败为 0。
+        reparse_tag: Windows 重解析点标签；0=普通文件/目录，
+            非 0=链接（junction / 符号链接 / 其它重解析点）。v3 旧快照无此列，恒为 0。
+        link_target: 链接指向的真实路径；非链接或取不到时为空串。
+            v4 及更早的快照无此列，恒为空。
     """
 
     id: int
@@ -36,6 +81,8 @@ class Entry:
     size: int
     is_dir: bool
     mtime: int = 0
+    reparse_tag: int = 0
+    link_target: str = ""
 
 
 @dataclass(slots=True)
@@ -95,6 +142,9 @@ class DiffNode:
             子节点采用懒加载，展开时才查询，故此处不内联 children。
         mtime: 该节点最后已知的修改时间戳——新快照中存在取新侧，
             否则取旧侧；v1 旧快照没有此信息，为 0。供前端按时间排序。
+        reparse_tag: Windows 重解析点标签；0=普通项，非 0=链接。
+        link_target: 链接指向的真实路径；非链接或快照版本过旧时为空串。
+        has_link: 递归范围内是否存在链接节点（目录作「链接」筛选下钻入口）。
     """
 
     path: str
@@ -111,6 +161,10 @@ class DiffNode:
     has_added: bool = False
     has_removed: bool = False
     mtime: float = 0.0
+    reparse_tag: int = 0
+    has_link: bool = False
+    link_target: str = ""
+    whitelisted: bool = False  # 路径命中删除白名单（禁止删除）
 
     def to_dict(self) -> dict:
         """转为可 JSON 序列化的 dict，供 pywebview 桥接传给前端。"""
@@ -126,4 +180,9 @@ class DiffNode:
             "has_added": self.has_added,
             "has_removed": self.has_removed,
             "mtime": self.mtime,
+            "reparse_tag": self.reparse_tag,
+            "link_kind": reparse_kind(self.reparse_tag),
+            "has_link": self.has_link,
+            "link_target": self.link_target,
+            "whitelisted": self.whitelisted,
         }

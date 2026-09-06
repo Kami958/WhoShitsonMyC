@@ -7,7 +7,7 @@
  */
 const _tool = {
   open: false,
-  tab: "pending",
+  tab: "link",
   items: [],
   permanent: false,
   executing: false,
@@ -25,7 +25,22 @@ function isToolOpen() {
 const _TOOL_PANEL_W_MIN = 240;
 const _TOOL_PANEL_W_MAX = 640;
 const _TOOL_PANEL_W_DEFAULT = 340;
-const _TOOL_PANEL_W_KEY = "wsmc.toolPanelWidth";
+// 旧版 localStorage 键，仅用于一次性迁移到 settings.yaml，之后不再读写
+const _TOOL_PANEL_W_LEGACY_KEY = "wsmc.toolPanelWidth";
+const _TOOL_OPEN_LEGACY_KEY = "wsmc.toolOpen";
+const _TOOL_TAB_KEY = "wsmc.toolTab";
+const _TOOL_ANIM_MS = 250;
+
+// 侧栏开合编排（关键约束：原生窗口 resize 是异步的、多次调用会合并，
+// 永远不要试图让它逐帧跟随 CSS 动画）：
+//   展开 = 钉死主区当前宽度 → 一次性加宽窗口 → 侧栏在新增的右侧区域里
+//          用 CSS 过渡滑入 → 结束后解除钉宽。
+//   收起 = 钉死主区宽度 → 侧栏 CSS 过渡收回 → 一次性收窄窗口 →
+//          等 viewport 跟上后解除钉宽。
+// 主区宽度全程不变，窗口右边缘与侧栏各动各的。
+let _toolAnimGen = 0; // 动画代际：反向打断时作废旧收尾回调
+let _toolPanelW = _TOOL_PANEL_W_DEFAULT; // 侧栏「应有」宽度（拖拽/设置同步时更新）
+let _toolWinSeq = Promise.resolve(); // 串行化窗口伸缩调用，防止快速开合乱序
 
 function toolPanelWidthPx() {
   const panel = $("#toolPanel");
@@ -50,27 +65,98 @@ function applyToolPanelWidth(px) {
   let w = Math.round(Number(px));
   if (!Number.isFinite(w)) w = _TOOL_PANEL_W_DEFAULT;
   w = Math.max(_TOOL_PANEL_W_MIN, Math.min(_TOOL_PANEL_W_MAX, w));
+  _toolPanelW = w;
   document.documentElement.style.setProperty("--tool-panel-w", w + "px");
   if (panel) panel.style.width = w + "px";
   return w;
 }
 
-function restoreToolPanelWidth() {
+/** 动画专用：允许把侧栏宽度设到 0（收起终点），不走最小宽度夹取。 */
+function _setToolPanelRawWidth(px) {
+  const panel = $("#toolPanel");
+  let w = Math.round(Number(px));
+  if (!Number.isFinite(w)) w = 0;
+  w = Math.max(0, Math.min(_TOOL_PANEL_W_MAX, w));
+  document.documentElement.style.setProperty("--tool-panel-w", w + "px");
+  if (panel) panel.style.width = w + "px";
+  return w;
+}
+
+/** 启动时把「默认页签」从 localStorage 恢复；展开状态由 settings.yaml 决定。 */
+function restoreToolPanelState() {
+  // 无上次记录时默认停在「目录链接」；有记录则恢复上次页签。
+  // 业务跳转（如加入待删除后自动切到该页）不受影响，见 openToolPanel("pending") 调用点。
+  let tab = "link";
   try {
-    const raw = localStorage.getItem(_TOOL_PANEL_W_KEY);
-    if (raw != null && raw !== "") {
-      applyToolPanelWidth(raw);
-      return;
+    const savedTab = localStorage.getItem(_TOOL_TAB_KEY);
+    if (savedTab && (savedTab === "pending" || savedTab === "link" ||
+                     (typeof hasModule === "function" && hasModule("ai") && savedTab === "ai"))) {
+      tab = savedTab;
     }
   } catch (e) {}
-  applyToolPanelWidth(_TOOL_PANEL_W_DEFAULT);
+  const panel = $("#toolPanel");
+  if (!panel) return;
+  // 收起态：直接把 panel 折成 0 宽，避免过渡期间闪烁；
+  // 若 YAML 记住的是展开态，boot 后段 syncToolPanelFromSettings 再展开
+  panel.classList.add("collapsed");
+  panel.classList.add("hidden");
+  _tool.open = false;
+  _tool.tab = tab;
+}
+
+/**
+ * 一次性把旧版 localStorage 里的侧栏状态搬进 settings.yaml。
+ * 后端 migrate 只在 YAML 没写过该键时执行，重复调用无害。
+ */
+async function migrateToolPanelStateLegacy() {
+  let open = false;
+  let width = _TOOL_PANEL_W_DEFAULT;
+  let hasLegacy = false;
+  try {
+    const rawOpen = localStorage.getItem(_TOOL_OPEN_LEGACY_KEY);
+    const rawW = localStorage.getItem(_TOOL_PANEL_W_LEGACY_KEY);
+    if (rawOpen != null || rawW != null) {
+      hasLegacy = true;
+      open = rawOpen === "1";
+      const w = parseInt(rawW, 10);
+      if (Number.isFinite(w)) width = w;
+    }
+  } catch (e) {}
+  if (!hasLegacy) return;
+  try {
+    await state.api.sync_tool_panel_state(open, width);
+  } catch (e) {}
+  try {
+    localStorage.removeItem(_TOOL_OPEN_LEGACY_KEY);
+    localStorage.removeItem(_TOOL_PANEL_W_LEGACY_KEY);
+  } catch (e) {}
+}
+
+/**
+ * 按 settings.yaml 渲染侧栏宽度与展开状态（boot 后段调用）。
+ * 展开不回调 set_tool_panel_open：启动宽度已由 Python 侧算好。
+ */
+function syncToolPanelFromSettings() {
+  const s = state._settings;
+  if (!s) return;
+  if (s.ui_tool_panel_width) applyToolPanelWidth(s.ui_tool_panel_width);
+  if (s.ui_tool_panel_open === true) {
+    openToolPanel(_tool.tab || "pending", { silent: true });
+  }
+}
+
+function persistToolTab() {
+  try { localStorage.setItem(_TOOL_TAB_KEY, String(_tool.tab || "pending")); } catch (e) {}
 }
 
 function syncToolPanelResizerVisibility() {
   const handle = $("#toolPanelResizer");
+  const panel = $("#toolPanel");
   if (!handle) return;
-  // 仅侧栏展开时显示分界拖条
-  handle.classList.toggle("hidden", !_tool.open);
+  // 侧栏仍在布局中（收起动画未走完、还没 hidden）就保持显示，
+  // 让分界拖条跟着侧栏左缘一起收回，动画结束后才消失
+  const visible = _tool.open || (panel && !panel.classList.contains("hidden"));
+  handle.classList.toggle("hidden", !visible);
 }
 
 /** 右侧工具栏左缘拖拽：变宽挤压中间对比区，不改窗口尺寸 */
@@ -79,7 +165,6 @@ function wireToolPanelResizer() {
   const panel = $("#toolPanel");
   if (!handle || !panel) return;
 
-  restoreToolPanelWidth();
   syncToolPanelResizerVisibility();
 
   let dragging = false;
@@ -113,8 +198,9 @@ function wireToolPanelResizer() {
       raf = 0;
     }
     const w = applyToolPanelWidth(pendingW || startW);
+    // 宽度只记进 YAML，不改窗口尺寸（拖拽挤压的是主区）
     try {
-      localStorage.setItem(_TOOL_PANEL_W_KEY, String(w));
+      state.api.set_tool_panel_width(w);
     } catch (e) {}
   };
 
@@ -136,170 +222,63 @@ function wireToolPanelResizer() {
   });
 }
 
-/** 串行化窗口尺寸变更，避免快切时 open/close 交叉导致布局闪烁 */
-let _toolWinChain = Promise.resolve();
-let _toolWinToken = 0;
+/** 钉死主区当前宽度：flex 不再重新分配，窗口伸缩产生的空区全部落在主区右侧。 */
+function _pinMainWidth() {
+  const main = document.querySelector("main.main");
+  if (!main || main.dataset.pinned === "1") return;
+  const w = Math.round(main.getBoundingClientRect().width);
+  if (!(w > 0)) return;
+  main.style.width = w + "px";
+  main.style.flex = "none";
+  main.style.marginRight = "auto"; // 空区留在主区与侧栏之间，侧栏贴右缘
+  main.dataset.pinned = "1";
+}
 
-function syncWindowForToolPanel(open) {
-  const api = state && state.api;
-  if (!api || typeof api.set_tool_panel_open !== "function") {
-    return Promise.resolve(null);
-  }
-  const w = toolPanelWidthPx();
-  return Promise.resolve(api.set_tool_panel_open(!!open, w)).catch(() => null);
+/** 解除钉宽：窗口尺寸已与内容一致，恢复 flex:1 不产生视觉变化。 */
+function _unpinMainWidth() {
+  const main = document.querySelector("main.main");
+  if (!main || main.dataset.pinned !== "1") return;
+  main.style.width = "";
+  main.style.flex = "";
+  main.style.marginRight = "";
+  delete main.dataset.pinned;
+}
+
+/** 串行调用后端的一次性窗口伸缩；调用顺序即生效顺序。 */
+function _resizeWindowForPanel(open, panelW) {
+  const call = _toolWinSeq.then(() =>
+    state.api.resize_window_for_panel(open, panelW)
+  );
+  _toolWinSeq = call.then(() => {}, () => {});
+  return call;
+}
+
+/** 等 viewport 真正变到新尺寸（resize 事件）或超时兜底后再回调。 */
+function _waitViewportSettle(cb) {
+  let done = false;
+  const fire = () => {
+    if (done) return;
+    done = true;
+    window.removeEventListener("resize", fire);
+    cb();
+  };
+  window.addEventListener("resize", fire);
+  setTimeout(fire, 200);
 }
 
 /**
- * 过渡期间把主区钉在屏幕原位（position:fixed + 流内占位），
- * 避免窗口/侧栏几何变化时 flex 主区瞬宽，空态「磁盘空间对比」重居中闪一下。
+ * 打开侧栏：先钉死主区当前宽度、一次性加宽窗口，侧栏再用 CSS 过渡
+ * 滑入新增的右侧区域，结束后解除钉宽。主区宽度全程不变。
+ *
+ * ``opts.silent`` 为真时（启动恢复）窗口宽度已按记住的值算好，
+ * 只展开侧栏，不伸缩窗口、不动画。
  */
-let _mainLockCount = 0;
-let _mainLockPlaceholder = null;
-let _mainLockPrevStyle = "";
-let _mainLockSize = null; // { w, h }
-
-function lockMainLayout() {
-  const main = document.querySelector(".main");
-  if (!main) return false;
-  if (_mainLockCount === 0) {
-    const r = main.getBoundingClientRect();
-    const w = Math.round(r.width);
-    const h = Math.round(r.height);
-    if (!(w > 0) || !(h > 0)) return false;
-    _mainLockPrevStyle = main.getAttribute("style") || "";
-    _mainLockSize = { w, h };
-    const ph = document.createElement("div");
-    ph.id = "mainLayoutPlaceholder";
-    ph.setAttribute("aria-hidden", "true");
-    ph.style.cssText = [
-      `flex:0 0 ${w}px`,
-      `width:${w}px`,
-      `min-width:${w}px`,
-      `max-width:${w}px`,
-      `height:${h}px`,
-      "align-self:stretch",
-      "visibility:hidden",
-      "pointer-events:none",
-      "overflow:hidden",
-    ].join(";");
-    main.parentNode.insertBefore(ph, main);
-    _mainLockPlaceholder = ph;
-    // fixed 钉在视口原位；窗口/侧栏变化时主区内容不再跟着重算
-    main.style.setProperty("position", "fixed", "important");
-    main.style.setProperty("left", `${Math.round(r.left)}px`, "important");
-    main.style.setProperty("top", `${Math.round(r.top)}px`, "important");
-    main.style.setProperty("width", `${w}px`, "important");
-    main.style.setProperty("height", `${h}px`, "important");
-    main.style.setProperty("right", "auto", "important");
-    main.style.setProperty("bottom", "auto", "important");
-    main.style.setProperty("margin", "0", "important");
-    main.style.setProperty("z-index", "4", "important");
-    main.style.setProperty("flex", "none", "important");
-    main.style.setProperty("max-width", "none", "important");
-    main.style.setProperty("min-width", "0", "important");
-    main.style.setProperty("box-sizing", "border-box", "important");
-  }
-  _mainLockCount += 1;
-  return true;
-}
-
-function unlockMainLayout() {
-  if (_mainLockCount <= 0) {
-    _mainLockCount = 0;
-    return;
-  }
-  _mainLockCount -= 1;
-  if (_mainLockCount > 0) return;
-  const main = document.querySelector(".main");
-  const size = _mainLockSize;
-  // 先按占位尺寸回到文档流（仍固定宽），再卸占位，最后一帧清回 flex:1，
-  // 避免 removeAttribute 瞬间主区被撑满再压回
-  if (main && size) {
-    main.style.cssText = [
-      `flex: 0 0 ${size.w}px`,
-      `width: ${size.w}px`,
-      `min-width: ${size.w}px`,
-      `max-width: ${size.w}px`,
-      "position: relative",
-      "left: auto",
-      "top: auto",
-      "right: auto",
-      "bottom: auto",
-      "z-index: auto",
-      "margin: 0",
-      "box-sizing: border-box",
-    ].join("; ");
-  } else if (main) {
-    if (_mainLockPrevStyle) main.setAttribute("style", _mainLockPrevStyle);
-    else main.removeAttribute("style");
-  }
-  if (_mainLockPlaceholder && _mainLockPlaceholder.parentNode) {
-    _mainLockPlaceholder.parentNode.removeChild(_mainLockPlaceholder);
-  }
-  _mainLockPlaceholder = null;
-  _mainLockPrevStyle = "";
-  _mainLockSize = null;
-  // 下一帧再恢复默认 flex，几何应已与收起后一致
-  requestAnimationFrame(() => {
-    if (_mainLockCount > 0) return;
-    const el = document.querySelector(".main");
-    if (!el) return;
-    el.style.flex = "";
-    el.style.width = "";
-    el.style.minWidth = "";
-    el.style.maxWidth = "";
-    el.style.position = "";
-    el.style.left = "";
-    el.style.top = "";
-    el.style.right = "";
-    el.style.bottom = "";
-    el.style.zIndex = "";
-    el.style.margin = "";
-    el.style.boxSizing = "";
-  });
-}
-
-function afterPaint() {
-  return new Promise((resolve) => {
-    requestAnimationFrame(() => requestAnimationFrame(resolve));
-  });
-}
-
-/** 等 WebView 内宽稳定，避免 resize 回包后内容区尚未跟上就显隐侧栏 */
-function waitInnerWidthStable(timeoutMs) {
-  const limit = typeof timeoutMs === "number" ? timeoutMs : 280;
-  return new Promise((resolve) => {
-    let last = window.innerWidth;
-    let same = 0;
-    const t0 = performance.now();
-    const tick = () => {
-      const w = window.innerWidth;
-      if (w === last) same += 1;
-      else {
-        same = 0;
-        last = w;
-      }
-      if (same >= 2 || performance.now() - t0 > limit) {
-        resolve(w);
-        return;
-      }
-      requestAnimationFrame(tick);
-    };
-    requestAnimationFrame(tick);
-  });
-}
-
-/**
- * 打开侧栏：钉主区 → 加宽窗口 → 显示面板 → 解锁。
- * （若不先钉住，窗口先变宽时主区被 flex 撑开，空态会闪到更宽区域的中心）
- * 快切时以最新目标为准（token 丢弃过期结果）。
- */
-function openToolPanel(tab) {
+function openToolPanel(tab, opts) {
   const panel = $("#toolPanel");
   if (!panel) return;
+  const silent = !!(opts && opts.silent);
   const wantTab =
     typeof tab === "string" && tab ? tab : (_tool.tab || "pending");
-  // 仅切页签、侧栏已开：不改窗口
   if (_tool.open && !panel.classList.contains("hidden")) {
     switchToolTab(wantTab);
     syncToolRailState();
@@ -307,31 +286,60 @@ function openToolPanel(tab) {
   }
   _tool.open = true;
   _tool.tab = wantTab;
-  // 先更新 rail 状态（箭头/badge），面板仍 hidden 直到窗口加宽完成
+  persistToolTab();
+  switchToolTab(wantTab);
   syncToolRailState();
-  const token = ++_toolWinToken;
-  _toolWinChain = _toolWinChain
-    .then(async () => {
-      if (token !== _toolWinToken || !_tool.open) return;
-      const locked = lockMainLayout();
+
+  const targetW = _toolPanelW;
+
+  if (silent) {
+    panel.classList.remove("hidden");
+    panel.classList.remove("collapsed");
+    _setToolPanelRawWidth(targetW);
+    syncToolPanelResizerVisibility();
+    return;
+  }
+
+  const gen = ++_toolAnimGen;
+  _pinMainWidth();
+  if (panel.classList.contains("hidden")) {
+    // 从收起态展开：先瞬时归零，再交给 CSS 过渡滑入
+    panel.style.transition = "none";
+    panel.classList.remove("hidden");
+    panel.classList.add("collapsed");
+    _setToolPanelRawWidth(0);
+    panel.getBoundingClientRect(); // 强制回流，让 0 宽先落地
+    panel.style.transition = "";
+  } else {
+    // 打断收起中的反向动画：从当前宽度直接过渡回目标宽
+    panel.classList.remove("collapsed");
+  }
+
+  const reveal = () => {
+    if (gen !== _toolAnimGen) return;
+    syncToolPanelResizerVisibility(); // resizer 跟着侧栏左缘滑入
+    panel.classList.remove("collapsed");
+    _setToolPanelRawWidth(targetW); // CSS 过渡 0 → targetW
+    setTimeout(() => {
+      if (gen !== _toolAnimGen) return;
+      _unpinMainWidth(); // 窗口已加宽到位，恢复 flex 布局无视觉变化
       try {
-        await syncWindowForToolPanel(true);
-        await waitInnerWidthStable(240);
-        if (token !== _toolWinToken) return;
-        if (!_tool.open) {
-          panel.classList.add("hidden");
-          return;
-        }
-        panel.classList.remove("hidden");
-        switchToolTab(_tool.tab || wantTab);
-        syncToolRailState();
-        await afterPaint();
-      } finally {
-        if (locked) unlockMainLayout();
-      }
+        state.api.set_tool_panel_open(true, targetW);
+      } catch (e) {}
+    }, _TOOL_ANIM_MS + 60);
+  };
+
+  // 先一次性加宽窗口；失败（最大化等）则退化为挤压主区的行为
+  _resizeWindowForPanel(true, targetW)
+    .then((r) => {
+      if (gen !== _toolAnimGen) return;
+      if (!r || !r.ok) _unpinMainWidth();
+      reveal();
     })
     .catch(() => {
-      if (!_tool.open) panel.classList.add("hidden");
+      if (gen !== _toolAnimGen) return;
+      _unpinMainWidth();
+      reveal();
     });
 }
 
@@ -341,7 +349,6 @@ function closeToolPanel() {
   if (!_tool.open && (!panel || panel.classList.contains("hidden"))) {
     return;
   }
-  // 逻辑上先标关闭；.open 只影响箭头样式，不再改 dock 占宽
   _tool.open = false;
   syncToolRailState();
   // 关闭侧栏时若 AI 在流式回复，停止（与原先 closeAiPanel 一致）
@@ -349,29 +356,29 @@ function closeToolPanel() {
     stopAiRequest();
   }
   if (typeof _ai !== "undefined") _ai.open = false;
-  const token = ++_toolWinToken;
-  _toolWinChain = _toolWinChain
-    .then(async () => {
-      if (token !== _toolWinToken) return;
-      // 等待期间又被打开：不缩窗、不藏面板（open 会接管）
-      if (_tool.open) return;
-      // 收起：先钉主区 → 再藏面板 → 再缩窗 → 解锁
-      // （若先藏面板/先去占宽，主区会瞬间变宽，空态居中闪一下）
-      const locked = lockMainLayout();
+  persistToolTab();
+
+  const gen = ++_toolAnimGen;
+  const keepW = _toolPanelW;
+  _pinMainWidth(); // 主区钉在当前宽，侧栏收走的区域先露背景
+  panel.classList.remove("hidden");
+  panel.classList.add("collapsed"); // CSS 过渡 width → 0
+  setTimeout(() => {
+    if (gen !== _toolAnimGen) return; // 被再次展开打断
+    panel.classList.add("hidden");
+    syncToolPanelResizerVisibility(); // resizer 随侧栏收完后消失
+    const finish = () => {
+      if (gen !== _toolAnimGen) return;
+      _unpinMainWidth();
       try {
-        if (panel) panel.classList.add("hidden");
-        await afterPaint();
-        if (token !== _toolWinToken || _tool.open) return;
-        await syncWindowForToolPanel(false);
-        await waitInnerWidthStable(240);
-        await afterPaint();
-      } finally {
-        if (locked) unlockMainLayout();
-      }
-    })
-    .catch(() => {
-      if (panel && !_tool.open) panel.classList.add("hidden");
-    });
+        state.api.set_tool_panel_open(false, keepW);
+      } catch (e) {}
+    };
+    // 先收窄窗口（原生异步），等 viewport 跟上再解钉，避免主区闪宽
+    _resizeWindowForPanel(false, keepW)
+      .then(() => _waitViewportSettle(finish))
+      .catch(() => finish());
+  }, _TOOL_ANIM_MS + 60);
 }
 
 function toggleToolPanel() {
@@ -384,6 +391,9 @@ function syncToolRailState() {
   const rail = $("#toolRailToggle");
   if (dock) dock.classList.toggle("open", !!_tool.open);
   if (rail) {
+    // rail 已搬到 comparebar 内，与 #toolDock 不再是祖先关系，CSS 选择器失效；
+    // 在按钮自身上同步 .open，让 CSS 可以直接匹配
+    rail.classList.toggle("open", !!_tool.open);
     rail.setAttribute("aria-expanded", _tool.open ? "true" : "false");
     // 不设 title，避免展开三角悬停冒泡提示
     rail.removeAttribute("title");
@@ -393,16 +403,16 @@ function syncToolRailState() {
   updatePendingBadge();
 }
 
-/** 有 AI 模块时显示 AI 页签；无则只保留待删除。 */
+/** 有 AI 模块时显示 AI 页签；无则隐藏。待删除与目录迁移常驻。 */
 function refreshToolTabsVisibility() {
   if (typeof applyModuleVisibility === "function") applyModuleVisibility();
   const aiOn = typeof hasModule === "function" && hasModule("ai");
   if (!aiOn && _tool.tab === "ai") {
     switchToolTab("pending");
   }
-  // 无 AI 时隐藏页签栏的 AI 按钮已由 module-off 处理；仅一项时弱化 tab 外观
+  // 待删除 + 目录迁移至少两项常驻，单页签弱化样式不再适用
   const tabs = document.querySelector(".tool-tabs");
-  if (tabs) tabs.classList.toggle("tool-tabs-single", !aiOn);
+  if (tabs) tabs.classList.remove("tool-tabs-single");
   syncToolRailState();
 }
 
@@ -434,6 +444,10 @@ function switchToolTab(tabId) {
   if (tab === "pending") {
     renderPendingList();
   }
+  if (tab === "link" && typeof refreshLinkList === "function") {
+    refreshLinkList(false);
+  }
+  if (_tool.open) persistToolTab();
 }
 
 /** 供 AI 模块复用：打开侧栏并切到 AI。 */
@@ -1249,6 +1263,7 @@ async function executePendingDeletes() {
 
 function wirePendingUi() {
   wireToolPanelResizer();
+  restoreToolPanelState();
   const sortBtn = $("#pendingSortBtn");
   if (sortBtn) {
     sortBtn.addEventListener("click", (e) => {

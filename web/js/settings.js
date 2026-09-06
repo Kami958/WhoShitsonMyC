@@ -42,6 +42,7 @@ async function loadSettings() {
     use_mft: !!s.use_mft,
     search_memory_index: s.search_memory_index !== false,
     temp_cleanup: s.temp_cleanup !== false,
+    auto_check_updates: s.auto_check_updates !== false,
     remember_window_size: s.remember_window_size !== false,
     log_sanitize: s.log_sanitize !== false,
     log_level: _normalizeLogLevel(s.log_level),
@@ -245,6 +246,10 @@ function fillSettingsFormFromDraft() {
   const tempCleanupChk = $("#tempCleanupChk");
   if (tempCleanupChk) {
     tempCleanupChk.checked = d.temp_cleanup !== false;
+  }
+  const autoCheckUpdateChk = $("#autoCheckUpdateChk");
+  if (autoCheckUpdateChk) {
+    autoCheckUpdateChk.checked = d.auto_check_updates !== false;
   }
   const logSanitizeChk = $("#logSanitizeChk");
   if (logSanitizeChk) {
@@ -797,6 +802,7 @@ async function applySettingsAndClose() {
   const searchMemIdxChk = $("#searchMemIdxChk");
   const rememberWinSizeChk = $("#rememberWinSizeChk");
   const tempCleanupChk = $("#tempCleanupChk");
+  const autoCheckUpdateChk = $("#autoCheckUpdateChk");
   const logSanitizeChk = $("#logSanitizeChk");
   const logLevelSel = $("#logLevelSel");
   const uiParentStyleChk = $("#uiParentStyleChk");
@@ -814,6 +820,9 @@ async function applySettingsAndClose() {
     temp_cleanup: tempCleanupChk
       ? !!tempCleanupChk.checked
       : (_settingsDraft.temp_cleanup !== false),
+    auto_check_updates: autoCheckUpdateChk
+      ? !!autoCheckUpdateChk.checked
+      : (_settingsDraft.auto_check_updates !== false),
     log_sanitize: logSanitizeChk
       ? !!logSanitizeChk.checked
       : (_settingsDraft.log_sanitize !== false),
@@ -1001,6 +1010,7 @@ async function resetSettingsToDefaults() {
     use_mft: !!res.use_mft,
     search_memory_index: res.search_memory_index !== false,
     temp_cleanup: res.temp_cleanup !== false,
+    auto_check_updates: res.auto_check_updates !== false,
     log_sanitize: res.log_sanitize !== false,
     log_level: _normalizeLogLevel(res.log_level),
     snapshot_dir: "",

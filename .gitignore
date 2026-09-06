@@ -13,6 +13,7 @@ env/
 
 # 测试 / 工具缓存
 .pytest_cache/
+.pytest_tmp/
 .mypy_cache/
 .ruff_cache/
 .coverage
@@ -51,3 +52,5 @@ dict/scan-timing.jsonl
 *.scan-timing.jsonl
 /claude.md
 /AGENTS.md
+/.workbuddy/
+/.zcode/

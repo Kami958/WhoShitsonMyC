@@ -160,3 +160,44 @@ def test_scan_file_as_root_raises(make_tree, tmp_path):
     file_path = os.path.join(root, "a.txt")
     with pytest.raises(NotADirectoryError):
         scan_to_snapshot(file_path, os.path.join(tmp_path, "x.db"))
+
+
+def test_link_target_strips_prefix(monkeypatch):
+    """_link_target 取 readlink 结果并剥掉内核前缀（junction / UNC）。"""
+    import core.scanner as scanner
+
+    monkeypatch.setattr(
+        scanner.os, "readlink", lambda p: "\\\\?\\D:\\360download\\目标"
+    )
+    assert scanner._link_target("x") == r"D:\360download\目标"
+
+    monkeypatch.setattr(
+        scanner.os, "readlink", lambda p: "\\\\?\\UNC\\server\\share"
+    )
+    assert scanner._link_target("x") == r"\\server\share"
+
+    def boom(_p):
+        raise OSError(5, "access denied")
+
+    monkeypatch.setattr(scanner.os, "readlink", boom)
+    assert scanner._link_target("x") == ""
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction only")
+def test_real_junction_link_target(make_tree, tmp_path, snapshot_map):
+    """Windows 实测：_winapi.CreateJunction 建的目录联接，readlink 取到目标。"""
+    import _winapi
+
+    root = make_tree({"real": {"a.txt": 10}})
+    link = os.path.join(root, "link")
+    try:
+        _winapi.CreateJunction(os.path.join(root, "real"), link)
+    except (OSError, ValueError) as exc:  # 无权限/非 NTFS 时跳过，不误报
+        pytest.skip(f"Cannot create junction: {exc}")
+
+    db, _ = _scan(root, tmp_path)
+    entries = snapshot_map(db)
+    got = entries[os.path.join("link")]
+    assert got.is_dir is True
+    assert got.reparse_tag == 0xA0000003
+    assert got.link_target == os.path.join(root, "real")

@@ -234,6 +234,37 @@ function wireEvents() {
       collapseAllTree();
     };
   }
+  const gotoPathBtn = $("#gotoPathBtn");
+  if (gotoPathBtn) {
+    gotoPathBtn.onclick = (e) => {
+      e.stopPropagation();
+      openGotoPathDialog();
+    };
+  }
+  const gotoPathSave = $("#gotoPathSaveBtn");
+  if (gotoPathSave) {
+    gotoPathSave.onclick = () => submitGotoPath();
+  }
+  const gotoPathCancel = $("#gotoPathCancelBtn");
+  if (gotoPathCancel) gotoPathCancel.onclick = closeGotoPathDialog;
+  const gotoPathClose = $("#gotoPathCloseBtn");
+  if (gotoPathClose) gotoPathClose.onclick = closeGotoPathDialog;
+  const gotoPathOverlay = $("#gotoPathOverlay");
+  if (gotoPathOverlay) {
+    gotoPathOverlay.onclick = (e) => {
+      if (e.target === gotoPathOverlay) closeGotoPathDialog();
+    };
+  }
+  const gotoPathInput = $("#gotoPathInput");
+  if (gotoPathInput) {
+    gotoPathInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        submitGotoPath();
+      }
+      if (e.key === "Escape") closeGotoPathDialog();
+    });
+  }
 
   const treeMultiSelectBtn = $("#treeMultiSelectBtn");
   if (treeMultiSelectBtn) {
@@ -622,6 +653,7 @@ async function boot() {
   applyThemeButton(false);
   wireEvents();
   if (typeof wirePendingUi === "function") wirePendingUi();
+  if (typeof wireLinkUi === "function") wireLinkUi();
   if (typeof wireAiUi === "function") wireAiUi();
   await reconcileLang(); // 内部会 applyThemeButton + scheduleTitlebarSync
   // 先探测可选模块，再加载设置（AI 设置分节依赖 list_modules）
@@ -634,7 +666,19 @@ async function boot() {
     } catch (e) {}
   }
   loadSnapshots();
+  // 旧版 localStorage 侧栏状态先迁进 YAML，loadSettings 才能读到权威值
+  if (typeof migrateToolPanelStateLegacy === "function") {
+    try {
+      await migrateToolPanelStateLegacy();
+    } catch (e) {}
+  }
   await loadSettings();
+  // 按 YAML 渲染侧栏宽度与展开状态（展开不回调后端，启动宽度已算好）
+  if (typeof syncToolPanelFromSettings === "function") {
+    try {
+      syncToolPanelFromSettings();
+    } catch (e) {}
+  }
   // 非管理员：启动 toast 推荐提权（MFT / 系统路径完整性）
   if (state._settings && state._settings.is_admin === false) {
     toast(t("recommendAdminToast"));

@@ -67,6 +67,10 @@ def _merge_extensions(
             base.mtime = ext.mtime
         if ext.has_reparse:
             base.has_reparse = True
+        if ext.reparse_tag and not base.reparse_tag:
+            base.reparse_tag = ext.reparse_tag
+        if ext.link_target and not base.link_target:
+            base.link_target = ext.link_target
         if ext.is_directory:
             base.is_directory = True
     return by_num
@@ -103,6 +107,8 @@ def _build_from_base(
     data_size: dict[int, int] | list[int],
     mtime: dict[int, int] | list[int],
     children: dict[int, list[tuple[int, str, int]]],
+    reparse_tag: dict[int, int] | list[int] | None = None,
+    link_target: dict[int, str] | list[str] | None = None,
     follow_reparse: bool = False,
     progress: Progress | None = None,
     cancel: Cancel | None = None,
@@ -114,8 +120,9 @@ def _build_from_base(
 
     ``children[parent_mft] = [(child_mft, name, fn_real_size), ...]``
 
-    ``is_dir`` / ``data_size`` / ``mtime`` 可为 dict（ParsedRecord 路径）
-    或按 mft 号下标的平铺数组（紧凑路径）；数组路径须同时传 ``live``。
+    ``is_dir`` / ``data_size`` / ``mtime`` / ``reparse_tag`` / ``link_target``
+    可为 dict（ParsedRecord 路径）或按 mft 号下标的平铺数组（紧凑路径）；
+    数组路径须同时传 ``live``。
     """
     _ = follow_reparse  # 预留
     _span_start = getattr(timer, "span_start", None)
@@ -126,6 +133,8 @@ def _build_from_base(
         assert isinstance(is_dir, (list, bytearray))
         assert isinstance(data_size, list)
         assert isinstance(mtime, list)
+        assert isinstance(reparse_tag, list)
+        assert isinstance(link_target, list)
 
         def _alive(m: int) -> bool:
             return 0 <= m < len(live) and bool(live[m])  # type: ignore[arg-type]
@@ -138,6 +147,12 @@ def _build_from_base(
 
         def _mtime(m: int) -> int:
             return mtime[m]
+
+        def _rtag(m: int) -> int:
+            return reparse_tag[m]  # type: ignore[index]
+
+        def _ltarget(m: int) -> str:
+            return link_target[m]  # type: ignore[index]
     else:
         assert isinstance(is_dir, dict)
         assert isinstance(data_size, dict)
@@ -155,6 +170,12 @@ def _build_from_base(
         def _mtime(m: int) -> int:
             return mtime.get(m, 0)  # type: ignore[union-attr]
 
+        def _rtag(m: int) -> int:
+            return int((reparse_tag or {}).get(m, 0))  # type: ignore[union-attr,attr-defined]
+
+        def _ltarget(m: int) -> str:
+            return str((link_target or {}).get(m, ""))  # type: ignore[union-attr,attr-defined]
+
     if _span_start:
         _span_start("mft_tree_bfs")
 
@@ -166,6 +187,8 @@ def _build_from_base(
     is_dir_arr: list[bool] = [False, True]
     mtime_arr: list[int] = [0, root_mtime]
     file_size_arr: list[int] = [0, 0]
+    rtag_sid_arr: list[int] = [0, 0]  # 按 sid 索引（BFS 时从 mft 号查值转过来）
+    ltarget_sid_arr: list[str] = ["", ""]  # 同 rtag：链接目标按 sid 索引
 
     next_id = 2
     primary_sid: dict[int, int] = {MFT_ROOT: 1}
@@ -197,6 +220,8 @@ def _build_from_base(
             is_dir_arr.append(c_is_dir)
             mtime_arr.append(_mtime(child_mft))
             file_size_arr.append(fsize)
+            rtag_sid_arr.append(_rtag(child_mft))
+            ltarget_sid_arr.append(_ltarget(child_mft))
 
             if c_is_dir and child_mft not in primary_sid:
                 primary_sid[child_mft] = sid
@@ -235,7 +260,13 @@ def _build_from_base(
         if is_dir_arr[sid]:
             dir_count += 1
             row = EntryRow.directory(
-                sid, parent_sid_arr[sid], name_arr[sid], acc[sid], mtime_arr[sid]
+                sid,
+                parent_sid_arr[sid],
+                name_arr[sid],
+                acc[sid],
+                mtime_arr[sid],
+                reparse_tag=rtag_sid_arr[sid],
+                link_target=ltarget_sid_arr[sid],
             )
         else:
             file_count += 1
@@ -245,6 +276,8 @@ def _build_from_base(
                 name_arr[sid],
                 file_size_arr[sid],
                 mtime_arr[sid],
+                reparse_tag=rtag_sid_arr[sid],
+                link_target=ltarget_sid_arr[sid],
             )
         if keep_all:
             rows.append(row)
@@ -298,31 +331,35 @@ def build_entry_rows_from_compact(
     is_dir_arr = bytearray(n)  # 0/1
     data_size_arr = [0] * n
     mtime_arr = [0] * n
+    reparse_tag_arr = [0] * n
+    link_target_arr = [""] * n
     # extension：ext → base；多数卷 extension 很少，dict 足够
     base_of: dict[int, int] = {}
-    # extension 暂存 (flags, mt, dsz)，第二遍并到 base
-    ext_attrs: list[tuple[int, int, int, int]] = []  # ext, flags, mt, dsz
+    # extension 暂存 (flags, mt, dsz, rtag)，第二遍并到 base；
+    # ext 记录的链接目标经 table.link_targets 用 base_of 转回 base
+    ext_attrs: list[tuple[int, int, int, int, int]] = []
 
     for i in range(n):
-        # flags 在 meta 每条 24B 的第 0 字节
+        # flags 在 meta 每条 28B 的第 0 字节
         flags = meta[i * META_SIZE]
         if flags & F_NONE:
             continue
         if not (flags & F_IN_USE):
             continue
         # 完整 unpack 只对 in-use 记录
-        _f, _pad, _nnames, base, mt, dsz = META.unpack_from(meta, i * META_SIZE)
+        _f, _pad, _nnames, base, mt, dsz, rtag = META.unpack_from(meta, i * META_SIZE)
         if base != 0 and base != i:
             base_of[i] = base
-            ext_attrs.append((i, flags, mt, dsz))
+            ext_attrs.append((i, flags, mt, dsz, rtag))
             continue
         live[i] = 1
         is_dir_arr[i] = 1 if (flags & F_IS_DIR) else 0
         data_size_arr[i] = dsz
         mtime_arr[i] = mt
+        reparse_tag_arr[i] = rtag
         _ = flags & F_REPARSE  # 预留 follow_reparse
 
-    for ext_num, flags, mt, dsz in ext_attrs:
+    for ext_num, flags, mt, dsz, rtag in ext_attrs:
         base_num = base_of[ext_num]
         if base_num < 0 or base_num >= n or not live[base_num]:
             continue
@@ -332,9 +369,18 @@ def build_entry_rows_from_compact(
             data_size_arr[base_num] = dsz
         if mt and not mtime_arr[base_num]:
             mtime_arr[base_num] = mt
+        if rtag and not reparse_tag_arr[base_num]:
+            reparse_tag_arr[base_num] = rtag
 
     if MFT_ROOT >= n or not live[MFT_ROOT]:
         raise MftTreeError("MFT root record #5 missing")
+
+    # 链接目标按记录号收进数组，再在 BFS 里随 sid 一起转到 sid 空间
+    for rel, target in table.link_targets:
+        if 0 <= rel < n:
+            base_num = base_of.get(rel, rel)
+            if base_num >= 0 and base_num < n and not link_target_arr[base_num]:
+                link_target_arr[base_num] = target
 
     # names 按记录序连续；同记录局部 has_win/seen，一遍直建 children
     children: dict[int, list[tuple[int, str, int]]] = defaultdict(list)
@@ -376,6 +422,8 @@ def build_entry_rows_from_compact(
         data_size=data_size_arr,
         mtime=mtime_arr,
         children=children,
+        reparse_tag=reparse_tag_arr,
+        link_target=link_target_arr,
         follow_reparse=follow_reparse,
         progress=progress,
         cancel=cancel,
@@ -410,6 +458,8 @@ def build_entry_rows(
     is_dir = {num: rec.is_directory for num, rec in by_num.items()}
     data_size = {num: rec.data_size for num, rec in by_num.items()}
     mtime = {num: rec.mtime for num, rec in by_num.items()}
+    reparse_tag = {num: rec.reparse_tag for num, rec in by_num.items()}
+    link_target = {num: rec.link_target for num, rec in by_num.items()}
     children: dict[int, list[tuple[int, str, int]]] = defaultdict(list)
     for parent, lst in edges.items():
         for child_mft, fn in lst:
@@ -421,6 +471,8 @@ def build_entry_rows(
         data_size=data_size,
         mtime=mtime,
         children=children,
+        reparse_tag=reparse_tag,
+        link_target=link_target,
         follow_reparse=follow_reparse,
         progress=progress,
         cancel=cancel,

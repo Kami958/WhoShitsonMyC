@@ -300,7 +300,12 @@ function hydrateOpenDirs(rootEl, depth) {
     if (twisty) twisty.classList.add("open");
     row.classList.add("expanded");
     if (!children.querySelector(".node")) {
-      children.innerHTML = `<div class="child-loading">${t("noMatchChild")}</div>`;
+      const ph = document.createElement("div");
+      ph.className = "child-loading";
+      // 对齐到下一级目录行缩进，与子节点行最左对齐
+      ph.style.paddingLeft = `${14 + (depth + 1) * 20}px`;
+      ph.textContent = t("noMatchChild");
+      children.appendChild(ph);
     } else {
       hydrateOpenDirs(children, depth + 1);
     }
@@ -545,11 +550,12 @@ const FILTER_OPTIONS = [
   { value: "shrank", key: "filterShrank" },
   { value: "added", key: "filterAdded", slowHint: "filterReRenderHint" },
   { value: "removed", key: "filterRemoved", slowHint: "filterReRenderHint" },
+  { value: "link", key: "filterLink", slowHint: "filterReRenderHint" },
 ];
 
-/** 是否启用依赖「目录子树含新增/删除」标记的筛选。 */
+/** 是否启用依赖「目录子树含新增/删除/链接」标记的筛选。 */
 function isSubtreeFilter() {
-  return state.filter === "added" || state.filter === "removed";
+  return state.filter === "added" || state.filter === "removed" || state.filter === "link";
 }
 
 const SNAP_SORT_OPTIONS = [
@@ -1245,8 +1251,6 @@ function _waitPreheatTerminal() {
 
 /** 过滤判定：某节点在当前过滤下是否显示。 */
 function matchFilter(node) {
-  // 搜索定位时临时展示全部节点（含大小未变），否则中间路径会被藏掉
-  if (state._showAllForLocate) return true;
   // 占用浏览：展示整层，按 size 排序即可
   if (isBrowseMode()) return true;
   // 变化方向
@@ -1264,6 +1268,11 @@ function matchFilter(node) {
     const isRemoved = node.kind === "removed";
     const containsRemoved = node.is_dir && node.has_removed;
     if (!isRemoved && !containsRemoved) return false;
+  } else if (state.filter === "link") {
+    // 链接节点自身，或递归范围内含链接的目录（作下钻入口）。
+    const isLink = !!node.link_kind;
+    const containsLink = node.is_dir && node.has_link;
+    if (!isLink && !containsLink) return false;
   } else if (node.kind === "incomparable") {
     // all：不可比节点照常显示
   } else if (node.delta === 0) {
@@ -1369,6 +1378,8 @@ function buildLevel(nodes, depth) {
   if (visible.length > PER_LEVEL_CAP) {
     const more = document.createElement("div");
     more.className = "show-more";
+    // 本层「显示更多」对齐到下一级目录行的缩进，与子节点行最左对齐
+    more.style.paddingLeft = `${14 + (depth + 1) * 20}px`;
     let shown = renderCount;
     more.textContent = t("showMore", visible.length - shown);
     more.onclick = () => {
@@ -1422,12 +1433,31 @@ function buildNode(node, depth, ref) {
     : node.kind === "added" ? `<span class="node-tag added">${t("tagAdded")}</span>`
     : node.kind === "removed" ? `<span class="node-tag removed">${t("tagRemoved")}</span>`
     : "";
+  // 链接类型徽标（目录联接 / 符号链接 / 其它链接）。浏览与对比模式都打。
+  // title 悬浮解释该链接是什么；拿到目标路径时追加一行「链接到 X」。
+  const linkTag = node.link_kind
+    ? (() => {
+        const isJunction = node.link_kind === "junction";
+        const isSymlink = node.link_kind === "symlink";
+        const typeText = isJunction ? t("tagJunction") : isSymlink ? t("tagSymlink") : t("tagReparse");
+        const typeTitle = isJunction ? t("tagJunctionTitle") : isSymlink ? t("tagSymlinkTitle") : t("tagReparseTitle");
+        // link_target 是动态值，插进 title 必须转义
+        const targetLine = node.link_target
+          ? escapeHtml(t("linkTargetLine", node.link_target))
+          : "";
+        return `<span class="node-tag link" title="${escapeHtml(typeTitle)}${targetLine}">${typeText}</span>`;
+      })()
+    : "";
+  // 命中删除白名单时显示「白名单」徽标；浏览与对比模式都打。
+  const whitelistTag = node.whitelisted
+    ? `<span class="node-tag whitelist" title="${escapeHtml(t("tagWhitelistTitle"))}">${t("tagWhitelist")}</span>`
+    : "";
 
   row.innerHTML = `
     <span class="twisty">${canExpand ? "▸" : ""}</span>
     <span class="node-icon">${node.is_dir ? "📁" : "📄"}</span>
     <span class="node-name">${escapeHtml(node.name || node.path)}</span>
-    ${tag}
+    ${tag}${linkTag}${whitelistTag}
     <span class="node-fill"></span>
     <span class="node-bar"><i style="width:${barPct}%"></i></span>
     <span class="node-delta"><span class="delta-val">${deltaText}</span>${canExpand ? '<span class="delta-arrow"></span>' : ''}</span>`;
@@ -1483,6 +1513,25 @@ function collapseAllTree() {
   }
   for (const r of tree.querySelectorAll(".node.expanded")) {
     r.classList.remove("expanded");
+  }
+}
+
+/** 折叠某目录节点及其子树内所有已展开目录（仅隐藏展开态，不卸载已加载子节点）。 */
+function collapseNodeSubtree(path) {
+  const tree = $("#tree");
+  if (!tree) return;
+  const row = tree.querySelector(`.node[data-path="${cssEscapeAttr(path)}"]`);
+  const group = row ? row.closest(".node-group") : null;
+  if (!group) return;
+  for (const ch of group.querySelectorAll(".children")) {
+    ch.classList.add("hidden");
+  }
+  for (const tw of group.querySelectorAll(".twisty.open")) {
+    tw.classList.remove("open");
+  }
+  for (const r of group.querySelectorAll(".node.expanded")) {
+    r.classList.remove("expanded");
+    if (r.dataset.path != null) markPathOpen(r.dataset.path, false);
   }
 }
 
@@ -1925,60 +1974,54 @@ function buildSearchItem(node, query) {
 /**
  * 沿路径逐段展开对比树并滚动到目标节点。
  * 临时展示「含未变节点」，否则中间路径在默认筛选下会被隐藏。
+ * @param {string} targetPath 相对路径
+ * @param {{silent?: boolean}} [opts] silent=true 时定位失败不发内部 toast
+ * @returns {Promise<boolean>} 完整定位成功返回 true
  */
-async function locateTreePath(targetPath) {
-  if (!targetPath || !state.compared) return;
+async function locateTreePath(targetPath, opts) {
+  if (!targetPath || !state.compared) return false;
+  const silent = !!(opts && opts.silent);
   const normTarget = _normTreePath(targetPath);
   const parts = normTarget.split("\\").filter(Boolean);
-  if (!parts.length) return;
+  if (!parts.length) return false;
 
   const tree = $("#tree");
-  if (!tree) return;
+  if (!tree) return false;
 
-  const prevShowAll = !!state._showAllForLocate;
-  state._showAllForLocate = true;
-  try {
-    // 重新渲染顶层，带上未变节点
-    if (state._topNodes) renderTopLevel(state._topNodes);
+  let prefix = "";
+  for (let i = 0; i < parts.length; i++) {
+    prefix = prefix ? `${prefix}\\${parts[i]}` : parts[i];
+    const isLast = i === parts.length - 1;
+    let row = tree.querySelector(`.node[data-path="${cssEscapeAttr(prefix)}"]`);
 
-    let prefix = "";
-    for (let i = 0; i < parts.length; i++) {
-      prefix = prefix ? `${prefix}\\${parts[i]}` : parts[i];
-      const isLast = i === parts.length - 1;
-      let row = tree.querySelector(`.node[data-path="${cssEscapeAttr(prefix)}"]`);
-
-      // 本层可能被 PER_LEVEL_CAP 截断：点「显示更多」直到出现或耗尽
-      if (!row) {
-        row = await revealCappedNode(tree, prefix);
-      }
-      if (!row) {
-        toast(t("treeSearchLocateFailed", prefix), true);
-        return;
-      }
-      if (!isLast) {
-        const group = row.parentElement;
-        const children = group && group.querySelector(":scope > .children");
-        if (children) {
-          const needOpen =
-            children.classList.contains("hidden") ||
-            children.dataset.loaded !== "1";
-          if (needOpen) {
-            row.click();
-            await waitForChildrenLoaded(children);
-          }
-        }
-      } else {
-        row.classList.remove("flash-hit");
-        void row.offsetWidth;
-        row.classList.add("flash-hit");
-        row.scrollIntoView({ block: "center", behavior: "smooth" });
-      }
+    // 本层可能被 PER_LEVEL_CAP 截断：点「显示更多」直到出现或耗尽
+    if (!row) {
+      row = await revealCappedNode(tree, prefix);
     }
-  } finally {
-    state._showAllForLocate = prevShowAll;
-    // 定位结束后恢复当前筛选视图，但保留已展开的 DOM 以免整树折叠
-    // （仅顶层若需严格一致可再 renderTopLevel；这里不重绘以免丢掉展开状态）
+    if (!row) {
+      if (!silent) toast(t("treeSearchLocateFailed", prefix), true);
+      return false;
+    }
+    if (!isLast) {
+      const group = row.parentElement;
+      const children = group && group.querySelector(":scope > .children");
+      if (children) {
+        const needOpen =
+          children.classList.contains("hidden") ||
+          children.dataset.loaded !== "1";
+        if (needOpen) {
+          row.click();
+          await waitForChildrenLoaded(children);
+        }
+      }
+    } else {
+      row.classList.remove("flash-hit");
+      void row.offsetWidth;
+      row.classList.add("flash-hit");
+      row.scrollIntoView({ block: "center", behavior: "smooth" });
+    }
   }
+  return true;
 }
 
 /** 在当前树中点击「显示更多」直到出现指定 path 的节点，或没有更多。 */
@@ -2031,6 +2074,113 @@ function waitForChildrenLoaded(childrenEl, timeoutMs = 8000) {
   });
 }
 
+// ---- 路径跳转定位 ----
+
+function openGotoPathDialog() {
+  if (!state.compared) {
+    toast(t("gotoPathNeedCompare"), true);
+    return;
+  }
+  const overlay = $("#gotoPathOverlay");
+  if (!overlay) return;
+  const hint = $("#gotoPathHint");
+  const root = state.compareRoot || "";
+  const base = t("gotoPathHint", root);
+  // 对比模式只展示有变化的目录；浏览模式展示完整树。
+  const modeNote = isBrowseMode() ? "" : "\n" + t("gotoPathCompareModeNote");
+  if (hint) hint.textContent = base + modeNote;
+  const input = $("#gotoPathInput");
+  if (input) {
+    input.value = "";
+    input.disabled = false;
+    setTimeout(() => {
+      try { input.focus(); } catch (e) {}
+    }, 0);
+  }
+  overlay.classList.remove("hidden");
+}
+
+function closeGotoPathDialog() {
+  const overlay = $("#gotoPathOverlay");
+  if (overlay) overlay.classList.add("hidden");
+}
+
+/** 用户输入 → 相对路径；根不匹配（绝对路径在别的盘）返回 null。 */
+function resolveInputPath(input) {
+  const raw = String(input || "").trim().replace(/\//g, "\\");
+  if (!raw) return null;
+  const root = String(state.compareRoot || "").trim().replace(/[\\/]+$/, "");
+  if (!root) return raw; // 无扫描根时按相对路径处理
+  const norm = raw.replace(/[\\/]+$/, "");
+  if (norm.toLowerCase() === root.toLowerCase()) return ""; // 根自身
+  if (norm.toLowerCase().startsWith(root.toLowerCase() + "\\")) {
+    return norm.slice(root.length + 1);
+  }
+  // 绝对路径（盘符或 UNC）但不匹配扫描根：不可定位
+  if (/^[a-zA-Z]:[\\/]/.test(norm) || norm.startsWith("\\\\")) return null;
+  return norm; // 相对路径
+}
+
+/**
+ * 跳转定位：先按完整路径定位，失败则逐段去掉末段重试，
+ * 直到能匹配的最深一层并定位过去。
+ */
+async function gotoPath(input) {
+  const rel = resolveInputPath(input);
+  if (rel === null) {
+    showGotoPathHint(t("gotoPathRootMismatch"));
+    return;
+  }
+  const parts = rel.split("\\").filter(Boolean);
+  if (!parts.length) {
+    // 输入即扫描根：顶层已展示，把第一行滚到视野内即可
+    closeGotoPathDialog();
+    const first = $("#tree .node");
+    if (first) first.scrollIntoView({ block: "start", behavior: "smooth" });
+    return;
+  }
+  for (let i = parts.length; i > 0; i--) {
+    const prefix = parts.slice(0, i).join("\\");
+    const ok = await locateTreePath(prefix, { silent: true });
+    if (ok) {
+      closeGotoPathDialog();
+      if (i < parts.length) {
+        toast(t("gotoPathPartial", prefix));
+      }
+      return;
+    }
+  }
+  showGotoPathHint(
+    isBrowseMode()
+      ? t("gotoPathNotFound", rel)
+      : t("gotoPathNotFound", rel) + "\n" + t("gotoPathNotFoundCompareHint")
+  );
+}
+
+/** 在对话框 hint 区显示错误，不关闭对话框，方便用户修改后重试。 */
+function showGotoPathHint(text) {
+  const hint = $("#gotoPathHint");
+  if (hint) hint.textContent = text;
+  const input = $("#gotoPathInput");
+  if (input) {
+    input.disabled = false;
+    try { input.focus(); } catch (e) {}
+  }
+}
+
+/** 对话框「定位」按钮 / 回车：取输入后执行 gotoPath。 */
+async function submitGotoPath() {
+  const input = $("#gotoPathInput");
+  const value = input ? String(input.value || "").trim() : "";
+  if (!value) {
+    showGotoPathHint(t("gotoPathEmpty"));
+    return;
+  }
+  if (input) input.disabled = true;
+  await gotoPath(value);
+  if (input) input.disabled = false;
+}
+
 // ---- 右键菜单 ----
 
 function openCtxMenu(e, node) {
@@ -2042,6 +2192,13 @@ function openCtxMenu(e, node) {
     el.classList.toggle("ctx-skipped-hide", isSkipped && el.dataset.cmd !== "reveal");
   });
   if (!isSkipped) {
+    const collapse = menu.querySelector('[data-cmd="collapse"]');
+    if (collapse) collapse.classList.toggle("hidden", !(node && node.is_dir && node.has_children));
+    const migrate = menu.querySelector('[data-cmd="migrate"]');
+    if (migrate) {
+      // 只有真实目录可迁移；链接目录已是 junction，迁移无意义
+      migrate.classList.toggle("hidden", !(node && node.is_dir && !node.link_kind));
+    }
     const bulk = menu.querySelector('[data-cmd="delete-selected"]');
     if (bulk) {
       const n = treeSelectionCount();
@@ -2072,6 +2229,15 @@ async function ctxCommand(cmd) {
   } else if (cmd === "copy") {
     const p = fullPath(state.compareRoot, node.path);
     toast((await copyText(p)) ? t("copied", p) : t("copyFailed"), false);
+  } else if (cmd === "collapse") {
+    collapseNodeSubtree(node.path);
+  } else if (cmd === "migrate") {
+    const abs = fullPath(state.compareRoot, node.path);
+    if (typeof openMigrateTab === "function") {
+      openMigrateTab(abs);
+    } else {
+      toast(t("migrateNeedCompare"), true);
+    }
   } else if (cmd === "delete") {
     if (typeof addCompareNodeToPending === "function") {
       addCompareNodeToPending(node);
@@ -2145,7 +2311,12 @@ async function toggleDir(node, row, children, depth) {
       !children.querySelector(".node") &&
       !children.querySelector(".child-error")
     ) {
-      children.innerHTML = `<div class="child-loading">${t("loading")}</div>`;
+      const ph = document.createElement("div");
+      ph.className = "child-loading";
+      // 对齐到下一级目录行缩进
+      ph.style.paddingLeft = `${14 + (depth + 1) * 20}px`;
+      ph.textContent = t("loading");
+      children.appendChild(ph);
     }
   }, 150);
 
@@ -2158,13 +2329,22 @@ async function toggleDir(node, row, children, depth) {
     children.appendChild(buildLevel(nodes, depth + 1));
     children.dataset.loaded = "1";
     if (!children.querySelector(".node")) {
-      children.innerHTML = `<div class="child-loading">${t("noMatchChild")}</div>`;
+      const ph = document.createElement("div");
+      ph.className = "child-loading";
+      ph.style.paddingLeft = `${14 + (depth + 1) * 20}px`;
+      ph.textContent = t("noMatchChild");
+      children.appendChild(ph);
     }
   } catch (err) {
     clearTimeout(loadingTimer);
     if (children.classList.contains("hidden")) return;
     const msg = err && err.message ? err.message : String(err);
-    children.innerHTML = `<div class="child-error">${escapeHtml(t("loadFailed", msg))}</div>`;
+    const errEl = document.createElement("div");
+    errEl.className = "child-error";
+    errEl.style.paddingLeft = `${14 + (depth + 1) * 20}px`;
+    errEl.textContent = t("loadFailed", msg);
+    children.innerHTML = "";
+    children.appendChild(errEl);
     children.dataset.loaded = "";
   }
 }
