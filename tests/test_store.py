@@ -794,3 +794,71 @@ def test_yaml_keeps_unknown_keys_and_sections(tmp_path):
     assert get_scan_workers() == 8
     assert store.get_ai_settings()["enabled"] is True
     assert store.get_ai_settings()["model"] == "m1"
+
+
+# ---- 工具侧栏状态持久化 ----
+
+
+def test_tool_panel_defaults():
+    assert store.get_tool_panel_open() is False
+    assert store.get_tool_panel_width() == 340
+    assert store.has_explicit_tool_panel_open() is False
+
+
+def test_tool_panel_set_open_marks_explicit_and_persists():
+    assert store.set_tool_panel_open(True) is True
+    assert store.has_explicit_tool_panel_open() is True
+    d = store.settings_dict()
+    assert d["ui_tool_panel_open"] is True
+    assert d["ui_tool_panel_open_explicit"] is True
+    # 写盘后重读，值不丢
+    store._persist()
+    _apply_loaded(_load_settings_yaml(settings_path()))
+    assert store.get_tool_panel_open() is True
+
+
+def test_tool_panel_width_clamped():
+    assert store.set_tool_panel_width(100) == 240
+    assert store.set_tool_panel_width(99999) == 640
+    assert store.set_tool_panel_width("abc") == 340
+    assert store.get_tool_panel_width() == 340
+
+
+def test_apply_settings_tool_panel_keys():
+    apply_settings({"ui_tool_panel_open": True, "ui_tool_panel_width": 500})
+    assert store.get_tool_panel_open() is True
+    assert store.get_tool_panel_width() == 500
+    assert store.has_explicit_tool_panel_open() is True
+    # 宽度非法值按夹取/默认处理
+    apply_settings({"ui_tool_panel_width": 999999})
+    assert store.get_tool_panel_width() == 640
+
+
+def test_migrate_tool_panel_state_folds_width_closed():
+    store.set_window_size(1200, 800, persist=False)
+    store.migrate_tool_panel_state(False, 340)
+    assert store.has_explicit_tool_panel_open() is True
+    assert store.get_tool_panel_open() is False
+    # 老语义的 1200 是收起态实际宽度 → 新语义存储宽度 = 1200 + 340
+    assert store.get_window_size() == (1540, 800)
+    # 只迁移一次，第二次调用不生效
+    store.migrate_tool_panel_state(True, 500)
+    assert store.get_tool_panel_open() is False
+    assert store.get_tool_panel_width() == 340
+
+
+def test_migrate_tool_panel_state_open_keeps_width():
+    store.set_window_size(1200, 800, persist=False)
+    store.migrate_tool_panel_state(True, 340)
+    # 老语义下侧栏不改窗口宽度，展开态的存储宽度就是实际宽度
+    assert store.get_window_size() == (1200, 800)
+    assert store.get_tool_panel_open() is True
+
+
+def test_reset_clears_tool_panel_state():
+    store.set_tool_panel_open(True)
+    store.set_tool_panel_width(500)
+    reset_settings_to_defaults(lang="en")
+    assert store.get_tool_panel_open() is False
+    assert store.get_tool_panel_width() == 340
+    assert store.has_explicit_tool_panel_open() is False

@@ -31,10 +31,11 @@ from core.compress import (
 )
 from core.differ import Diff, DiffError, SearchCancelled
 from core import fs_delete
-from core.scanner import ScanCancelled, scan_to_snapshot
+from core import fs_migrate
+from core.scanner import ScanCancelled, query_free_size, scan_to_snapshot
 from core.snapshot import SnapshotError
 from core.timing_probe import start_scan_timer
-from core import applog, i18n, store
+from core import applog, i18n, store, wingeom
 from titlebar import TitleBarTheme
 from version import (
     GITHUB_LATEST_API,
@@ -50,6 +51,9 @@ _RES_DIR = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
 _WEB_DIR = os.path.join(_RES_DIR, "web")
 _ICON_PATH = os.path.join(_RES_DIR, "logo.ico")
 
+# 本次运行内是否已发现可升级的新版本；为真时窗口标题栏追加提示。
+_update_available = False
+
 
 class Api:
     """暴露给前端 JS 的接口。所有方法的返回值都会被 pywebview 序列化为 JSON。
@@ -62,6 +66,12 @@ class Api:
         self._window: webview.Window | None = None
         self._scan_thread: threading.Thread | None = None
         self._cancel = threading.Event()
+        # 目录迁移（后台线程）：并行一次只允许一个，进度经事件推送
+        self._migrate_thread: threading.Thread | None = None
+        self._migrate_cancel = threading.Event()
+        # 目录还原（后台线程）：同样单飞，进度经事件推送
+        self._restore_thread: threading.Thread | None = None
+        self._restore_cancel = threading.Event()
         # 设置应用 / 快照目录迁移（后台线程，避免阻塞 JS bridge 导致进度画不出来）
         self._settings_thread: threading.Thread | None = None
         # 当前对比会话，按需在多次下钻之间复用（避免每次重开连接）。
@@ -73,8 +83,14 @@ class Api:
         self._window_size_timer: threading.Timer | None = None
         self._window_size_lock = threading.Lock()
         self._pending_window_size: tuple[int, int] | None = None
-        # 工具侧栏主动 win.resize 期间忽略 resized，避免误记窗口大小
-        self._ignore_window_size_save = False
+        # resized 事件最近一次上报的窗口尺寸；侧栏开合用它算目标宽度。
+        # create_window 后由启动代码填入初值。
+        self._last_win_w = 0
+        self._last_win_h = 0
+        # 侧栏为窗口加宽的量（运行期记账）：展开登记、收起收回。
+        # resize_window_for_panel 靠它做幂等伸缩，快速开合不叠加漂移。
+        self._panel_win_extra = 0
+        self._panel_win_lock = threading.Lock()
         # 搜索是否进行中：cancel_search 只在此期间打断连接，避免误伤其他查询
         self._search_active = False
         # 搜索预热回调代际：换会话后丢弃旧线程的 UI 推送
@@ -87,8 +103,6 @@ class Api:
         # 构建期可选模块（AI 等）：discover 失败静默；core 零依赖 modules
         self._modules: dict[str, object] = {}
         self._init_modules()
-        # 工具侧栏展开时已叠加到窗口宽度上的像素（收起时原样扣回）
-        self._tool_panel_boost = 0
 
     # ---- 生命周期 -------------------------------------------------------
 
@@ -768,10 +782,9 @@ class Api:
     def _schedule_window_size_save(self, width: int, height: int) -> None:
         """窗口尺寸变化：8 秒保持不变才写入 YAML（仅开启记住时）。
 
-        工具侧栏展开/收起引起的 resize 不计（见 ``_ignore_window_size_save``）。
+        侧栏开合的一次性窗口伸缩也会触发本函数，防抖后落的是终态宽度，
+        再经 ``wingeom.to_stored_width`` 归一化回「展开态宽度」，不会逐次漂移。
         """
-        if self._ignore_window_size_save:
-            return
         if not store.get_remember_window_size():
             return
         try:
@@ -801,8 +814,14 @@ class Api:
             return
         w, h = pending
         try:
-            store.set_window_size(w, h, persist=True)
-            applog.info(f"window size saved: {w}x{h}")
+            # 存的是「侧栏展开时的宽度」：收起态补回侧栏宽，保证开合不漂移
+            stored_w = wingeom.to_stored_width(
+                w,
+                panel_open=store.get_tool_panel_open(),
+                panel_width=store.get_tool_panel_width(),
+            )
+            store.set_window_size(stored_w, h, persist=True)
+            applog.info(f"window size saved: {w}x{h} (stored width {stored_w})")
         except Exception as exc:  # noqa: BLE001
             applog.warn(f"save window size failed: {exc}")
 
@@ -1135,6 +1154,33 @@ class Api:
         )
         return result
 
+    def start_auto_update_check(self) -> None:
+        """开启「自动检查更新」时，启动后台查询一次最新版本。
+
+        有新版本则置全局标记并在窗口标题栏追加提示；网络失败静默。
+        只在本函数启动的线程里执行，不阻塞界面。
+        """
+        if not store.get_auto_check_updates():
+            return
+
+        def _run() -> None:
+            try:
+                res = self.check_for_updates()
+            except Exception as exc:  # noqa: BLE001 - 后台检查失败不影响使用
+                applog.exception("auto update check failed", exc)
+                return
+            if res.get("update_available"):
+                global _update_available
+                _update_available = True
+                applog.info(
+                    f"auto update check | update available: {res.get('latest')}"
+                )
+                self._refresh_window_title()
+
+        threading.Thread(
+            target=_run, name="auto-update-check", daemon=True
+        ).start()
+
     def set_theme(self, theme: str) -> dict:
         """前端切换主题：记入 store（可写 YAML）并同步标题栏。
 
@@ -1337,121 +1383,458 @@ class Api:
             "recycled": not bool(permanent),
         }
 
-    def set_tool_panel_open(self, open: bool = False, width: int = 340) -> dict:
-        """侧栏展开/收起时增减窗口宽度，避免主内容区被挤窄。
+    def validate_directory_migration(self, source: str = "", dest: str = "") -> dict:
+        """迁移前置校验（不执行任何操作）。返回 ``{ok, code, message, source, dest, aside}``。"""
+        pre = fs_migrate.validate_migrate(source or "", dest or "")
+        pre["message"] = (
+            "" if pre.get("ok")
+            else _migrate_error_message(str(pre.get("code") or ""))
+        )
+        # 只在输入合法时附带目标盘剩余量，供表单提示「目标盘剩余 xx」
+        if pre.get("ok"):
+            pre["dest_free"] = query_free_size(str(pre.get("dest") or ""))
+        return pre
 
-        最大化时不改尺寸。收起时只扣回本接口先前叠加的像素，
-        用户在展开期间手动缩放窗口仍按叠加量还原。
+    def start_directory_migration(self, source: str = "", dest: str = "", clean_backup: bool = False) -> dict:
+        """后台线程执行目录迁移，进度与结果经事件推送。
+
+        事件：``migrate-dir-progress`` {stage, done, total, bytes_done,
+        bytes_total, current} / ``migrate-dir-done`` {ok, source, dest,
+        aside, files, bytes, backup_cleaned?, error?, code?}。
+        返回 ``{"started": True}``；已有迁移在跑则返回 error。
         """
-        try:
-            panel_w = max(0, int(width or 0))
-        except (TypeError, ValueError):
-            panel_w = 340
-        desired = panel_w if open else 0
-        delta = desired - int(self._tool_panel_boost or 0)
-        if delta == 0:
+        if self._migrate_thread and self._migrate_thread.is_alive():
+            return {"error": i18n.t(
+                "已有目录迁移正在进行", "A directory migration is already running")}
+        fs_migrate.set_backup_suffix(i18n.t("原目录备份", " original backup"))
+        pre = fs_migrate.validate_migrate(source or "", dest or "")
+        if not pre.get("ok"):
             return {
-                "ok": True,
-                "boost": int(self._tool_panel_boost or 0),
-                "skipped": "noop",
+                "error": _migrate_error_message(str(pre.get("code") or "invalid_source")),
+                "code": pre.get("code") or "invalid_source",
             }
-        win = self._window
-        if win is None:
-            return {"error": i18n.t("窗口未就绪", "Window is not ready")}
-        if _window_is_maximized(win):
-            # 最大化时不改尺寸；展开请求不记 boost，避免之后还原时误缩
-            if not open:
-                self._tool_panel_boost = 0
+        # 剩余空间预检：扫一次源目录算总字节，塞不下直接拒绝（不启动线程）。
+        # 不放进 validate_migrate —— 它被前端防抖反复调用，大源目录每次全扫会卡输入。
+        src = str(pre["source"])
+        dst = str(pre["dest"])
+        if not fs_migrate.free_space_ok(src, dst):
             return {
-                "ok": True,
-                "boost": int(self._tool_panel_boost or 0),
-                "skipped": "maximized",
+                "error": _migrate_error_message("not_enough_space"),
+                "code": "not_enough_space",
+            }
+        self._migrate_cancel.clear()
+        self._migrate_thread = threading.Thread(
+            target=self._run_directory_migration,
+            args=(src, dst, bool(clean_backup)),
+            daemon=True,
+        )
+        self._migrate_thread.start()
+        return {"started": True}
+
+    def cancel_directory_migration(self) -> dict:
+        """请求取消正在进行的目录迁移。"""
+        self._migrate_cancel.set()
+        return {"ok": True}
+
+    def _run_directory_migration(self, source: str, dest: str, clean_backup: bool = False) -> None:
+        """后台线程体：执行迁移并推送进度与终态事件。"""
+        def on_progress(info: dict) -> None:
+            self._emit("migrate-dir-progress", dict(info or {}))
+
+        try:
+            result = fs_migrate.migrate_directory(
+                source,
+                dest,
+                progress=on_progress,
+                cancel=self._migrate_cancel.is_set,
+                clean_backup=bool(clean_backup),
+            )
+        except fs_migrate.MigrateError as exc:
+            code = str(exc.message or "fail")
+            cancelled = self._migrate_cancel.is_set() or code == "cancelled"
+            applog.info(
+                f"directory migration failed | code={code} source={source}"
+            )
+            fs_migrate.record_history({
+                "ts": time.time(),
+                "op": "migrate",
+                "source": source,
+                "target": dest,
+                "backup": "",
+                "files": 0,
+                "bytes": 0,
+                "status": "cancelled" if cancelled else "failed",
+                "error": _migrate_error_message(code),
+                "code": code,
+                "backup_cleaned": False,
+            })
+            self._emit(
+                "migrate-dir-done",
+                {
+                    "ok": False,
+                    "source": source,
+                    "dest": dest,
+                    "error": _migrate_error_message(code),
+                    "code": code,
+                },
+            )
+            return
+        except Exception as exc:  # noqa: BLE001
+            applog.exception("directory migration failed", exc)
+            fs_migrate.record_history({
+                "ts": time.time(),
+                "op": "migrate",
+                "source": source,
+                "target": dest,
+                "backup": "",
+                "files": 0,
+                "bytes": 0,
+                "status": "failed",
+                "error": str(exc),
+                "code": "fail",
+                "backup_cleaned": False,
+            })
+            self._emit(
+                "migrate-dir-done",
+                {
+                    "ok": False,
+                    "source": source,
+                    "dest": dest,
+                    "error": i18n.t(
+                        f"目录迁移失败：{exc}",
+                        f"Directory migration failed: {exc}",
+                    ),
+                    "code": "fail",
+                },
+            )
+            return
+        applog.info(
+            f"directory migration ok | source={source} dest={dest} "
+            f"files={result.get('files')} bytes={result.get('bytes')}"
+        )
+        fs_migrate.register_link(
+            str(result.get("source") or ""),
+            str(result.get("dest") or ""),
+            str(result.get("aside") or ""),
+            files=int(result.get("files") or 0),
+            bytes_=int(result.get("bytes") or 0),
+        )
+        fs_migrate.record_history({
+            "ts": time.time(),
+            "op": "migrate",
+            "source": str(result.get("source") or source),
+            "target": str(result.get("dest") or dest),
+            "backup": str(result.get("aside") or ""),
+            "files": int(result.get("files") or 0),
+            "bytes": int(result.get("bytes") or 0),
+            "status": "success",
+            "error": "",
+            "code": "",
+            "backup_cleaned": bool(result.get("backup_cleaned") or False),
+        })
+        self._emit("migrate-dir-done", result)
+
+    def list_directory_links(self) -> dict:
+        """列出工具创建的所有目录链接及当前状态（供「目录链接」面板渲染）。"""
+        return {"ok": True, "links": fs_migrate.link_records()}
+
+    def list_migration_history(self) -> dict:
+        """列出迁移/还原历史（即便链接已还原、记录被移除，仍可查）。"""
+        try:
+            return {"ok": True, "history": fs_migrate.load_history()}
+        except Exception as exc:  # noqa: BLE001
+            applog.exception("list_migration_history failed", exc)
+            return {"error": str(exc), "code": "fail"}
+
+    def clear_migration_history(self) -> dict:
+        """清空迁移/还原历史。"""
+        try:
+            n = fs_migrate.clear_history()
+            return {"ok": True, "cleared": int(n)}
+        except Exception as exc:  # noqa: BLE001
+            applog.exception("clear_migration_history failed", exc)
+            return {"error": str(exc), "code": "fail"}
+
+    def delete_directory_link(self, link: str = "") -> dict:
+        """删除一条工具创建的链接（只删 junction，数据留在目标）。"""
+        try:
+            rec = fs_migrate.get_link_record(link or "")
+            fs_migrate.delete_junction(link or "")
+        except fs_migrate.MigrateError as exc:
+            code = str(exc.message or "fail")
+            return {"error": _migrate_error_message(code), "code": code}
+        except Exception as exc:  # noqa: BLE001
+            applog.exception("delete_directory_link failed", exc)
+            return {
+                "error": i18n.t(
+                    f"删除链接失败：{exc}", f"Failed to delete link: {exc}"
+                ),
+                "code": "fail",
+            }
+        fs_migrate.remove_link_record(link or "")
+        applog.info(
+            f"directory link deleted | link={link or ''} "
+            f"target={(rec or {}).get('target') or ''}"
+        )
+        return {"ok": True, "link": link or ""}
+
+    def restore_directory_link(self, link: str = "") -> dict:
+        """后台线程还原一条链接：目标复制回原路径，删链接，备份移入回收站。
+
+        事件：``migrate-dir-restore-progress`` {stage, done, total,
+        bytes_done, bytes_total, current} / ``migrate-dir-restore-done``
+        {ok, link, target, recycled_backup?, error?, code?}。
+        返回 ``{"started": True}``；已有还原在跑则返回 error。
+        """
+        if self._restore_thread and self._restore_thread.is_alive():
+            return {"error": i18n.t(
+                "已有目录还原正在进行", "A directory restore is already running")}
+        rec = fs_migrate.get_link_record(link or "")
+        if not rec:
+            return {"error": _migrate_error_message("unknown_link"), "code": "unknown_link"}
+        _link = str(rec.get("link") or "")
+        _target = str(rec.get("target") or "")
+        if not fs_migrate._is_reparse(_link):
+            return {"error": _migrate_error_message("not_a_link"), "code": "not_a_link"}
+        if not _target or not os.path.isdir(_target):
+            return {"error": _migrate_error_message("target_missing"), "code": "target_missing"}
+        self._restore_cancel.clear()
+        self._restore_thread = threading.Thread(
+            target=self._run_directory_restore,
+            args=(_link,),
+            daemon=True,
+        )
+        self._restore_thread.start()
+        return {"started": True}
+
+    def cancel_directory_restore(self) -> dict:
+        """请求取消正在进行的目录还原。"""
+        self._restore_cancel.set()
+        return {"ok": True}
+
+    def _run_directory_restore(self, link: str) -> None:
+        """后台线程体：执行还原并推送进度与终态事件。"""
+        def on_progress(info: dict) -> None:
+            self._emit("migrate-dir-restore-progress", dict(info or {}))
+
+        rec_snapshot = fs_migrate.get_link_record(link or "") or {}
+        try:
+            result = fs_migrate.restore_link(
+                link, progress=on_progress, cancel=self._restore_cancel.is_set
+            )
+        except fs_migrate.MigrateError as exc:
+            code = str(exc.message or "fail")
+            cancelled = self._restore_cancel.is_set() or code == "cancelled"
+            applog.info(f"directory link restore failed | code={code} link={link}")
+            fs_migrate.record_history({
+                "ts": time.time(),
+                "op": "restore",
+                "source": str(rec_snapshot.get("link") or link),
+                "target": str(rec_snapshot.get("target") or ""),
+                "backup": str(rec_snapshot.get("backup") or ""),
+                "files": 0,
+                "bytes": 0,
+                "status": "cancelled" if cancelled else "failed",
+                "error": _migrate_error_message(code),
+                "code": code,
+                "backup_cleaned": False,
+            })
+            self._emit(
+                "migrate-dir-restore-done",
+                {"ok": False, "link": link, "error": _migrate_error_message(code), "code": code},
+            )
+            return
+        except Exception as exc:  # noqa: BLE001
+            applog.exception("directory link restore failed", exc)
+            fs_migrate.record_history({
+                "ts": time.time(),
+                "op": "restore",
+                "source": str(rec_snapshot.get("link") or link),
+                "target": str(rec_snapshot.get("target") or ""),
+                "backup": str(rec_snapshot.get("backup") or ""),
+                "files": 0,
+                "bytes": 0,
+                "status": "failed",
+                "error": str(exc),
+                "code": "fail",
+                "backup_cleaned": False,
+            })
+            self._emit(
+                "migrate-dir-restore-done",
+                {
+                    "ok": False,
+                    "link": link,
+                    "error": i18n.t(f"还原失败：{exc}", f"Restore failed: {exc}"),
+                    "code": "fail",
+                },
+            )
+            return
+        applog.info(
+            f"directory link restored | link={result.get('link')} "
+            f"recycled_backup={result.get('recycled_backup') or ''} "
+            f"recycled_target={result.get('recycled_target') or ''}"
+        )
+        fs_migrate.record_history({
+            "ts": time.time(),
+            "op": "restore",
+            "source": str(result.get("link") or link),
+            "target": str(result.get("target") or rec_snapshot.get("target") or ""),
+            "backup": str(rec_snapshot.get("backup") or ""),
+            "files": int(rec_snapshot.get("files") or 0),
+            "bytes": int(rec_snapshot.get("bytes") or 0),
+            "status": "success",
+            "error": "",
+            "code": "",
+            "backup_cleaned": bool(result.get("recycled_backup") or False),
+        })
+        self._emit("migrate-dir-restore-done", result)
+
+    def delete_link_backup(self, link: str = "") -> dict:
+        """删除某条链接的备份目录（移到回收站）。"""
+        rec = fs_migrate.get_link_record(link or "")
+        if not rec:
+            return {
+                "error": _migrate_error_message("unknown_link"),
+                "code": "unknown_link",
+            }
+        backup = str(rec.get("backup") or "")
+        if not backup or not os.path.isdir(backup):
+            return {
+                "error": _migrate_error_message("no_backup"),
+                "code": "no_backup",
             }
         try:
-            cur_w = int(win.width)
-            cur_h = int(win.height)
-            cur_x = int(win.x)
-            cur_y = int(win.y)
-        except Exception as exc:  # noqa: BLE001
-            applog.exception("set_tool_panel_open get size failed", exc)
-            return {"error": str(exc)}
+            fs_delete.delete_to_recycle(backup)
+        except fs_delete.DeleteError as exc:
+            code = str(exc.message or exc)
+            return {"error": _delete_error_message(code), "code": code}
+        except OSError as exc:
+            return {
+                "error": i18n.t(f"删除失败：{exc}", f"Delete failed: {exc}"),
+                "code": "os",
+            }
+        applog.info(f"link backup deleted | link={link or ''} backup={backup}")
+        fs_migrate.record_history({
+            "ts": time.time(),
+            "op": "delbackup",
+            "source": str(rec.get("link") or link),
+            "target": str(rec.get("target") or ""),
+            "backup": backup,
+            "files": 0,
+            "bytes": 0,
+            "status": "success",
+            "error": "",
+            "code": "",
+            "backup_cleaned": True,
+        })
+        return {"ok": True, "backup": backup}
 
-        min_w, min_h = 820, 560
-        new_w = max(min_w, cur_w + delta)
-        # 实际可应用的增量（可能因 min_size 被截断）
-        applied = new_w - cur_w
-        if applied == 0 and delta < 0:
-            # 已到最小宽，仍记为收起完成
-            self._tool_panel_boost = desired
-            return {"ok": True, "boost": desired, "width": cur_w}
+    def remove_directory_link_record(self, link: str = "") -> dict:
+        """从登记移除一条链接记录（不碰磁盘；用于链接已不存在的情况）。"""
+        if not fs_migrate.get_link_record(link or ""):
+            return {
+                "error": _migrate_error_message("unknown_link"),
+                "code": "unknown_link",
+            }
+        fs_migrate.remove_link_record(link or "")
+        applog.info(f"directory link record removed | link={link or ''}")
+        return {"ok": True, "link": link or ""}
 
-        new_x = cur_x
-        work = _primary_work_area()
-        if work is not None:
-            wx, wy, ww, wh = work
-            # 右侧放不下时，整体左移，尽量保持完整可见
-            right = new_x + new_w
-            max_right = wx + ww
-            if right > max_right:
-                new_x = max(wx, max_right - new_w)
-            if new_x < wx:
-                new_x = wx
-            # 仍超出工作区则压到可用宽度
-            if new_w > ww:
-                new_w = max(min_w, ww)
-                applied = new_w - cur_w
-                new_x = wx
-
-        self._ignore_window_size_save = True
-        # 侧栏加宽时不要重刷标题栏：Resize 上的 DWM/FRAMECHANGED 会闪白
+    def open_folder(self, path: str = "") -> dict:
+        """在资源管理器中打开一个绝对路径目录。"""
+        p = fs_migrate.normalize_abs(path or "")
+        if not p or not os.path.isdir(p):
+            return {"error": i18n.t("目录不存在", "Folder does not exist")}
         try:
-            self._titlebar.suppress_resize_apply(True)
-        except Exception:  # noqa: BLE001
-            pass
-        # 取消尚未落地的“记住窗口大小”计时，避免侧栏加宽后的尺寸被写入
-        with self._window_size_lock:
-            if self._window_size_timer is not None:
-                try:
-                    self._window_size_timer.cancel()
-                except Exception:  # noqa: BLE001
-                    pass
-                self._window_size_timer = None
-            self._pending_window_size = None
-        try:
-            if new_x != cur_x:
-                win.move(new_x, cur_y)
-            win.resize(new_w, max(min_h, cur_h))
-        except Exception as exc:  # noqa: BLE001
-            applog.exception("set_tool_panel_open resize failed", exc)
-            self._ignore_window_size_save = False
-            try:
-                self._titlebar.suppress_resize_apply(False)
-            except Exception:  # noqa: BLE001
-                pass
-            return {"error": str(exc)}
-        finally:
-            # 延迟解除：resized / 标题栏 Resize 回调可能略晚于 resize 返回
-            def _clear_ignore() -> None:
-                self._ignore_window_size_save = False
-                try:
-                    self._titlebar.suppress_resize_apply(False)
-                except Exception:  # noqa: BLE001
-                    pass
+            os.startfile(p)  # noqa: S606
+        except OSError as exc:
+            return {
+                "error": i18n.t(f"无法打开：{exc}", f"Cannot open: {exc}"),
+                "code": "os",
+            }
+        return {"ok": True, "path": p}
 
-            t = threading.Timer(0.45, _clear_ignore)
-            t.daemon = True
-            t.start()
+    def set_tool_panel_open(self, open: bool = False, width: int = 340) -> dict:
+        """工具侧栏展开/收起：只记住状态与宽度，不直接改窗口尺寸。
 
-        if open:
-            self._tool_panel_boost = max(0, int(self._tool_panel_boost or 0) + applied)
-        else:
-            self._tool_panel_boost = 0
+        窗口宽度的伸缩由前端编排（见 pending.js）：展开时先一次性加宽
+        窗口，主区钉死原宽度，侧栏再用 CSS 过渡滑入新增区域；收起反向。
+        本方法只持久化最终状态，供下次启动恢复。
+        """
+        panel_open = bool(open)
+        panel_w = wingeom.clamp_panel_width(width)
+        store.set_tool_panel_width(panel_w)
+        store.set_tool_panel_open(panel_open)
         return {
             "ok": True,
-            "boost": int(self._tool_panel_boost or 0),
-            "width": new_w,
-            "x": new_x,
+            "panel_open": panel_open,
+            "panel_width": panel_w,
         }
+
+    def resize_window_for_panel(self, open: bool = False, panel_width: int = 0) -> dict:
+        """侧栏开合时一次性调整窗口宽度，高度不变。
+
+        原生 resize 是异步的且多次调用会被合并，无法与 CSS 过渡逐帧对齐，
+        故不再逐帧驱动：展开传 ``open=True`` 与目标侧栏宽，窗口一次加宽
+        ``panel_width``；收起传 ``open=False``，窗口收回之前加宽的量
+        （``self._panel_win_extra`` 记账，重复同向调用不叠加）。
+        最大化时窗口宽度锁死在屏幕，直接拒绝。主区宽度恒定由前端
+        钉宽保证（pending.js 的 _pinMainWidth）。
+        """
+        win = self._window
+        if win is None or self._last_win_h <= 0:
+            return {"ok": False}
+        if _window_is_maximized(win):
+            return {"ok": False, "maximized": True}
+        panel_w = wingeom.clamp_panel_width(panel_width)
+        with self._panel_win_lock:
+            if bool(open) == (self._panel_win_extra > 0):
+                return {"ok": True, "nochange": True}
+            if open:
+                target = int(self._last_win_w) + panel_w
+            else:
+                target = int(self._last_win_w) - self._panel_win_extra
+            target, h = _clamp_window_size(target, int(self._last_win_h))
+            if self._resize_window_width_height(target, h):
+                # 立即记下目标宽度：resized 事件即使滞后，下次计算也不失真
+                self._last_win_w = target
+                self._panel_win_extra = panel_w if open else 0
+                return {"ok": True, "width": target, "height": h}
+            return {"ok": False}
+
+    def set_tool_panel_width(self, width: int = 340) -> dict:
+        """拖拽手柄改侧栏宽度：只记宽度，不改窗口尺寸。
+
+        拖拽挤压的是主区，窗口宽度不变；展开态下存储宽度等于当前实际
+        窗口宽度，本来就与新宽度自洽，无需额外换算。
+        """
+        return {"ok": True, "tool_panel_width": store.set_tool_panel_width(width)}
+
+    def sync_tool_panel_state(self, open: bool = False, width: int = 340) -> dict:
+        """启动时把旧版 localStorage 里的侧栏状态搬进 YAML，只搬一次。
+
+        返回 YAML 里的权威值，前端按返回值渲染。
+        """
+        store.migrate_tool_panel_state(bool(open), width)
+        return {
+            "ok": True,
+            "tool_panel_open": store.get_tool_panel_open(),
+            "tool_panel_width": store.get_tool_panel_width(),
+        }
+
+    # ---- 侧栏宽度换算 -------------------------------------------------
+
+    def _resize_window_width_height(self, width: int, height: int) -> bool:
+        """把窗口尺寸改到 ``width x height``（逻辑像素）；失败返回 False。"""
+        win = self._window
+        if win is None:
+            return False
+        try:
+            win.resize(int(width), int(height))
+        except Exception as exc:  # noqa: BLE001
+            applog.warn(f"resize window failed: {exc}")
+            return False
+        return True
 
     # ---- 扫描（后台线程 + 进度推送）------------------------------------
 
@@ -2006,10 +2389,61 @@ def _delete_error_message(code: str, *, root: str = "", rel_path: str = "") -> s
     return i18n.t(f"删除失败：{c}", f"Delete failed: {c}")
 
 
+def _migrate_error_message(code: str) -> str:
+    """把迁移机器码映射为中英文案。"""
+    c = (code or "").strip()
+    if c == "cancelled":
+        return i18n.t("迁移已取消", "Migration cancelled")
+    if c == "invalid_source":
+        return i18n.t("源目录不存在", "Source folder does not exist")
+    if c == "not_dir":
+        return i18n.t("源路径不是目录", "Source is not a folder")
+    if c == "source_is_link":
+        return i18n.t("源路径已是链接，不能迁移", "Source is already a link")
+    if c == "drive_root":
+        return i18n.t("无法迁移磁盘根目录", "Cannot migrate a drive root")
+    if c == "invalid_dest":
+        return i18n.t("目标路径无效", "Invalid destination path")
+    if c == "same_path":
+        return i18n.t("目标与源路径相同", "Destination equals source")
+    if c == "dest_exists":
+        return i18n.t("目标路径已存在", "Destination already exists")
+    if c == "dest_parent_missing":
+        return i18n.t("目标所在文件夹不存在", "Destination parent folder does not exist")
+    if c == "inside_each":
+        return i18n.t("源与目标不能互相包含", "Source and destination cannot contain each other")
+    if c == "not_windows":
+        return i18n.t("目录联接仅支持 Windows", "Junctions are Windows-only")
+    if c == "not_enough_space":
+        return i18n.t("目标磁盘剩余空间不足", "Not enough free space on the destination drive")
+    if c == "unknown_link":
+        return i18n.t("找不到这条链接记录", "Unknown link record")
+    if c == "not_a_link":
+        return i18n.t("该路径不是目录链接，不能操作", "This path is not a directory link")
+    if c == "target_missing":
+        return i18n.t("链接指向的目标不存在", "Link target does not exist")
+    if c == "no_backup":
+        return i18n.t("该链接没有备份目录", "No backup for this link")
+    if c.startswith("unlink:"):
+        return i18n.t(f"删除链接失败：{c[7:]}", f"Failed to remove link: {c[7:]}")
+    if c.startswith("restore:"):
+        return i18n.t(f"还原失败：{c[8:]}", f"Restore failed: {c[8:]}")
+    if c.startswith("copy:"):
+        return i18n.t(f"复制失败：{c[5:]}", f"Copy failed: {c[5:]}")
+    if c.startswith("rename:"):
+        return i18n.t(f"原目录让位失败：{c[7:]}", f"Failed to set aside original: {c[7:]}")
+    if c.startswith("junction:"):
+        return i18n.t(f"创建目录联接失败：{c[9:]}", f"Failed to create junction: {c[9:]}")
+    if c.startswith("verify:"):
+        return i18n.t("复制后校验不一致，已撤销迁移", "Verification mismatch; migration undone")
+    return i18n.t(f"目录迁移失败：{c}", f"Directory migration failed: {c}")
+
+
 def _window_title() -> str:
     """窗口标题：程序名 + 管理员状态 + 版本号（状态文案随界面语言）。
 
     非管理员时在状态后附加「推荐以管理员启动」提示，方便一眼看见。
+    运行中发现新版本时追加「有新版本更新」提示。
     """
     if _is_admin():
         mode = i18n.t("管理员", "Administrator")
@@ -2018,7 +2452,10 @@ def _window_title() -> str:
             "非管理员（推荐以管理员启动）",
             "Not Administrator (run as Administrator recommended)",
         )
-    return f"WhoShitsOnMyC — {mode}"
+    title = f"WhoShitsOnMyC — {mode}"
+    if _update_available:
+        title += " — " + i18n.t("有新版本更新", "New version available")
+    return title
 
 
 def _centered_xy(width: int, height: int) -> tuple[int | None, int | None]:
@@ -2090,6 +2527,24 @@ def _default_window_size() -> tuple[int, int]:
     w = int(round(h * 1100 / 720))
     w = max(820, min(w, max(820, sw - 40)))
     return w, h
+
+
+def _clamp_window_size(w: int, h: int) -> tuple[int, int]:
+    """把恢复的窗口尺寸压到主屏工作区内（下限 min_size）。
+
+    防止历史保存的异常宽高——例如旧版工具侧栏把侧栏宽度记进窗口宽度——
+    在下一次启动时把窗口撑得超出屏幕。
+    """
+    try:
+        w = int(w)
+        h = int(h)
+    except (TypeError, ValueError):
+        return _default_window_size()
+    work = _primary_work_area()
+    if work is None:
+        return w, h
+    _x, _y, sw, sh = work
+    return max(820, min(w, max(820, sw))), max(560, min(h, max(560, sh)))
 
 
 def _window_is_maximized(win: "webview.Window") -> bool:
@@ -2577,18 +3032,46 @@ def main() -> None:
         return
 
     api = Api()
-    # 开启「记住」且 YAML/内存里已有有效尺寸 → 用记住的；否则用屏幕推导默认
+    # 开启「记住」且 YAML/内存里已有有效尺寸 → 用记住的；否则用屏幕推导默认。
+    # 记住的值经 _clamp_window_size 压到工作区，防历史异常宽高把窗口撑出屏幕。
+    # window_width 存的是「侧栏展开时」的宽度，收起态要减掉侧栏宽；
+    # 老配置（YAML 没写过 ui_tool_panel_open）的 window_width 还是旧语义，
+    # 首次启动不减，等前端 sync_tool_panel_state 迁移后再启用新语义。
     if store.get_remember_window_size() and store.has_saved_window_size():
-        width, height = store.get_window_size()
+        width, height = _clamp_window_size(*store.get_window_size())
+        if store.has_explicit_tool_panel_open():
+            width = _clamp_window_size(
+                wingeom.to_launch_width(
+                    width,
+                    panel_open=store.get_tool_panel_open(),
+                    panel_width=store.get_tool_panel_width(),
+                ),
+                height,
+            )[0]
     else:
         width, height = _default_window_size()
+    api._last_win_w, api._last_win_h = width, height  # noqa: SLF001
+    # 启动宽度若已按展开态减过侧栏宽度，登记加宽量，运行期收起时才能收回
+    api._panel_win_extra = (  # noqa: SLF001
+        store.get_tool_panel_width()
+        if (
+            store.get_remember_window_size()
+            and store.has_saved_window_size()
+            and store.has_explicit_tool_panel_open()
+            and store.get_tool_panel_open()
+        )
+        else 0
+    )
     x, y = _centered_xy(width, height)
     # 窗口底色与页面主题都以 settings.yaml 为准，避免默认 light 先白后黑。
     # 主题经 URL 参数交给 index.html 首帧脚本，不写生成文件。
     # auto 在此解析一次系统深浅色（仅启动时判断，运行中不监听变化）。
+    # v 参数用于破坏 WebView2 静态资源缓存：发版改版本号后强制重载 index.html。
     _boot_theme = store.resolve_theme(store.get_theme())
     _boot_bg = "#ffffff" if _boot_theme == "light" else "#14161a"
-    _boot_url = os.path.join(_WEB_DIR, "index.html") + "?theme=" + _boot_theme
+    _boot_url = os.path.join(
+        _WEB_DIR, "index.html"
+    ) + f"?theme={_boot_theme}&v={APP_VERSION}"
     window = webview.create_window(
         title=_window_title(),
         url=_boot_url,
@@ -2608,6 +3091,12 @@ def main() -> None:
     _ui_shown = {"done": False}
 
     def _on_resized(w, h) -> None:
+        try:
+            iw, ih = int(w), int(h)
+        except (TypeError, ValueError):
+            iw, ih = 0, 0
+        if iw and ih:
+            api._last_win_w, api._last_win_h = iw, ih  # noqa: SLF001
         try:
             api._schedule_window_size_save(w, h)
         except Exception:  # noqa: BLE001
@@ -2657,6 +3146,8 @@ def main() -> None:
                 applog.exception("window.show after loaded failed", exc)
             # 显示后再轻量补一次标题栏，仍不做首帧尺寸微扰
             api._titlebar.schedule_refresh(delays_ms=(200,), force_nudge=False)
+            # 启动后台检查更新（设置开启时），有新版标题栏提示
+            api.start_auto_update_check()
 
         window.events.loaded += _on_loaded
     except Exception:  # noqa: BLE001

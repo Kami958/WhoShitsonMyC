@@ -26,6 +26,7 @@ from .compress import (
     write_snapshot_note,
 )
 from .snapshot import SnapshotError
+from . import wingeom
 
 _APP_DIR_NAME = "WhoShitsOnMyC"
 _SETTINGS_FILE = "settings.yaml"
@@ -422,6 +423,14 @@ def _normalize_ui_hover_group_min(raw) -> int:
     return max(0, min(50, n))
 
 
+def _normalize_ui_tool_panel_width(raw) -> int:
+    """侧边栏宽度（像素）：夹到 240-640，非法回落 340。
+
+    区间与默认值的权威定义在 ``core.wingeom``，前端 pending.js 另有同名常量。
+    """
+    return wingeom.clamp_panel_width(raw)
+
+
 def resolve_theme(preference: str) -> str:
     """把主题偏好解析成实际主题：auto 读系统深浅色，失败默认 light。"""
     pref = _normalize_theme(preference)
@@ -632,6 +641,7 @@ def _write_settings_yaml(path: str, data: dict) -> None:
         f"  use_mft: {'true' if data.get('use_mft') else 'false'}",
         f"  search_memory_index: {'true' if data.get('search_memory_index', True) else 'false'}",
         f"  temp_cleanup: {'true' if data.get('temp_cleanup', True) else 'false'}",
+        f"  auto_check_updates: {'true' if data.get('auto_check_updates', True) else 'false'}",
         f"  remember_window_size: {'true' if data.get('remember_window_size', True) else 'false'}",
         f"  window_width: {int(data.get('window_width') or 0)}",
         f"  window_height: {int(data.get('window_height') or 0)}",
@@ -648,6 +658,8 @@ def _write_settings_yaml(path: str, data: dict) -> None:
         f"  ui_hover_group_min: {_normalize_ui_hover_group_min(data.get('ui_hover_group_min', 10))}",
         f"  ui_tree_guide: {'true' if data.get('ui_tree_guide', True) else 'false'}",
         f"  ui_parent_sep: {'true' if data.get('ui_parent_sep', False) else 'false'}",
+        f"  ui_tool_panel_open: {'true' if data.get('ui_tool_panel_open', False) else 'false'}",
+        f"  ui_tool_panel_width: {int(data.get('ui_tool_panel_width') or wingeom.PANEL_W_DEFAULT)}",
         "ai:",
         f"  enabled: {'true' if _as_bool(ai.get('enabled'), False) else 'false'}",
         f"  base_url: {_yaml_quote(base_url)}",
@@ -682,6 +694,7 @@ _compress_snapshots = True
 _use_mft = True  # 默认开：盘符根 + NTFS 优先 MFT，失败回退 scandir
 _search_memory_index = True  # 默认开：打开搜索时预热内存索引
 _temp_cleanup = True  # 默认开：退出删除+启动清扫解压临时文件
+_auto_check_updates = True  # 默认开：启动后台检查更新，有新版在标题栏提示
 _remember_window_size = True  # 默认开：记住窗口大小
 _window_width = 0
 _window_height = 0
@@ -709,6 +722,12 @@ _ui_hover_group_min = 10
 _ui_tree_guide = True
 # 展开父级下方间隔线：父行底边画分隔线；默认关
 _ui_parent_sep = False
+# 右侧工具侧栏是否展开；默认收起
+_ui_tool_panel_open = False
+# None = YAML 未写明该键（老配置，可用 localStorage 上报值迁移）；True/False = 已存过
+_ui_tool_panel_open_explicit: bool | None = None
+# 右侧工具侧栏宽度（像素，240-640）
+_ui_tool_panel_width = wingeom.PANEL_W_DEFAULT
 # AI 设置（与通用设置同文件 settings.yaml 的 ai: 节）
 _ai_enabled = False
 _ai_base_url = str(_AI_DEFAULTS["base_url"])
@@ -821,7 +840,8 @@ def _apply_loaded(data: dict) -> None:
     global _lang, _theme, _snapshot_dir, _delete_blacklist
     global _ui_parent_row_bg, _ui_parent_row_dim
     global _ui_hover_group_outline, _ui_hover_group_min, _ui_tree_guide, _ui_parent_sep
-    global _temp_cleanup
+    global _ui_tool_panel_open, _ui_tool_panel_open_explicit, _ui_tool_panel_width
+    global _temp_cleanup, _auto_check_updates
     if not data:
         return
     common = _common_view(data)
@@ -846,6 +866,10 @@ def _apply_loaded(data: dict) -> None:
         b = _as_bool(common.get("temp_cleanup"))
         if b is not None:
             _temp_cleanup = b
+    if "auto_check_updates" in common:
+        b = _as_bool(common.get("auto_check_updates"))
+        if b is not None:
+            _auto_check_updates = b
     if "remember_window_size" in common:
         b = _as_bool(common.get("remember_window_size"))
         if b is not None:
@@ -891,6 +915,15 @@ def _apply_loaded(data: dict) -> None:
         b = _as_bool(ui.get("ui_parent_sep"))
         if b is not None:
             _ui_parent_sep = b
+    if "ui_tool_panel_open" in ui:
+        b = _as_bool(ui.get("ui_tool_panel_open"))
+        if b is not None:
+            _ui_tool_panel_open = b
+            _ui_tool_panel_open_explicit = b
+    if "ui_tool_panel_width" in ui:
+        _ui_tool_panel_width = _normalize_ui_tool_panel_width(
+            ui.get("ui_tool_panel_width")
+        )
     if "delete_blacklist" in common:
         # _put_raw_pair 已去引号，此处多为 JSON 字符串
         _delete_blacklist = _normalize_delete_blacklist(common.get("delete_blacklist"))
@@ -921,6 +954,7 @@ def _settings_payload() -> dict:
         "use_mft": _use_mft,
         "search_memory_index": _search_memory_index,
         "temp_cleanup": _temp_cleanup,
+        "auto_check_updates": bool(_auto_check_updates),
         "remember_window_size": bool(_remember_window_size),
         "window_width": int(_window_width),
         "window_height": int(_window_height),
@@ -936,6 +970,8 @@ def _settings_payload() -> dict:
         "ui_hover_group_min": _ui_hover_group_min,
         "ui_tree_guide": _ui_tree_guide,
         "ui_parent_sep": _ui_parent_sep,
+        "ui_tool_panel_open": _ui_tool_panel_open,
+        "ui_tool_panel_width": _ui_tool_panel_width,
         "ai": _ai_payload(),
     }
 
@@ -1033,6 +1069,20 @@ def set_temp_cleanup(enabled: bool) -> bool:
     return _temp_cleanup
 
 
+def get_auto_check_updates() -> bool:
+    """是否在启动时后台检查更新（默认 True）。"""
+    return bool(_auto_check_updates)
+
+
+def set_auto_check_updates(enabled: bool) -> bool:
+    """设置是否自动检查更新；值变化时写 YAML。"""
+    global _auto_check_updates
+    new = bool(enabled)
+    if new != _auto_check_updates:
+        _auto_check_updates = new
+        _persist()
+    return _auto_check_updates
+
 
 def get_remember_window_size() -> bool:
     """是否记住窗口大小（写入 settings.yaml）。"""
@@ -1076,6 +1126,69 @@ def set_window_size(width: int, height: int, *, persist: bool = True) -> tuple[i
         # 尺寸相同不写盘
         pass
     return w, h
+
+
+def get_tool_panel_open() -> bool:
+    """右侧工具侧栏是否展开。"""
+    return bool(_ui_tool_panel_open)
+
+
+def set_tool_panel_open(enabled: bool) -> bool:
+    """设置侧栏展开状态；值变化时写 YAML。"""
+    global _ui_tool_panel_open, _ui_tool_panel_open_explicit
+    val = bool(enabled)
+    # explicit 为 None 时也要写一次，把老配置升级成显式记录
+    if _ui_tool_panel_open_explicit is None or val != bool(_ui_tool_panel_open):
+        _ui_tool_panel_open = val
+        _ui_tool_panel_open_explicit = val
+        _persist()
+    return val
+
+
+def get_tool_panel_width() -> int:
+    """右侧工具侧栏宽度（像素，240-640）。"""
+    return int(_ui_tool_panel_width)
+
+
+def set_tool_panel_width(px: int) -> int:
+    """设置侧栏宽度；夹到 240-640，值变化时写 YAML。"""
+    global _ui_tool_panel_width
+    val = _normalize_ui_tool_panel_width(px)
+    if val != int(_ui_tool_panel_width):
+        _ui_tool_panel_width = val
+        _persist()
+    return val
+
+
+def has_explicit_tool_panel_open() -> bool:
+    """YAML 里是否写过侧栏展开状态；为假说明是升级前的老配置。"""
+    return _ui_tool_panel_open_explicit is not None
+
+
+def migrate_tool_panel_state(open: bool, width: int) -> None:
+    """把老版本 localStorage 里的侧栏状态搬进 YAML，只做一次。
+
+    仅当 ``_ui_tool_panel_open_explicit`` 为 None（YAML 没写过该键）时执行。
+    同时把 ``window_width`` 从老语义（当前实际宽度）折算成新语义
+    （侧栏展开时的宽度），避免老用户升级后窗口宽度跳变。
+    """
+    global _ui_tool_panel_open, _ui_tool_panel_open_explicit, _ui_tool_panel_width
+    global _window_width, _window_height
+    if _ui_tool_panel_open_explicit is not None:
+        return
+    _ui_tool_panel_open = bool(open)
+    _ui_tool_panel_open_explicit = _ui_tool_panel_open
+    _ui_tool_panel_width = _normalize_ui_tool_panel_width(width)
+    if has_saved_window_size():
+        _window_width, _window_height = _normalize_window_size(
+            wingeom.to_stored_width(
+                _window_width,
+                panel_open=_ui_tool_panel_open,
+                panel_width=_ui_tool_panel_width,
+            ),
+            _window_height,
+        )
+    _persist()
 
 
 def get_delete_blacklist() -> list[dict[str, str]]:
@@ -1394,7 +1507,8 @@ def apply_settings(
     ``window_width``、``window_height``、``log_sanitize``、``log_level``、
     ``snapshot_dir``（空串=内置目录）、``delete_blacklist``、
     ``ui_parent_row_bg``、``ui_parent_row_dim``、``ui_hover_group_outline``、
-    ``ui_hover_group_min``、``ui_tree_guide``、``ui_parent_sep``。
+    ``ui_hover_group_min``、``ui_tree_guide``、``ui_parent_sep``、
+    ``ui_tool_panel_open``、``ui_tool_panel_width``。
     缺省键保持当前值。
     """
     global _scan_workers, _compress_snapshots, _use_mft, _search_memory_index
@@ -1404,7 +1518,8 @@ def apply_settings(
     global _snapshot_dir, _delete_blacklist
     global _ui_parent_row_bg, _ui_parent_row_dim
     global _ui_hover_group_outline, _ui_hover_group_min, _ui_tree_guide, _ui_parent_sep
-    global _temp_cleanup
+    global _ui_tool_panel_open, _ui_tool_panel_open_explicit, _ui_tool_panel_width
+    global _temp_cleanup, _auto_check_updates
 
     if not isinstance(payload, dict):
         payload = {}
@@ -1422,6 +1537,8 @@ def apply_settings(
         _search_memory_index = bool(payload["search_memory_index"])
     if "temp_cleanup" in payload:
         _temp_cleanup = bool(payload["temp_cleanup"])
+    if "auto_check_updates" in payload:
+        _auto_check_updates = bool(payload["auto_check_updates"])
     if "remember_window_size" in payload:
         _remember_window_size = bool(payload["remember_window_size"])
     if "window_width" in payload or "window_height" in payload:
@@ -1448,6 +1565,13 @@ def apply_settings(
         _ui_tree_guide = bool(payload["ui_tree_guide"])
     if "ui_parent_sep" in payload:
         _ui_parent_sep = bool(payload["ui_parent_sep"])
+    if "ui_tool_panel_open" in payload:
+        _ui_tool_panel_open = bool(payload["ui_tool_panel_open"])
+        _ui_tool_panel_open_explicit = _ui_tool_panel_open
+    if "ui_tool_panel_width" in payload:
+        _ui_tool_panel_width = _normalize_ui_tool_panel_width(
+            payload.get("ui_tool_panel_width")
+        )
     if "snapshot_dir" in payload:
         raw = _normalize_snapshot_dir(payload.get("snapshot_dir"))
         if not raw:
@@ -1494,13 +1618,17 @@ def reset_settings_to_defaults(*, lang: str | None = None) -> dict:
     global _ai_enabled, _ai_base_url, _ai_model, _ai_api_key
     global _ai_extra_prompt, _ai_consented, _ai_model_options
     global _ai_cleanup_max_depth, _ai_enabled_tools
-    global _temp_cleanup
+    global _ui_parent_row_bg, _ui_parent_row_dim
+    global _ui_hover_group_outline, _ui_hover_group_min, _ui_tree_guide, _ui_parent_sep
+    global _ui_tool_panel_open, _ui_tool_panel_open_explicit, _ui_tool_panel_width
+    global _temp_cleanup, _auto_check_updates
 
     _scan_workers = default_scan_workers()
     _compress_snapshots = True
     _use_mft = True
     _search_memory_index = True
     _temp_cleanup = True
+    _auto_check_updates = True
     _remember_window_size = True
     _window_width = 0
     _window_height = 0
@@ -1517,6 +1645,9 @@ def reset_settings_to_defaults(*, lang: str | None = None) -> dict:
     _ui_hover_group_min = 10
     _ui_tree_guide = True
     _ui_parent_sep = False
+    _ui_tool_panel_open = False
+    _ui_tool_panel_open_explicit = None
+    _ui_tool_panel_width = wingeom.PANEL_W_DEFAULT
     _lang = _normalize_lang(lang) if lang is not None else "en"
     _ai_enabled = False
     _ai_base_url = str(_AI_DEFAULTS["base_url"])
@@ -1689,6 +1820,7 @@ def settings_dict() -> dict:
         "use_mft": _use_mft,
         "search_memory_index": _search_memory_index,
         "temp_cleanup": _temp_cleanup,
+        "auto_check_updates": bool(_auto_check_updates),
         "remember_window_size": bool(_remember_window_size),
         "window_width": int(_window_width),
         "window_height": int(_window_height),
@@ -1712,6 +1844,9 @@ def settings_dict() -> dict:
         "ui_hover_group_min": _ui_hover_group_min,
         "ui_tree_guide": _ui_tree_guide,
         "ui_parent_sep": _ui_parent_sep,
+        "ui_tool_panel_open": _ui_tool_panel_open,
+        "ui_tool_panel_open_explicit": _ui_tool_panel_open_explicit is not None,
+        "ui_tool_panel_width": _ui_tool_panel_width,
         # AI 配置与通用设置同文件；模块层再决定是否暴露明文 key
         "ai": _ai_payload(),
     }

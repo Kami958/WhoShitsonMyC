@@ -148,6 +148,85 @@ def test_parse_file_name_and_pick():
     assert best.name == "Hello.txt"
 
 
+def _reparse_buffer(
+    tag: int, target: str, *, print_name: str | None = None
+) -> bytes:
+    """构造驻留 REPARSE_DATA_BUFFER 内容（与 _minimal_file_record 同源逻辑）。"""
+    is_symlink = tag == 0xA000000C
+    sub = "\\??\\" + target
+    sub_b = sub.encode("utf-16-le")
+    print_b = (target if print_name is None else print_name).encode("utf-16-le")
+    path_off = 20 if is_symlink else 16
+    content = bytearray(path_off + len(sub_b) + len(print_b))
+    struct.pack_into("<I", content, 0, tag)
+    struct.pack_into("<H", content, 4, len(content) - 8)
+    struct.pack_into("<H", content, 8, 0)
+    struct.pack_into("<H", content, 10, len(sub_b))
+    struct.pack_into("<H", content, 12, len(sub_b))
+    struct.pack_into("<H", content, 14, len(print_b))
+    content[path_off : path_off + len(sub_b)] = sub_b
+    content[path_off + len(sub_b) :] = print_b
+    return bytes(content)
+
+
+def test_parse_reparse_target_junction_printname():
+    from core.mft.parse import parse_reparse_target
+
+    buf = _reparse_buffer(0xA0000003, r"D:\360download\目标")
+    # PrintName 是干净路径，优先取它（不残留 \\??\\ 前缀）
+    assert parse_reparse_target(buf, 0xA0000003) == r"D:\360download\目标"
+
+
+def test_parse_reparse_target_symlink_offset():
+    """符号链接 PathBuffer 前多 4 字节 Flags，偏移与 junction 不同。"""
+    from core.mft.parse import parse_reparse_target
+
+    buf = _reparse_buffer(0xA000000C, r"D:\tools\link")
+    assert parse_reparse_target(buf, 0xA000000C) == r"D:\tools\link"
+
+
+def test_parse_reparse_target_substitute_fallback():
+    """PrintName 为空时回退 SubstituteName 并剥 \\??\\ 前缀。"""
+    from core.mft.parse import parse_reparse_target
+
+    sub = "\\??\\D:\\fallback"
+    sub_b = sub.encode("utf-16-le")
+    path_off = 20
+    content = bytearray(path_off + len(sub_b))
+    struct.pack_into("<I", content, 0, 0xA000000C)
+    struct.pack_into("<H", content, 4, len(content) - 8)
+    struct.pack_into("<H", content, 8, 0)
+    struct.pack_into("<H", content, 10, len(sub_b))
+    struct.pack_into("<H", content, 12, 0)  # PrintNameLength = 0
+    struct.pack_into("<H", content, 14, 0)
+    content[path_off : path_off + len(sub_b)] = sub_b
+    assert parse_reparse_target(bytes(content), 0xA000000C) == r"D:\fallback"
+
+
+def test_parse_reparse_target_garbage_returns_empty():
+    from core.mft.parse import parse_reparse_target
+
+    assert parse_reparse_target(b"\x00" * 4, 0xA0000003) == ""
+    assert parse_reparse_target(b"", 0xA0000003) == ""
+
+
+def test_parse_record_extracts_link_target():
+    from core.mft.parse import parse_record
+
+    rec_bytes = _minimal_file_record(
+        number=7,
+        name="link",
+        is_dir=True,
+        reparse_tag=0xA0000003,
+        link_target=r"D:\360download\目标",
+    )
+    rec = parse_record(rec_bytes, 7)
+    assert rec is not None
+    assert rec.has_reparse is True
+    assert rec.reparse_tag == 0xA0000003
+    assert rec.link_target == r"D:\360download\目标"
+
+
 def _minimal_file_record(
     *,
     number: int,
@@ -156,6 +235,8 @@ def _minimal_file_record(
     name: str = "x.txt",
     parent: int = 5,
     rec_size: int = 1024,
+    reparse_tag: int = 0,
+    link_target: str = "",
 ) -> bytes:
     """构造可被 parse_record 识别的最小 FILE 记录。"""
     buf = bytearray(rec_size)
@@ -209,6 +290,36 @@ def _minimal_file_record(
     buf[v + 0x42 : v + 0x42 + len(name_bytes)] = name_bytes
     off += fn_alen
 
+    if reparse_tag:
+        # REPARSE_DATA_BUFFER：tag / datalen / Substitute+Print 名偏移长度 / PathBuffer
+        sub = ("\\??\\" + link_target) if link_target else ""
+        sub_b = sub.encode("utf-16-le")
+        print_b = link_target.encode("utf-16-le")
+        is_symlink = reparse_tag == 0xA000000C
+        path_off = 20 if is_symlink else 16
+        content = bytearray(path_off + len(sub_b) + len(print_b))
+        struct.pack_into("<I", content, 0, reparse_tag)
+        struct.pack_into("<H", content, 4, len(content) - 8)
+        struct.pack_into("<H", content, 8, 0)               # SubstituteNameOffset
+        struct.pack_into("<H", content, 10, len(sub_b))     # SubstituteNameLength
+        struct.pack_into("<H", content, 12, len(sub_b))     # PrintNameOffset
+        struct.pack_into("<H", content, 14, len(print_b))   # PrintNameLength
+        content[path_off : path_off + len(sub_b)] = sub_b
+        content[path_off + len(sub_b) :] = print_b
+
+        rp_vsize = len(content)
+        rp_alen = 0x18 + rp_vsize
+        if rp_alen % 8:
+            rp_alen += 8 - (rp_alen % 8)
+        struct.pack_into("<I", buf, off, 0xC0)  # ATTR_REPARSE_POINT
+        struct.pack_into("<I", buf, off + 4, rp_alen)
+        buf[off + 8] = 0  # resident
+        buf[off + 9] = 0
+        struct.pack_into("<I", buf, off + 0x10, rp_vsize)
+        struct.pack_into("<H", buf, off + 0x14, 0x18)
+        buf[off + 0x18 : off + 0x18 + rp_vsize] = content
+        off += rp_alen
+
     # end marker
     struct.pack_into("<I", buf, off, 0xFFFFFFFF)
     return bytes(buf)
@@ -239,8 +350,8 @@ def test_parse_records_serial_and_pack_roundtrip():
 
     # pack/unpack 与 parse_record 一致
     direct = [parse_record(blob[i * rec_size : (i + 1) * rec_size], i) for i in range(7)]
-    meta, names = parallel._pack_chunk(direct)
-    back = parallel._unpack_chunk(0, meta, names)
+    meta, names, link_targets = parallel._pack_chunk(direct)
+    back = parallel._unpack_chunk(0, meta, names, link_targets)
     assert len(back) == 7
     assert back[6] is not None
     assert back[6].file_names[0].name == "hello.txt"
@@ -281,6 +392,79 @@ def test_parse_records_parallel_matches_serial(monkeypatch):
         assert len(a.file_names) == len(b.file_names)
         if a.file_names:
             assert a.file_names[0].name == b.file_names[0].name
+
+
+def test_worker_parse_range_packs_full_meta():
+    """worker 直调：pack_into 的值个数必须与 _META 字段数一致。
+
+    少传一个值会抛 struct.error，而上层 pipeline 捕获后静默回落串行解析——
+    功能看起来正常，多进程加速却整段失效。故此处直调 worker，不走会兜底的入口。
+    """
+    from multiprocessing import shared_memory
+
+    from core.mft import parallel
+
+    rec_size = 1024
+    recs = [
+        _minimal_file_record(number=0, name="$MFT"),
+        bytes(rec_size),  # 非 FILE：走 _F_NONE 分支
+        _minimal_file_record(number=2, name="a.txt", in_use=False),  # free 记录
+        _minimal_file_record(number=3, name="b.txt"),
+    ]
+    blob = b"".join(recs)
+    n = len(recs)
+
+    shm = shared_memory.SharedMemory(create=True, size=len(blob))
+    try:
+        shm.buf[: len(blob)] = blob
+        start, meta, names, link_targets = parallel._worker_parse_range(
+            (shm.name, len(blob), 0, n, rec_size, 0)
+        )
+    finally:
+        shm.close()
+        shm.unlink()
+
+    assert start == 0
+    assert len(meta) == n * parallel.META_SIZE
+    back = parallel._unpack_chunk(0, meta, names, link_targets)
+    assert back[1] is None  # 非 FILE
+    assert back[2] is None  # free
+    assert back[3] is not None
+    assert back[3].file_names[0].name == "b.txt"
+
+
+def test_worker_parse_range_matches_serial_reparse_tag():
+    """worker 与串行解析对 reparse_tag 的结果必须一致。"""
+    from multiprocessing import shared_memory
+
+    from core.mft import parallel
+
+    rec_size = 1024
+    tag = 0xA0000003  # junction
+    recs = [
+        _minimal_file_record(number=0, name="$MFT"),
+        _minimal_file_record(number=1, name="link", is_dir=True, reparse_tag=tag),
+    ]
+    blob = b"".join(recs)
+
+    serial = parallel.parse_records_serial(blob, rec_size)
+    assert serial[1] is not None
+    assert serial[1].reparse_tag == tag
+
+    shm = shared_memory.SharedMemory(create=True, size=len(blob))
+    try:
+        shm.buf[: len(blob)] = blob
+        _start, meta, names, link_targets = parallel._worker_parse_range(
+            (shm.name, len(blob), 0, len(recs), rec_size, 0)
+        )
+    finally:
+        shm.close()
+        shm.unlink()
+
+    back = parallel._unpack_chunk(0, meta, names, link_targets)
+    assert back[1] is not None
+    assert back[1].reparse_tag == tag
+    assert back[1].has_reparse is True
 
 
 def test_choose_mft_procs_formula(monkeypatch):
@@ -403,10 +587,10 @@ def test_compact_table_tree_matches_parsed():
         data_size=70,
         has_reparse=False,
     )
-    meta, names = parallel._pack_chunk(parsed)
+    meta, names, link_targets = parallel._pack_chunk(parsed)
     # pack 用相对下标；整表 start=0 即全局
     table = parallel.CompactMftTable(
-        n_records=len(parsed), meta=meta, names=names
+        n_records=len(parsed), meta=meta, names=names, link_targets=link_targets
     )
     rows_a, fc_a, dc_a, tot_a = build_entry_rows(parsed)
     rows_b, fc_b, dc_b, tot_b = build_entry_rows_from_compact(table)
@@ -414,6 +598,33 @@ def test_compact_table_tree_matches_parsed():
     assert len(rows_a) == len(rows_b) == 4
     # 根 size 上卷
     assert rows_a[0].size == rows_b[0].size == 120
+
+
+def test_compact_table_carries_link_target():
+    """紧凑路径（build_entry_rows_from_compact）的链接目标必须一路带到 EntryRow。"""
+    from core.mft import parallel
+    from core.mft.parse import ParsedRecord, FileNameAttr
+    from core.mft.tree import build_entry_rows_from_compact
+
+    parsed: list = [None] * 12
+    parsed[5] = ParsedRecord(
+        number=5, in_use=True, is_directory=True, base_record=0, mtime=10,
+        file_names=[FileNameAttr(5, 0, 0, 0, ".", 1)], data_size=0,
+    )
+    parsed[6] = ParsedRecord(
+        number=6, in_use=True, is_directory=True, base_record=0, mtime=11,
+        file_names=[FileNameAttr(5, 0, 0, 0x10, "link", 1)], data_size=0,
+        has_reparse=True, reparse_tag=0xA0000003,
+        link_target=r"D:\360download\目标",
+    )
+    meta, names, link_targets = parallel._pack_chunk(parsed)
+    table = parallel.CompactMftTable(
+        n_records=len(parsed), meta=meta, names=names, link_targets=link_targets
+    )
+    rows, _fc, _dc, _tot = build_entry_rows_from_compact(table)
+    link = next(r for r in rows if r.name == "link")
+    assert link.reparse_tag == 0xA0000003
+    assert link.link_target == r"D:\360download\目标"
 
 
 def test_parse_serial_with_usa_flag_on_bytes():

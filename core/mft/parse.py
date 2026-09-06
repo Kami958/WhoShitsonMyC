@@ -9,6 +9,8 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass, field
 
+from ..models import clean_link_target
+
 # Attribute types
 ATTR_STANDARD_INFORMATION = 0x10
 ATTR_ATTRIBUTE_LIST = 0x20
@@ -66,6 +68,8 @@ class ParsedRecord:
     file_names: list[FileNameAttr] = field(default_factory=list)
     data_size: int = 0  # unnamed $DATA real size (files)
     has_reparse: bool = False
+    reparse_tag: int = 0  # 驻留 $REPARSE_POINT 的 tag；非驻留（长目标）为 0
+    link_target: str = ""  # 驻留 reparse buffer 里的目标路径；取不到为空
     # 扩展记录：把 FILE_NAME 挂到 base 时由 tree 合并
 
 
@@ -93,6 +97,49 @@ def filetime_to_unix(ft: int) -> int:
         return max(0, (ft - _FILETIME_EPOCH) // 10_000_000)
     except Exception:
         return 0
+
+
+# REPARSE_DATA_BUFFER 内的名字区起点：符号链接前面多 4 字节 Flags。
+_REPARSE_PATH_OFF_JUNCTION = 16
+_REPARSE_PATH_OFF_SYMLINK = 20
+_TAG_SYMLINK = 0xA000000C
+
+
+def parse_reparse_target(buf: bytes | memoryview, tag: int) -> str:
+    """从驻留 REPARSE_DATA_BUFFER 里取链接目标路径。
+
+    结构（``buf`` 为属性内容起点）：0 为 tag，8/10 是 SubstituteName 的
+    偏移与长度，12/14 是 PrintName 的。名字区起点 junction 为 16、
+    符号链接为 20（前面多 4 字节 Flags），偏移都相对名字区起点。
+
+    优先取 PrintName（干净的显示路径）；为空时回退 SubstituteName，
+    它带 ``\\??\\`` 前缀，用 :func:`clean_link_target` 剥掉。解不出返回空串。
+    """
+    try:
+        n = len(buf)
+        if n < 16:
+            return ""
+        path_off = (
+            _REPARSE_PATH_OFF_SYMLINK if tag == _TAG_SYMLINK
+            else _REPARSE_PATH_OFF_JUNCTION
+        )
+        sub_off = _u16(buf, 8)
+        sub_len = _u16(buf, 10)
+        print_off = _u16(buf, 12)
+        print_len = _u16(buf, 14)
+        for off, length in ((print_off, print_len), (sub_off, sub_len)):
+            if length <= 0:
+                continue
+            s = path_off + off
+            e = s + length
+            if s < path_off or e > n:
+                continue
+            text = bytes(buf[s:e]).decode("utf-16-le", errors="replace").strip("\x00")
+            if text:
+                return clean_link_target(text)
+        return ""
+    except (ValueError, struct.error, UnicodeDecodeError):
+        return ""
 
 
 def record_number(record: bytes | memoryview, index: int) -> int:
@@ -224,6 +271,8 @@ def parse_record(record: bytes | memoryview, index: int) -> ParsedRecord | None:
     file_names: list[FileNameAttr] = []
     data_size = 0
     has_reparse = False
+    reparse_tag = 0
+    link_target = ""
 
     off = _u16(mv, 0x14)
     while off + 8 <= n:
@@ -272,6 +321,18 @@ def parse_record(record: bytes | memoryview, index: int) -> ParsedRecord | None:
                     data_size = rs
         elif atype == ATTR_REPARSE_POINT:
             has_reparse = True
+            # 驻留：tag 在内容前 4 字节（IO_REPARSE_TAG_*），目标路径在
+            # REPARSE_DATA_BUFFER 里。非驻留（长目标路径）需要 runlist 读盘，
+            # 这里不读，tag 留 0、目标留空（该条不标记为链接）。
+            if non_res == 0:
+                vsize = _u32(mv, off + 0x10)
+                voff = _u16(mv, off + 0x14)
+                if voff and vsize >= 4 and off + voff + 4 <= n:
+                    reparse_tag = _u32(mv, off + voff)
+                if voff and vsize >= 16 and off + voff + vsize <= n:
+                    link_target = parse_reparse_target(
+                        mv[off + voff : off + voff + vsize], reparse_tag
+                    )
 
         off += alen
 
@@ -284,6 +345,8 @@ def parse_record(record: bytes | memoryview, index: int) -> ParsedRecord | None:
         file_names=file_names,
         data_size=data_size,
         has_reparse=has_reparse,
+        reparse_tag=reparse_tag,
+        link_target=link_target,
     )
 
 

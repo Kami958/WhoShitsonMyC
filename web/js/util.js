@@ -118,6 +118,20 @@ function escapeHtml(s) {
   );
 }
 
+// Windows 路径：「盘符:\段1\段2…」，允许反斜杠与正斜杠混用，末段可为文件名。
+// 段名允许含空格（如 "Program Files"）和中文；路径以空白或全角标点收尾，
+// 避免把紧随其后的中文正文（如「，然后删除链接…」）一并吞进同一个 chip。
+const _WIN_PATH_RE =
+  /[A-Za-z]:[\\/](?:[^\\/:|*?"<>]+(?: [^\\/:|*?"<>]+)*[\\/])*[^\\/:|*?"<>]+?(?=[\s，。；、：？！）】」』]|$)/g;
+
+/** 把字符串里的 Windows 路径包成 <span class="path-chip">，先转义再切，避免 XSS。 */
+function highlightPaths(s) {
+  const escaped = escapeHtml(s);
+  return escaped.replace(_WIN_PATH_RE, (m) =>
+    `<span class="path-chip">${m}</span>`
+  );
+}
+
 /** 应用内确认框（替代 window.confirm，避免弹出系统原生窗口）。 */
 let _confirmResolver = null;
 /** 本次确认框是否带勾选（决定 resolve 形态）。 */
@@ -195,7 +209,7 @@ function showConfirmDialog(opts) {
 
   const message = options.message == null ? "" : String(options.message);
   const hasMessage = !!message.trim();
-  if (bodyEl) bodyEl.textContent = hasMessage ? message : "";
+  if (bodyEl) bodyEl.innerHTML = hasMessage ? highlightPaths(message) : "";
   if (contentEl) contentEl.classList.toggle("hidden", !hasMessage);
 
   const hasCheckbox = !!(options.checkboxLabel && row && chk && labelEl);

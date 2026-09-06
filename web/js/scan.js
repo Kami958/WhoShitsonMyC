@@ -256,6 +256,18 @@ function onPyEvent(event, payload) {
     case "migrate-done":
       // 遮罩与完成 toast 由 applySettingsAndClose / settings-applied 统一处理
       break;
+    case "migrate-dir-progress":
+      if (typeof onMigrateDirProgress === "function") onMigrateDirProgress(payload);
+      break;
+    case "migrate-dir-done":
+      if (typeof onMigrateDirDone === "function") onMigrateDirDone(payload);
+      break;
+    case "migrate-dir-restore-progress":
+      if (typeof onRestoreDirProgress === "function") onRestoreDirProgress(payload);
+      break;
+    case "migrate-dir-restore-done":
+      if (typeof onRestoreDirDone === "function") onRestoreDirDone(payload);
+      break;
     case "settings-applied":
       // Promise 等待方在 applySettingsAndClose 里处理
       break;

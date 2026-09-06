@@ -29,8 +29,14 @@ from bisect import bisect_left, bisect_right
 
 from .i18n import t
 from . import applog
-from .models import ChangeKind, DiffNode, SnapshotMeta
-from .snapshot import SnapshotError, open_readonly, read_meta
+from .models import ChangeKind, DiffNode, SnapshotMeta, reparse_kind
+from .snapshot import (
+    SNAPSHOT_FORMAT_VERSION,
+    SnapshotError,
+    entry_columns,
+    open_readonly,
+    read_meta,
+)
 
 
 class DiffError(Exception):
@@ -200,9 +206,48 @@ def _subtree_change_id_sets(
     )
 
 
-# 搜索候选：(父路径, 名字, 旧侧行, 新侧行)；行为 (id, size, is_dir, mtime)
-_SideRow = tuple[int, int, int, int]
+def _read_side_link_ids(conn: sqlite3.Connection) -> tuple[array, list[int]]:
+    """读一侧快照的链接条目，返回 (parent_of 数组, 链接条目 id 列表)。
+
+    只扫 ``reparse_tag != 0`` 的行（v4+ 快照；v3 无该列，调用方先按版本跳过）。
+    不拼路径，差集不需要；只用于沿 parent 链上卷出「含链接子树」标记。
+    """
+    n = _max_entry_id(conn)
+    parents = array("q", [-1]) * (n + 1)
+    ids: list[int] = []
+    cur = conn.execute(
+        "SELECT id, parent_id, reparse_tag FROM entries WHERE reparse_tag != 0"
+    )
+    for eid, pid, _tag in cur:
+        parents[eid] = -1 if pid is None else pid
+        ids.append(eid)
+    return parents, ids
+
+
+# 搜索候选：(父路径, 名字, 旧侧行, 新侧行)；
+# 行为 (id, size, is_dir, mtime, reparse_tag, link_target)
+_SideRow = tuple[int, int, int, int, int, str]
 _SearchEntry = tuple[str, str, "_SideRow | None", "_SideRow | None"]
+
+
+def _conn_version(conn: sqlite3.Connection) -> int:
+    """连接对应的快照格式版本（open_readonly 已挂载；缺省最新版）。"""
+    return int(getattr(conn, "_wmc_version", SNAPSHOT_FORMAT_VERSION))
+
+
+def _side_cols(conn: sqlite3.Connection) -> str:
+    """``name, id, size, is_dir, mtime[, reparse_tag[, link_target]]`` —— 按版本分派。"""
+    ver = _conn_version(conn)
+    if ver >= 5:
+        return "name, id, size, is_dir, mtime, reparse_tag, link_target"
+    if ver >= 4:
+        return "name, id, size, is_dir, mtime, reparse_tag"
+    return "name, id, size, is_dir, mtime"
+
+
+def _row_cols(conn: sqlite3.Connection) -> str:
+    """``id, parent_id, name, size, is_dir, mtime[, reparse_tag]`` —— 按连接版本分派。"""
+    return entry_columns(_conn_version(conn))
 
 # 与前端 SORT_OPTIONS 对齐；未知值回退 delta-desc
 _SEARCH_SORT_KEYS = frozenset({
@@ -301,7 +346,7 @@ class _SideIndex:
     """
 
     __slots__ = (
-        "ids", "parents", "sizes", "mtimes", "dirs",
+        "ids", "parents", "sizes", "mtimes", "dirs", "rtags", "link_targets",
         "blob", "starts", "orig_blob", "orig_starts", "_path_cache",
     )
 
@@ -311,6 +356,8 @@ class _SideIndex:
         self.sizes = array("q")
         self.mtimes = array("q")
         self.dirs = bytearray()
+        self.rtags = array("I")     # reparse_tag（32 位无符号）；v3 快照全 0
+        self.link_targets: list[str] = []  # 链接目标（v4 及更早为空串）
         self.blob = ""
         self.starts = array("q")
         self.orig_blob = ""
@@ -325,8 +372,7 @@ class _SideIndex:
         idx = cls()
         names: list[str] = []
         cur = conn.execute(
-            "SELECT id, parent_id, name, size, is_dir, mtime "
-            "FROM entries ORDER BY id"
+            f"SELECT {_row_cols(conn)} FROM entries ORDER BY id"
         )
         while True:
             if stop.is_set():
@@ -334,8 +380,10 @@ class _SideIndex:
             rows = cur.fetchmany(50000)
             if not rows:
                 break
-            # 按列批量 extend（C 级），比逐行 append 快数倍
-            ids, pids, nms, sizes, dirs, mtimes = zip(*rows)
+            # 按列批量 extend（C 级），比逐行 append 快数倍。
+            # v5 多 reparse_tag、link_target 两列；v4 只有 reparse_tag；
+            # v3 都没有，按默认值补。
+            ids, pids, nms, sizes, dirs, mtimes, *rest = zip(*rows)
             idx.ids.extend(ids)
             idx.parents.extend(
                 -1 if p is None else p for p in pids
@@ -343,6 +391,10 @@ class _SideIndex:
             idx.sizes.extend(sizes)
             idx.mtimes.extend(mtimes)
             idx.dirs.extend(1 if d else 0 for d in dirs)
+            idx.rtags.extend(rest[0] if rest else (0 for _ in nms))
+            idx.link_targets.extend(
+                rest[1] if len(rest) > 1 else ("" for _ in nms)
+            )
             names.extend(nm or "" for nm in nms)
         if stop.is_set():
             return None
@@ -423,15 +475,17 @@ class _SideIndex:
         return (
             int(self.ids[i]), int(self.sizes[i]),
             int(self.dirs[i]), int(self.mtimes[i]),
+            int(self.rtags[i]), self.link_targets[i],
         )
 
     def approx_bytes(self) -> int:
         """索引常驻内存的粗略字节数（供日志排查用）。"""
         total = sys.getsizeof(self.blob) + sys.getsizeof(self.orig_blob)
         for arr in (self.ids, self.parents, self.sizes, self.mtimes,
-                    self.starts, self.orig_starts):
+                    self.starts, self.orig_starts, self.rtags):
             total += len(arr) * arr.itemsize
         total += len(self.dirs)
+        total += sum(len(s) for s in self.link_targets)
         return total
 
 
@@ -510,6 +564,9 @@ class Diff:
         self._marks_ready = False
         self._subtree_added_ids: set[int] = set()
         self._subtree_removed_ids: set[int] = set()
+        # 「递归范围内含链接」下钻标记。v4+ 快照才可能有；v3 恒空。
+        self._link_ids_ready = False
+        self._subtree_link_ids: set[int] = set()
         # 搜索结果缓存：(关键词 casefold, 最宽候选, {(选项,排序): 排好的列表})。
         # 区分大小写/严格匹配是候选的子集，只在内存过滤，不另查库。
         # 快照只读，会话内无需失效；翻页/换排序直接复用排好的列表。
@@ -660,6 +717,23 @@ class Diff:
             new_pid,
             lambda name, o, n: self._node_from_sides(parent, name, o, n),
         )
+
+        # 命中删除白名单的节点打标（UI 显示「白名单」徽标）。
+        # 白名单读取或匹配失败一律兜底，不影响主流程。
+        try:
+            from core.fs_delete import path_matches_blacklist
+            from core.store import get_delete_blacklist
+
+            bl = get_delete_blacklist()
+            if bl:
+                root_abs = (self.new_meta.root or self.old_meta.root or "").rstrip("\\/")
+                sep = "\\" if os.sep == "\\" else "/"
+                for nd in nodes:
+                    rel = (nd.path or "").replace("/", sep)
+                    abs_path = root_abs + sep + rel if root_abs and rel else (rel or root_abs)
+                    nd.whitelisted = path_matches_blacklist(abs_path, bl)
+        except Exception:
+            pass
 
         if sort:
             nodes.sort(key=lambda d: abs(d.delta), reverse=True)
@@ -844,22 +918,26 @@ class Diff:
                 chunk = names[i : i + 500]
                 marks = ",".join("?" * len(chunk))
                 cur = conn.execute(
-                    "SELECT name, id, size, is_dir, mtime FROM entries "
+                    f"SELECT {_side_cols(conn)} FROM entries "
                     f"WHERE parent_id = ? AND name IN ({marks})",
                     [pid, *chunk],
                 )
-                for name, eid, size, is_dir, mtime in cur:
+                for name, eid, size, is_dir, mtime, *rest in cur:
                     hits[_child_path(parent, name)] = (
-                        int(eid), int(size), int(is_dir), int(mtime)
+                        int(eid), int(size), int(is_dir), int(mtime),
+                        int(rest[0]) if rest else 0,
                     )
 
     def ensure_marks(self) -> None:
-        """启用「递归范围内含新增/已删除」下钻标记，首次一次性计算后复用。
+        """启用「递归范围内含新增/已删除/链接」下钻标记，首次一次性计算后复用。
 
         ``self._subtree_added_ids`` / ``self._subtree_removed_ids``：条目 id
         集合，包含变更条目自身及其祖先。目录的大小是递归汇总的，深层文件的
         新增不会让目录 kind 变成 added；前端筛「新增/已删除」时据此保留目录
         作下钻入口，否则树会整层被滤空。
+
+        ``self._subtree_link_ids``：含链接的子树 id 集合（同样含祖先），
+        供前端筛「链接」时保留下钻入口。v4+ 快照才可能有；v3 恒空。
 
         线性算法，不做递归 CTE：递归 CTE 在 SQLite 里每层迭代都重扫全表，
         大快照下慢一个数量级；这里两侧各一次全表扫描，栈式拼出条目路径，
@@ -873,15 +951,26 @@ class Diff:
             old_db, new_db
         )
         self._marks_ready = True
+        # 链接标记一并就绪（v3 侧无 reparse_tag 列，跳过）
+        if self._link_ids_ready:
+            return
+        link_ids: set[int] = set()
+        for conn, meta in ((self._old, self.old_meta), (self._new, self.new_meta)):
+            if meta.format_version < 4:
+                continue
+            parents, ids = _read_side_link_ids(conn)
+            link_ids |= _propagate_ancestors(ids, parents)
+        self._subtree_link_ids = link_ids
+        self._link_ids_ready = True
 
     def _node_from_sides(
         self,
         parent: str,
         name: str,
-        o: tuple[int, int, int, int] | None,
-        n: tuple[int, int, int, int] | None,
+        o: _SideRow | None,
+        n: _SideRow | None,
     ) -> DiffNode | None:
-        """由两侧子行 ``(id, size, is_dir, mtime)`` 合成 :class:`DiffNode`。"""
+        """由两侧子行 ``(id, size, is_dir, mtime, reparse_tag, link_target)`` 合成节点。"""
         if o is None and n is None:
             return None
         path = _child_path(parent, name)
@@ -893,6 +982,8 @@ class Diff:
             incomparable,
         )
         mtime = n[3] if n is not None else (o[3] if o is not None else 0)
+        reparse_tag = int(n[4] if n is not None else (o[4] if o is not None else 0))
+        link_target = n[5] if n is not None else (o[5] if o is not None else "")
 
         if is_dir:
             ids = (o[0] if o else None, n[0] if n else None)
@@ -910,10 +1001,15 @@ class Diff:
                 and ids[0] is not None
                 and ids[0] in self._subtree_removed_ids
             )
+            has_link = self._link_ids_ready and (
+                (ids[0] is not None and ids[0] in self._subtree_link_ids)
+                or (ids[1] is not None and ids[1] in self._subtree_link_ids)
+            )
         else:
             has_children = False
             has_added = False
             has_removed = False
+            has_link = False
 
         return DiffNode(
             path=path,
@@ -927,6 +1023,9 @@ class Diff:
             has_added=has_added,
             has_removed=has_removed,
             mtime=mtime,
+            reparse_tag=reparse_tag,
+            has_link=has_link,
+            link_target=link_target,
         )
 
     def _resolve_dir(self, path: str) -> tuple[int | None, int | None]:
@@ -999,18 +1098,25 @@ def _root_id(conn: sqlite3.Connection) -> int | None:
 
 def _children_map(
     conn: sqlite3.Connection, parent_id: int | None
-) -> dict[str, tuple[int, int, int, int]]:
-    """取某父目录下直接子节点：``{name: (id, size, is_dir, mtime)}``。
+) -> dict[str, _SideRow]:
+    """取某父目录下直接子节点：``{name: (id, size, is_dir, mtime, reparse_tag, link_target)}``。
 
     ``parent_id=None``（该侧没有此目录）时返回空。
     """
     if parent_id is None:
         return {}
     cur = conn.execute(
-        "SELECT name, id, size, is_dir, mtime FROM entries WHERE parent_id = ?",
+        f"SELECT {_side_cols(conn)} FROM entries WHERE parent_id = ?",
         (parent_id,),
     )
-    return {name: (eid, size, is_dir, mtime) for name, eid, size, is_dir, mtime in cur}
+    out: dict[str, _SideRow] = {}
+    for name, eid, size, is_dir, mtime, *rest in cur:
+        out[name] = (
+            eid, size, is_dir, mtime,
+            int(rest[0]) if rest else 0,
+            str(rest[1]) if len(rest) > 1 else "",
+        )
+    return out
 
 
 def _children_count(conn: sqlite3.Connection, parent_id: int | None) -> int:
@@ -1043,12 +1149,16 @@ def _merge_child_nodes(
         base_rows = _children_map(conn_a, parent_a)
         if parent_b is not None:
             cur = conn_b.execute(
-                "SELECT name, id, size, is_dir, mtime FROM entries "
+                f"SELECT {_side_cols(conn_b)} FROM entries "
                 "WHERE parent_id = ?",
                 (parent_b,),
             )
-            for name, eid, size, is_dir, mtime in cur:
-                other_row = (eid, size, is_dir, mtime)
+            for name, eid, size, is_dir, mtime, *rest in cur:
+                other_row = (
+                    eid, size, is_dir, mtime,
+                    int(rest[0]) if rest else 0,
+                    str(rest[1]) if len(rest) > 1 else "",
+                )
                 base_row = base_rows.pop(name, None)
                 node = make_node(name, base_row, other_row)
                 if node is not None:
@@ -1062,12 +1172,16 @@ def _merge_child_nodes(
     base_rows = _children_map(conn_b, parent_b)
     if parent_a is not None:
         cur = conn_a.execute(
-            "SELECT name, id, size, is_dir, mtime FROM entries "
+            f"SELECT {_side_cols(conn_a)} FROM entries "
             "WHERE parent_id = ?",
             (parent_a,),
         )
-        for name, eid, size, is_dir, mtime in cur:
-            other_row = (eid, size, is_dir, mtime)
+        for name, eid, size, is_dir, mtime, *rest in cur:
+            other_row = (
+                eid, size, is_dir, mtime,
+                int(rest[0]) if rest else 0,
+                str(rest[1]) if len(rest) > 1 else "",
+            )
             base_row = base_rows.pop(name, None)
             node = make_node(name, other_row, base_row)
             if node is not None:
@@ -1140,7 +1254,7 @@ def _hits_with_paths(
     *,
     cancel: threading.Event | None = None,
 ) -> dict[str, _SideRow]:
-    """名字包含 ``name_key`` 的条目及其相对路径：``{path: (id, size, is_dir, mtime)}``。
+    """名字包含 ``name_key`` 的条目及其相对路径：``{path: (id, size, is_dir, mtime, reparse_tag, link_target)}``。
 
     最宽匹配：``LIKE`` 包含、ASCII 不区分大小写。更严的选项在内存过滤。
 
@@ -1149,7 +1263,7 @@ def _hits_with_paths(
     :class:`SearchCancelled`（执行中的 SQL 由 ``interrupt()`` 打断）。
     """
     rows = conn.execute(
-        "SELECT id, parent_id, name, size, is_dir, mtime FROM entries "
+        f"SELECT {_row_cols(conn)} FROM entries "
         "WHERE parent_id IS NOT NULL AND name LIKE ? ESCAPE '\\' "
         "LIMIT ?",
         (_like_contains(name_key), int(fetch_n)),
@@ -1185,10 +1299,14 @@ def _hits_with_paths(
         pending -= lineage.keys()
 
     hits: dict[str, _SideRow] = {}
-    for eid, _pid, _name, size, is_dir, mtime in rows:
+    for eid, _pid, _name, size, is_dir, mtime, *rest in rows:
         path = _lineage_path(lineage, int(eid))
         if path:
-            hits[path] = (int(eid), int(size), int(is_dir), int(mtime))
+            hits[path] = (
+                int(eid), int(size), int(is_dir), int(mtime),
+                int(rest[0]) if rest else 0,
+                str(rest[1]) if len(rest) > 1 else "",
+            )
     return hits
 
 

@@ -27,8 +27,8 @@ _F_IS_DIR = 0x02
 _F_REPARSE = 0x04
 _F_NONE = 0x80  # parse_record 返回 None
 
-# flags, pad, nnames, base_record, mtime, data_size → 1+1+2+8+4+8 = 24
-_META = struct.Struct("<BBHQIQ")
+# flags, pad, nnames, base_record, mtime, data_size, reparse_tag → 1+1+2+8+4+8+4 = 28
+_META = struct.Struct("<BBHQIQI")
 _META_SIZE = _META.size
 
 # 全局导出供 tree 紧凑路径使用（避免魔法数分叉）
@@ -50,6 +50,8 @@ class CompactMftTable:
     n_records: int
     meta: bytes  # n_records * META_SIZE
     names: list[NameRow] = field(default_factory=list)
+    # 链接目标路径是变长字符串，不塞定长 meta；与 names 同样走旁路列表
+    link_targets: list[tuple[int, str]] = field(default_factory=list)
 
 # 每进程至少约这么多条才值得开池（小卷单进程更快）
 _RECORDS_PER_PROC = 50_000
@@ -135,13 +137,14 @@ def _chunk_ranges(n: int, procs: int) -> list[tuple[int, int]]:
 
 def _pack_chunk(
     records: list[ParsedRecord | None],
-) -> tuple[bytes, list[tuple[int, int, int, int, int, str, int]]]:
-    """把一段 ParsedRecord 压成 meta bytes + 文件名表。"""
+) -> tuple[bytes, list[NameRow], list[tuple[int, str]]]:
+    """把一段 ParsedRecord 压成 meta bytes + 文件名表 + 链接目标表。"""
     buf = bytearray(len(records) * _META_SIZE)
-    names: list[tuple[int, int, int, int, int, str, int]] = []
+    names: list[NameRow] = []
+    link_targets: list[tuple[int, str]] = []
     for i, rec in enumerate(records):
         if rec is None:
-            _META.pack_into(buf, i * _META_SIZE, _F_NONE, 0, 0, 0, 0, 0)
+            _META.pack_into(buf, i * _META_SIZE, _F_NONE, 0, 0, 0, 0, 0, 0)
             continue
         flags = 0
         if rec.in_use:
@@ -164,7 +167,10 @@ def _pack_chunk(
             rec.base_record & 0xFFFFFFFFFFFFFFFF,
             rec.mtime & 0xFFFFFFFF,
             rec.data_size & 0xFFFFFFFFFFFFFFFF,
+            rec.reparse_tag & 0xFFFFFFFF,
         )
+        if rec.link_target:
+            link_targets.append((i, rec.link_target))
         for fn in fns or ():
             names.append(
                 (
@@ -177,13 +183,14 @@ def _pack_chunk(
                     fn.namespace,
                 )
             )
-    return bytes(buf), names
+    return bytes(buf), names, link_targets
 
 
 def _unpack_chunk(
     start: int,
     meta: bytes,
     names: list[tuple[int, int, int, int, int, str, int]],
+    link_targets: list[tuple[int, str]] | None = None,
 ) -> list[ParsedRecord | None]:
     n = len(meta) // _META_SIZE
     out: list[ParsedRecord | None] = [None] * n
@@ -200,8 +207,12 @@ def _unpack_chunk(
                     namespace=ns,
                 )
             )
+    target_buckets: list[str] = [""] * n
+    for rel, target in link_targets or ():
+        if 0 <= rel < n:
+            target_buckets[rel] = target
     for i in range(n):
-        flags, _pad, nnames, base, mtime, data_size = _META.unpack_from(
+        flags, _pad, nnames, base, mtime, data_size, rtag = _META.unpack_from(
             meta, i * _META_SIZE
         )
         if flags & _F_NONE:
@@ -218,17 +229,19 @@ def _unpack_chunk(
             file_names=fns,
             data_size=data_size,
             has_reparse=bool(flags & _F_REPARSE),
+            reparse_tag=rtag,
+            link_target=target_buckets[i],
         )
     return out
 
 
 def _worker_parse_range(
     args: tuple[str, int, int, int, int, int],
-) -> tuple[int, bytes, list[tuple[int, int, int, int, int, str, int]]]:
+) -> tuple[int, bytes, list[tuple[int, int, int, int, int, str, int]], list[tuple[int, str]]]:
     """子进程入口：从 SharedMemory 解析 [start, end) 条记录。
 
     必须是模块顶层函数，Windows spawn 才能 pickle。
-    返回 ``(start, meta_bytes, names)``。边解析边打包，避免整段 ParsedRecord 峰值。
+    返回 ``(start, meta_bytes, names, link_targets)``。边解析边打包，避免整段 ParsedRecord 峰值。
 
     ``bytes_per_sector > 0`` 时先就地 USA（pipeline 读入时未修），再筛 free / 解析。
 
@@ -241,6 +254,7 @@ def _worker_parse_range(
     count = end - start
     out_buf = bytearray(count * _META_SIZE)
     names: list[tuple[int, int, int, int, int, str, int]] = []
+    link_targets: list[tuple[int, str]] = []
     try:
         # 延迟导入：worker 进程避免无谓抬体积；USA 仅 pipeline 路径需要
         apply_usa = None
@@ -261,7 +275,7 @@ def _worker_parse_range(
                         or (mv[off + 0x16] & 0x01) == 0
                     ):
                         _META.pack_into(
-                            out_buf, rel * _META_SIZE, _F_NONE, 0, 0, 0, 0, 0
+                            out_buf, rel * _META_SIZE, _F_NONE, 0, 0, 0, 0, 0, 0
                         )
                         continue
                     # pipeline：读入后未 USA，parse 前就地修
@@ -276,7 +290,7 @@ def _worker_parse_range(
                         rec_mv.release()
                     if rec is None:
                         _META.pack_into(
-                            out_buf, rel * _META_SIZE, _F_NONE, 0, 0, 0, 0, 0
+                            out_buf, rel * _META_SIZE, _F_NONE, 0, 0, 0, 0, 0, 0
                         )
                         continue
                     flags = 0
@@ -300,7 +314,10 @@ def _worker_parse_range(
                         rec.base_record & 0xFFFFFFFFFFFFFFFF,
                         rec.mtime & 0xFFFFFFFF,
                         rec.data_size & 0xFFFFFFFFFFFFFFFF,
+                        rec.reparse_tag & 0xFFFFFFFF,
                     )
+                    if rec.link_target:
+                        link_targets.append((i, rec.link_target))
                     for fn in fns or ():
                         # 直接发全局下标，主进程 gather 可 list.extend
                         names.append(
@@ -316,7 +333,7 @@ def _worker_parse_range(
                         )
             finally:
                 mv.release()
-        return start, bytes(out_buf), names
+        return start, bytes(out_buf), names, link_targets
     finally:
         try:
             shm.close()
@@ -438,9 +455,11 @@ def _serial_to_compact(
         cancel=cancel,
         bytes_per_sector=bytes_per_sector,
     )
-    meta, names = _pack_chunk(parsed)
+    meta, names, link_targets = _pack_chunk(parsed)
     # _pack_chunk 用相对下标 0..n-1，已是全局
-    return CompactMftTable(n_records=len(parsed), meta=meta, names=names)
+    return CompactMftTable(
+        n_records=len(parsed), meta=meta, names=names, link_targets=link_targets
+    )
 
 
 class _ByteCoverage:
@@ -610,6 +629,7 @@ class StreamingCompactCollector:
 
         full_meta = bytearray(n * _META_SIZE)
         all_names: list[NameRow] = []
+        all_link_targets: list[tuple[int, str]] = []
         done = 0
         gather_s = 0.0
 
@@ -620,7 +640,7 @@ class StreamingCompactCollector:
                 if self._cancel and self._cancel():
                     raise InterruptedError("cancelled")
                 try:
-                    start, meta, names = ar.get()
+                    start, meta, names, link_targets = ar.get()
                 except Exception:
                     if self._own_pool:
                         close_parse_pool(self._pool, terminate=True)
@@ -632,6 +652,8 @@ class StreamingCompactCollector:
                 full_meta[off : off + len(meta)] = meta
                 if names:
                     all_names.extend(names)
+                if link_targets:
+                    all_link_targets.extend(link_targets)
                 gather_s += time.perf_counter() - t_g0
                 done += count
                 if self._progress is not None:
@@ -649,7 +671,10 @@ class StreamingCompactCollector:
         if self._progress is not None:
             self._progress(n, n)
         return CompactMftTable(
-            n_records=n, meta=bytes(full_meta), names=all_names
+            n_records=n,
+            meta=bytes(full_meta),
+            names=all_names,
+            link_targets=all_link_targets,
         )
 
 
@@ -725,13 +750,14 @@ def collect_compact_from_shared_memory(
 
         full_meta = bytearray(n * _META_SIZE)
         all_names: list[NameRow] = []
+        all_link_targets: list[tuple[int, str]] = []
         done = 0
         gather_s = 0.0
         # wait：imap 墙钟（含 worker CPU + IPC + 主进程 gather）
         if _span_start:
             _span_start("mft_parse_wait")
         try:
-            for start, meta, names in active.imap_unordered(
+            for start, meta, names, link_targets in active.imap_unordered(
                 _worker_parse_range, tasks, chunksize=1
             ):
                 if cancel and cancel():
@@ -743,6 +769,8 @@ def collect_compact_from_shared_memory(
                 if names:
                     # worker 已写全局下标，直接 extend
                     all_names.extend(names)
+                if link_targets:
+                    all_link_targets.extend(link_targets)
                 gather_s += time.perf_counter() - t_g0
                 done += count
                 if progress is not None:
@@ -757,7 +785,10 @@ def collect_compact_from_shared_memory(
         if progress is not None:
             progress(n, n)
         return CompactMftTable(
-            n_records=n, meta=bytes(full_meta), names=all_names
+            n_records=n,
+            meta=bytes(full_meta),
+            names=all_names,
+            link_targets=all_link_targets,
         )
     except InterruptedError:
         if active is not None and own_pool:
@@ -818,7 +849,7 @@ def parse_from_shared_memory(
             (idx, p, a, r, f, n, ns)
             for idx, p, a, r, f, n, ns in table.names
         ]
-        return _unpack_chunk(0, table.meta, names_rel)
+        return _unpack_chunk(0, table.meta, names_rel, table.link_targets)
     finally:
         if _span_end:
             _span_end("mft_parse_unpack")

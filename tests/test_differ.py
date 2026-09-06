@@ -129,6 +129,36 @@ def _write_snapshot_rows(db_path, rows):
     conn.close()
 
 
+def test_link_target_carried_into_diff_node(tmp_path):
+    """v5 快照的链接目标在对比结果里可见；旧 v4 侧缺该列读出为空串。"""
+    from core.models import SNAPSHOT_FORMAT_VERSION
+
+    old_db = os.path.join(tmp_path, "old.db")
+    new_db = os.path.join(tmp_path, "new.db")
+
+    def _entries(link_target=""):
+        return [
+            Entry(id=1, parent_id=None, name="", size=0, is_dir=True),
+            Entry(
+                id=2, parent_id=1, name="link", size=0, is_dir=True,
+                reparse_tag=0xA0000003, link_target=link_target,
+            ),
+        ]
+
+    old_meta = SnapshotMeta(root="C:\\probe", scanned_at=0.0, format_version=3)
+    new_meta = SnapshotMeta(root="C:\\probe", scanned_at=1.0,
+                            format_version=SNAPSHOT_FORMAT_VERSION)
+    write_snapshot(old_db, "C:\\probe", _entries(), old_meta)  # v3，无链接信息
+    write_snapshot(new_db, "C:\\probe", _entries(r"D:\360download\目标"), new_meta)
+
+    with Diff(old_db, new_db) as diff:
+        diff.ensure_marks()
+        nodes = {n.path: n for n in diff.compare_children("")}
+    link = nodes["link"]
+    assert link.reparse_tag == 0xA0000003
+    assert link.link_target == r"D:\360download\目标"
+
+
 def test_changed_dir_marks_by_path_not_id(tmp_path):
     """标记按相对路径判定，不受两侧快照条目 id 各自分配的影响。
 
