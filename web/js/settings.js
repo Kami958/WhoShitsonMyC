@@ -273,6 +273,10 @@ function fillSettingsFormFromDraft() {
   if (uiTreeGuideChk) uiTreeGuideChk.checked = d.ui_tree_guide !== false;
   const uiParentSepChk = $("#uiParentSepChk");
   if (uiParentSepChk) uiParentSepChk.checked = d.ui_parent_sep === true;
+  const uiMultiselectExitChk = $("#uiMultiselectExitChk");
+  if (uiMultiselectExitChk) uiMultiselectExitChk.checked = d.ui_multiselect_exit_after_add !== false;
+  const uiMultiselectDoubleEscChk = $("#uiMultiselectDoubleEscChk");
+  if (uiMultiselectDoubleEscChk) uiMultiselectDoubleEscChk.checked = d.ui_multiselect_double_esc !== false;
   fillBlacklistSelect();
   updateSnapDirLine({
     snapshot_dir: d.snapshot_dir_display || d.snapshot_dir_builtin || "",
@@ -847,6 +851,12 @@ async function applySettingsAndClose() {
     ui_parent_sep: $("#uiParentSepChk")
       ? !!$("#uiParentSepChk").checked
       : _settingsDraft.ui_parent_sep === true,
+    ui_multiselect_exit_after_add: $("#uiMultiselectExitChk")
+      ? !!$("#uiMultiselectExitChk").checked
+      : _settingsDraft.ui_multiselect_exit_after_add !== false,
+    ui_multiselect_double_esc: $("#uiMultiselectDoubleEscChk")
+      ? !!$("#uiMultiselectDoubleEscChk").checked
+      : _settingsDraft.ui_multiselect_double_esc !== false,
     snapshot_dir: _settingsDraft.snapshot_dir_is_custom
       ? (_settingsDraft.snapshot_dir || "")
       : "",

@@ -223,7 +223,9 @@ body.is-sidebar-resizing .main {
   border-left: 3px solid transparent;
   cursor: default; position: relative;
 }
-.snap:hover { background: var(--bg-hover); }
+/* 置顶的快照：底色淡蓝；悬停比它更淡，两者都跟着主题色走 */
+.snap.is-pinned { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.snap:hover { background: color-mix(in srgb, var(--accent) 3%, transparent); }
 /* 选中高亮：基准=琥珀左边线，当前=蓝左边线 */
 .snap.sel-old { border-left-color: var(--old); background: var(--bg-hover); }
 .snap.sel-new { border-left-color: var(--new); background: var(--bg-hover); }
@@ -241,10 +243,27 @@ body.is-sidebar-resizing .main {
 }
 /* 路径置顶；时间次之 */
 .snap-root {
+  display: flex; align-items: flex-start; gap: 4px;
   color: var(--text); font-size: 14px; font-weight: 600;
-  word-break: break-all;
   line-height: 1.35;
 }
+.snap-root-main { flex: 1 1 auto; min-width: 0; word-break: break-all; }
+/* 右上角置顶图钉：命中区 28px，图标保持 13px；外框用负外边距收回去，不拉高卡片 */
+.snap-pin {
+  flex: none;
+  width: 28px; height: 28px;
+  margin: -5px -6px -5px 0;
+  padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: none; border-radius: 6px;
+  background: none;
+  color: var(--text-muted);
+  opacity: .45;
+  cursor: pointer;
+}
+.snap-pin svg { width: 13px; height: 13px; display: block; }
+.snap-pin:hover { opacity: 1; color: var(--text); background: var(--bg-hover); }
+.snap-pin.is-on { opacity: 1; color: var(--accent); }
 .snap-time {
   color: var(--text-dim); font-size: 13px; margin-top: 2px;
   font-variant-numeric: tabular-nums;
@@ -1831,12 +1850,25 @@ body.is-tool-panel-resizing .main {
 }
 .pending-item {
   display: flex;
-  align-items: flex-start;
-  gap: 6px;
+  flex-direction: column;
+  gap: 5px;
   padding: 8px;
   border: 1px solid var(--border-soft);
   border-radius: 6px;
   background: var(--bg);
+}
+/* 头行：图标 + 名称/大小 + 状态标签 + 操作；错误详情单独占下面一行全宽的位置 */
+.pending-item-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+}
+.pending-item-error {
+  font-size: 12px;
+  color: var(--grow);
+  line-height: 1.4;
+  word-break: break-all;
 }
 .pending-item.is-ok {
   border-color: color-mix(in srgb, #2e9b57 35%, var(--border-soft));
@@ -2023,11 +2055,6 @@ body.is-tool-panel-resizing .main {
   color: var(--text-muted);
   font-weight: 400;
 }
-.link-history-clear {
-  background: none;
-  color: var(--text-muted);
-}
-.link-history-clear:hover { background: var(--bg-hover); color: var(--text); }
 .link-history-empty {
   margin: 12px 12px;
   font-size: 12px;
@@ -2042,9 +2069,10 @@ body.is-tool-panel-resizing .main {
   padding: 2px 10px 12px;
 }
 .link-history-item {
-  padding: 8px 4px;
+  padding: 10px 4px;
   border-bottom: 1px solid var(--border-soft);
-  font-size: 12px;
+  font-size: 13px;
+  line-height: 1.5;
   color: var(--text);
 }
 .link-history-item:last-child { border-bottom: none; }
@@ -2052,7 +2080,7 @@ body.is-tool-panel-resizing .main {
 .link-history-item-head {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
   color: var(--text-muted);
   min-width: 0;
 }
@@ -2083,7 +2111,7 @@ body.is-tool-panel-resizing .main {
   margin-left: auto;
   flex-shrink: 0;
   font-family: ui-monospace, Consolas, monospace;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
 }
@@ -2091,8 +2119,8 @@ body.is-tool-panel-resizing .main {
 .link-history-item-paths {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  margin-top: 5px;
+  gap: 3px;
+  margin-top: 6px;
   min-width: 0;
 }
 .link-history-pathrow {
@@ -2103,10 +2131,9 @@ body.is-tool-panel-resizing .main {
 }
 .link-history-plabel {
   flex-shrink: 0;
-  width: 36px;
-  font-size: 11px;
+  width: 42px;
+  font-size: 12px;
   color: var(--text-muted);
-  letter-spacing: 0.04em;
 }
 .link-history-path,
 .link-history-target {
@@ -2118,13 +2145,20 @@ body.is-tool-panel-resizing .main {
 }
 .link-history-path { color: var(--text); }
 .link-history-target { color: var(--text-muted); }
+/* 备份清理等结果说明单独占一行：混在首行数量里会被窄面板省略号吃掉 */
+.link-history-note {
+  margin-top: 5px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
 .link-history-item-error {
-  margin-top: 4px;
+  margin-top: 5px;
   color: var(--grow);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  font-size: 11px;
+  font-size: 12px;
+  line-height: 1.4;
 }
 /* 成功项：操作、状态、路径、时间、标签一律走主色（黑），让成功记录视觉压过失败/取消；
    失败/取消保持原 muted 配色以区分。 */
@@ -2192,6 +2226,12 @@ body.is-tool-panel-resizing .main {
   background: color-mix(in srgb, var(--accent) 12%, var(--bg));
   color: var(--accent);
   font-weight: 600;
+}
+/* 清空整段历史是破坏性操作，跟一排筛选按钮区分开 */
+.link-history-filter-btn.link-history-clear { color: var(--grow); }
+.link-history-filter-btn.link-history-clear:hover {
+  background: color-mix(in srgb, var(--grow) 12%, transparent);
+  color: var(--grow);
 }
 .link-history-search-wrap {
   position: relative;
@@ -2348,15 +2388,15 @@ body.is-tool-panel-resizing .main {
 }
 .link-card-row-label {
   flex-shrink: 0;
-  width: 36px;
-  font-size: 11px;
+  width: 42px;
+  font-size: 12px;
   color: var(--text-muted);
   letter-spacing: 0.04em;
 }
 .link-card-row-value {
   flex: 1;
   min-width: 0;
-  font-size: 12.5px;
+  font-size: 13px;
   color: var(--text);
   word-break: break-all;
   /* 路径优先展示完整文件名（最末段），剩余行折叠 */
@@ -2377,14 +2417,14 @@ body.is-tool-panel-resizing .main {
   align-items: center;
   gap: 6px;
   margin-top: 4px;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-muted);
   line-height: 1.4;
   font-variant-numeric: tabular-nums;
 }
 .link-card-dot {
-  width: 6px;
-  height: 6px;
+  width: 7px;
+  height: 7px;
   flex-shrink: 0;
   border-radius: 50%;
   background: var(--text-muted);
@@ -2404,7 +2444,7 @@ body.is-tool-panel-resizing .main {
 .link-card-backup-path {
   flex: 1;
   min-width: 0;
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--text-dim);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2412,10 +2452,10 @@ body.is-tool-panel-resizing .main {
 }
 .link-card-backup-path.is-dim { color: var(--text-muted); }
 .link-card-dim { opacity: 0.75; }
-/* 备份行里的「删除备份」按钮压小一号，避免盖过路径；仍保留悬停提示 */
+/* 备份行里的「删除备份」按钮压小一号，与路径同字号；仍保留悬停提示 */
 .link-card-backup .link-btn {
   flex-shrink: 0;
-  font-size: 11px;
+  font-size: 12px;
   padding: 3px 7px;
 }
 
@@ -2477,6 +2517,120 @@ body.is-tool-panel-resizing .main {
   outline-offset: 1px;
 }
 .link-btn-text { line-height: 1; }
+
+/* ---- 迁移队列 ---- */
+/* 空队列时占满列表的位置，底部按钮组始终贴在面板底部 */
+#linkQueueEmpty { flex: 1; }
+.link-queue-list {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 2px 10px 12px;
+  gap: 6px;
+}
+.link-queue-list.hidden { display: none !important; }
+/* 与迁移列表的卡片同一套外形：1px 边框 + 6px 圆角 + 底色，靠间距分隔 */
+.link-queue-item {
+  padding: 10px 12px 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  background: var(--bg);
+  font-size: 13px;
+  color: var(--text);
+}
+/* 迁移中的项铺一层极淡蓝底，跟迁移列表的异常态同一手法 */
+.link-queue-item.is-running {
+  background: color-mix(in srgb, var(--accent) 6%, var(--bg));
+  border-color: color-mix(in srgb, var(--accent) 22%, var(--border-soft));
+}
+.link-queue-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.link-queue-index {
+  flex-shrink: 0;
+  width: 18px;
+  font-size: 12px;
+  color: var(--text-muted);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+/* 状态色点与迁移历史同一套读法：颜色在点上，文字保持中性 */
+.link-queue-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--text-muted);
+}
+.link-queue-item.is-running .link-queue-dot { background: var(--accent); }
+.link-queue-item.is-done .link-queue-dot { background: var(--shrink); }
+.link-queue-item.is-failed .link-queue-dot { background: var(--grow); }
+.link-queue-item.is-cancelled .link-queue-dot { background: var(--warn); }
+.link-queue-status { flex-shrink: 0; color: var(--text-muted); }
+.link-queue-flag {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+  opacity: 0.8;
+}
+.link-queue-acts {
+  margin-left: auto;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.link-queue-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-top: 4px;
+  min-width: 0;
+}
+.link-queue-label {
+  flex-shrink: 0;
+  width: 42px;
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.45;
+  letter-spacing: 0.04em;
+}
+.link-queue-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* 进度条长在队列项里，去掉面板级进度的左右外边距 */
+.link-queue-progress { margin: 8px 0 0; }
+.link-queue-progress .migrate-progress-text { font-size: 12px; }
+.link-queue-error {
+  margin-top: 5px;
+  font-size: 12px;
+  color: var(--grow);
+  line-height: 1.4;
+  word-break: break-all;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.link-queue-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border-soft);
+}
 
 /* ---- 新建迁移表单 ---- */
 #linkCreate {
@@ -2630,7 +2784,16 @@ body.is-tool-panel-resizing .main {
   flex-shrink: 0;
 }
 /* 返回列表是导航，不是表单动作，推到左端与提交按钮分开 */
-.migrate-actions #migrateBackBtn { margin-right: auto; }
+.migrate-actions #migrateBackBtn {
+  margin-right: auto;
+  background: var(--bg-active);
+  border-color: var(--border);
+  color: var(--text);
+}
+.migrate-actions #migrateBackBtn:hover {
+  border-color: var(--grow);
+  color: var(--grow);
+}
 .migrate-actions .btn-primary.compact {
   padding: 7px 16px;
   font-size: 13px;
@@ -3135,7 +3298,8 @@ select.ai-settings-input:focus {
   font-size: 14px;
   color: var(--text);
   white-space: pre-wrap;
-  line-height: 1.55;
+  /* 必须不低于 .path-chip 的 1.7：否则带路径的行盒比普通行高，勾选切换文案时弹窗高度会跳 */
+  line-height: 1.7;
   word-break: break-word;
 }
 /* 弹窗里出现的绝对路径：主题色淡化版当底，圆角；CJK 不用等宽字形，只让数字/斜杠对齐。

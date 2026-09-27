@@ -293,6 +293,34 @@ def test_restore_link_copies_back_and_recycles_backup(monkeypatch, tmp_path):
     assert recycled == [backup, target]
 
 
+def test_restore_link_permanent_backup(monkeypatch, tmp_path):
+    import _winapi
+
+    fm = _registry_isolated(monkeypatch, tmp_path)
+    # 回收站与永久删除都用桩，避免真删磁盘
+    recycled, wiped = [], []
+    monkeypatch.setattr(fm.fs_delete, "delete_to_recycle", lambda p: recycled.append(p))
+    monkeypatch.setattr(fm.fs_delete, "delete_permanent", lambda p: wiped.append(p))
+
+    link = os.path.join(tmp_path, "link")
+    target = os.path.join(tmp_path, "real", "target")
+    backup = os.path.join(tmp_path, "backup")
+    os.makedirs(os.path.join(target, "sub"))
+    open(os.path.join(target, "a.txt"), "wb").write(b"data")
+    os.makedirs(backup)
+    _winapi.CreateJunction(target, link)
+
+    fm.register_link(link, target, backup, files=1, bytes_=4)
+    result = fm.restore_link(link, permanent=True)
+    assert result["ok"] is True
+    assert result["recycled_backup"] == backup
+    assert result["backup_permanent"] is True
+    # 备份永久删除，目标仍走回收站
+    assert wiped == [backup]
+    assert recycled == [target]
+    assert os.path.isdir(os.path.join(link, "sub"))
+
+
 def test_restore_link_refuses_when_target_missing(monkeypatch, tmp_path):
     fm = _registry_isolated(monkeypatch, tmp_path)
     fm.register_link(r"D:\x", r"D:\missing", "")

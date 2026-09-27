@@ -581,14 +581,17 @@ def restore_link(
     *,
     progress: Callable[[dict], None] | None = None,
     cancel: Callable[[], bool] | None = None,
+    permanent: bool = False,
 ) -> dict:
     """还原：目标内容复制回原路径 → 删链接 → 备份移入回收站。
 
     先把目标复制到原路径父目录下的临时目录并校验，再删 junction、同卷
     改名，失败可回滚（重新建 junction）。成功后目标数据已完整回到原路径，
-    所以把目标目录与备份一并移入回收站，不留重复副本。``progress`` 接收
+    所以把备份与目标一并移出原位，不留重复副本；``permanent=True`` 时备份
+    永久删除（不进回收站），目标仍进回收站。``progress`` 接收
     ``{stage, done, total, bytes_done, bytes_total, current}``。返回
-    ``{ok, link, target, recycled_backup, recycled_target}``。
+    ``{ok, link, target, recycled_backup, backup_permanent, recycled_target}``；
+    ``recycled_backup`` 只表示备份已从原位置移走，去向看 ``backup_permanent``。
     """
     cancel = cancel or (lambda: False)
     rec = get_link_record(link or "")
@@ -639,7 +642,7 @@ def restore_link(
     recycled_backup = ""
     if backup and os.path.isdir(backup) and not _is_reparse(backup):
         try:
-            fs_delete.delete_to_recycle(backup)
+            fs_delete.delete_path(backup, permanent=permanent)
             recycled_backup = backup
         except fs_delete.DeleteError:
             pass
@@ -657,6 +660,7 @@ def restore_link(
         "link": link,
         "target": target,
         "recycled_backup": recycled_backup,
+        "backup_permanent": bool(permanent and recycled_backup),
         "recycled_target": recycled_target,
     }
 
@@ -697,6 +701,7 @@ def _normalize_history_entry(raw: dict) -> dict | None:
         "error": str(raw.get("error") or ""),
         "code": str(raw.get("code") or ""),
         "backup_cleaned": bool(raw.get("backup_cleaned") or False),
+        "backup_permanent": bool(raw.get("backup_permanent") or False),
     }
     return out
 

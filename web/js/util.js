@@ -186,6 +186,7 @@ function closeConfirmDialog(result) {
  * @param {boolean} [opts.danger]
  * @param {string} [opts.checkboxLabel] 有值时在底栏显示轻量勾选
  * @param {string} [opts.checkboxLabelChecked] 勾选后的标签文字，默认同 checkboxLabel
+ * @param {string} [opts.messageChecked] 勾选后的正文，默认沿用 message
  * @param {boolean} [opts.checkboxDefault]
  * @param {string} [opts.okTextChecked] 勾选后确定按钮文案
  * @returns {Promise<boolean|{checked:boolean}>} 取消为 false；无勾选确定为 true；有勾选确定为 {checked}
@@ -211,6 +212,9 @@ function showConfirmDialog(opts) {
   const hasMessage = !!message.trim();
   if (bodyEl) bodyEl.innerHTML = hasMessage ? highlightPaths(message) : "";
   if (contentEl) contentEl.classList.toggle("hidden", !hasMessage);
+  // 勾选后正文可换一套说法（例：进回收站 / 彻底删除）
+  const messageChecked = options.messageChecked == null ? "" : String(options.messageChecked);
+  const hasMessageChecked = !!messageChecked.trim();
 
   const hasCheckbox = !!(options.checkboxLabel && row && chk && labelEl);
   _confirmHasCheckbox = hasCheckbox;
@@ -222,6 +226,11 @@ function showConfirmDialog(opts) {
     const checked = !!(chk && chk.checked);
     okBtn.textContent = checked ? okTextChecked : okText;
     if (labelEl) labelEl.textContent = checked ? checkboxLabelChecked : options.checkboxLabel;
+    if (hasMessageChecked && bodyEl) {
+      const text = checked ? messageChecked : message;
+      bodyEl.innerHTML = text.trim() ? highlightPaths(text) : "";
+      if (contentEl) contentEl.classList.toggle("hidden", !text.trim());
+    }
     const danger = !!options.danger || checked;
     okBtn.classList.toggle("btn-danger", danger);
     okBtn.classList.toggle("btn-primary", !danger);

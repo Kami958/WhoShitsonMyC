@@ -406,6 +406,40 @@ def _delete_blacklist_to_yaml(entries: list) -> str:
     return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
 
 
+def _normalize_pinned_snapshots(raw) -> list[str]:
+    """置顶快照列表：保留置顶顺序，去空白去重（Windows 路径不区分大小写）。"""
+    import json
+
+    if isinstance(raw, str):
+        # 从 YAML 读回来的 JSON 字符串
+        try:
+            raw = json.loads(raw)
+        except (ValueError, TypeError):
+            raw = []
+    if not isinstance(raw, (list, tuple)):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        p = str(item or "").strip()
+        if not p:
+            continue
+        key = os.path.normcase(os.path.abspath(p))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(p)
+    return out
+
+
+def _pinned_snapshots_to_yaml(paths: list) -> str:
+    """同上：置顶列表序列化为 JSON 字符串。"""
+    import json
+
+    data = _normalize_pinned_snapshots(paths)
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+
+
 def _normalize_theme(raw: str) -> str:
     """主题偏好：light|dark|auto；非法值回落 light。"""
     v = str(raw or "").strip().lower()
@@ -651,6 +685,7 @@ def _write_settings_yaml(path: str, data: dict) -> None:
         f"  theme: {_normalize_theme(data.get('theme', 'light'))}",
         f"  snapshot_dir: {_yaml_quote(snap)}",
         f"  delete_blacklist: {_yaml_quote(_delete_blacklist_to_yaml(data.get('delete_blacklist') or []))}",
+        f"  pinned_snapshots: {_yaml_quote(_pinned_snapshots_to_yaml(data.get('pinned_snapshots') or []))}",
         "ui:",
         f"  ui_parent_row_bg: {'true' if data.get('ui_parent_row_bg', False) else 'false'}",
         f"  ui_parent_row_dim: {'true' if data.get('ui_parent_row_dim', False) else 'false'}",
@@ -658,6 +693,8 @@ def _write_settings_yaml(path: str, data: dict) -> None:
         f"  ui_hover_group_min: {_normalize_ui_hover_group_min(data.get('ui_hover_group_min', 10))}",
         f"  ui_tree_guide: {'true' if data.get('ui_tree_guide', True) else 'false'}",
         f"  ui_parent_sep: {'true' if data.get('ui_parent_sep', False) else 'false'}",
+        f"  ui_multiselect_exit_after_add: {'true' if data.get('ui_multiselect_exit_after_add', True) else 'false'}",
+        f"  ui_multiselect_double_esc: {'true' if data.get('ui_multiselect_double_esc', True) else 'false'}",
         f"  ui_tool_panel_open: {'true' if data.get('ui_tool_panel_open', False) else 'false'}",
         f"  ui_tool_panel_width: {int(data.get('ui_tool_panel_width') or wingeom.PANEL_W_DEFAULT)}",
         "ai:",
@@ -722,6 +759,10 @@ _ui_hover_group_min = 10
 _ui_tree_guide = True
 # 展开父级下方间隔线：父行底边画分隔线；默认关
 _ui_parent_sep = False
+# 对比树多选：把选中项加入待删除后自动退出多选；默认开
+_ui_multiselect_exit_after_add = True
+# 对比树多选：连按两下 Esc 退出多选；默认开
+_ui_multiselect_double_esc = True
 # 右侧工具侧栏是否展开；默认收起
 _ui_tool_panel_open = False
 # None = YAML 未写明该键（老配置，可用 localStorage 上报值迁移）；True/False = 已存过
@@ -740,6 +781,8 @@ _ai_cleanup_max_depth = int(_AI_DEFAULTS["cleanup_max_depth"])
 _ai_enabled_tools: list[str] = list(_default_enabled_tools())
 # 删除黑名单：[{path, mode}]，mode=exact|prefix|regex
 _delete_blacklist: list[dict[str, str]] = []
+# 置顶快照的路径列表（按置顶顺序；只在所属文件夹内排到最前）
+_pinned_snapshots: list[str] = []
 
 
 def _ai_payload() -> dict:
@@ -837,10 +880,11 @@ def _apply_loaded(data: dict) -> None:
     global _remember_window_size, _window_width, _window_height
     global _log_sanitize, _log_sanitize_explicit
     global _log_level, _log_level_explicit
-    global _lang, _theme, _snapshot_dir, _delete_blacklist
+    global _lang, _theme, _snapshot_dir, _delete_blacklist, _pinned_snapshots
     global _ui_parent_row_bg, _ui_parent_row_dim
     global _ui_hover_group_outline, _ui_hover_group_min, _ui_tree_guide, _ui_parent_sep
     global _ui_tool_panel_open, _ui_tool_panel_open_explicit, _ui_tool_panel_width
+    global _ui_multiselect_exit_after_add, _ui_multiselect_double_esc
     global _temp_cleanup, _auto_check_updates
     if not data:
         return
@@ -915,6 +959,14 @@ def _apply_loaded(data: dict) -> None:
         b = _as_bool(ui.get("ui_parent_sep"))
         if b is not None:
             _ui_parent_sep = b
+    if "ui_multiselect_exit_after_add" in ui:
+        b = _as_bool(ui.get("ui_multiselect_exit_after_add"))
+        if b is not None:
+            _ui_multiselect_exit_after_add = b
+    if "ui_multiselect_double_esc" in ui:
+        b = _as_bool(ui.get("ui_multiselect_double_esc"))
+        if b is not None:
+            _ui_multiselect_double_esc = b
     if "ui_tool_panel_open" in ui:
         b = _as_bool(ui.get("ui_tool_panel_open"))
         if b is not None:
@@ -927,6 +979,8 @@ def _apply_loaded(data: dict) -> None:
     if "delete_blacklist" in common:
         # _put_raw_pair 已去引号，此处多为 JSON 字符串
         _delete_blacklist = _normalize_delete_blacklist(common.get("delete_blacklist"))
+    if "pinned_snapshots" in common:
+        _pinned_snapshots = _normalize_pinned_snapshots(common.get("pinned_snapshots"))
     if isinstance(data.get("ai"), dict):
         _apply_ai_loaded(data.get("ai"))
 
@@ -964,12 +1018,15 @@ def _settings_payload() -> dict:
         "theme": _theme,
         "snapshot_dir": _snapshot_dir,
         "delete_blacklist": list(_delete_blacklist or []),
+        "pinned_snapshots": list(_pinned_snapshots or []),
         "ui_parent_row_bg": _ui_parent_row_bg,
         "ui_parent_row_dim": _ui_parent_row_dim,
         "ui_hover_group_outline": _ui_hover_group_outline,
         "ui_hover_group_min": _ui_hover_group_min,
         "ui_tree_guide": _ui_tree_guide,
         "ui_parent_sep": _ui_parent_sep,
+        "ui_multiselect_exit_after_add": _ui_multiselect_exit_after_add,
+        "ui_multiselect_double_esc": _ui_multiselect_double_esc,
         "ui_tool_panel_open": _ui_tool_panel_open,
         "ui_tool_panel_width": _ui_tool_panel_width,
         "ai": _ai_payload(),
@@ -1204,6 +1261,21 @@ def set_delete_blacklist(entries) -> list[dict[str, str]]:
         _delete_blacklist = new
         _persist()
     return get_delete_blacklist()
+
+
+def get_pinned_snapshots() -> list[str]:
+    """置顶快照路径副本，按置顶先后的顺序。"""
+    return list(_pinned_snapshots or [])
+
+
+def set_pinned_snapshots(paths) -> list[str]:
+    """整体替换置顶列表；值变化时落盘。"""
+    global _pinned_snapshots
+    new = _normalize_pinned_snapshots(paths)
+    if new != list(_pinned_snapshots or []):
+        _pinned_snapshots = new
+        _persist()
+    return get_pinned_snapshots()
 
 
 def get_log_sanitize() -> bool:
@@ -1506,8 +1578,10 @@ def apply_settings(
     ``search_memory_index``、``temp_cleanup``、``remember_window_size``、
     ``window_width``、``window_height``、``log_sanitize``、``log_level``、
     ``snapshot_dir``（空串=内置目录）、``delete_blacklist``、
+    ``pinned_snapshots``（置顶快照路径列表）、
     ``ui_parent_row_bg``、``ui_parent_row_dim``、``ui_hover_group_outline``、
     ``ui_hover_group_min``、``ui_tree_guide``、``ui_parent_sep``、
+    ``ui_multiselect_exit_after_add``、``ui_multiselect_double_esc``、
     ``ui_tool_panel_open``、``ui_tool_panel_width``。
     缺省键保持当前值。
     """
@@ -1516,9 +1590,11 @@ def apply_settings(
     global _log_sanitize, _log_sanitize_explicit
     global _log_level, _log_level_explicit
     global _snapshot_dir, _delete_blacklist
+    global _pinned_snapshots
     global _ui_parent_row_bg, _ui_parent_row_dim
     global _ui_hover_group_outline, _ui_hover_group_min, _ui_tree_guide, _ui_parent_sep
     global _ui_tool_panel_open, _ui_tool_panel_open_explicit, _ui_tool_panel_width
+    global _ui_multiselect_exit_after_add, _ui_multiselect_double_esc
     global _temp_cleanup, _auto_check_updates
 
     if not isinstance(payload, dict):
@@ -1553,6 +1629,8 @@ def apply_settings(
         _log_level_explicit = True
     if "delete_blacklist" in payload:
         _delete_blacklist = _normalize_delete_blacklist(payload.get("delete_blacklist"))
+    if "pinned_snapshots" in payload:
+        _pinned_snapshots = _normalize_pinned_snapshots(payload.get("pinned_snapshots"))
     if "ui_parent_row_bg" in payload:
         _ui_parent_row_bg = bool(payload["ui_parent_row_bg"])
     if "ui_parent_row_dim" in payload:
@@ -1565,6 +1643,10 @@ def apply_settings(
         _ui_tree_guide = bool(payload["ui_tree_guide"])
     if "ui_parent_sep" in payload:
         _ui_parent_sep = bool(payload["ui_parent_sep"])
+    if "ui_multiselect_exit_after_add" in payload:
+        _ui_multiselect_exit_after_add = bool(payload["ui_multiselect_exit_after_add"])
+    if "ui_multiselect_double_esc" in payload:
+        _ui_multiselect_double_esc = bool(payload["ui_multiselect_double_esc"])
     if "ui_tool_panel_open" in payload:
         _ui_tool_panel_open = bool(payload["ui_tool_panel_open"])
         _ui_tool_panel_open_explicit = _ui_tool_panel_open
@@ -1614,12 +1696,13 @@ def reset_settings_to_defaults(*, lang: str | None = None) -> dict:
     global _remember_window_size, _window_width, _window_height
     global _log_sanitize, _log_sanitize_explicit
     global _log_level, _log_level_explicit
-    global _lang, _theme, _snapshot_dir, _delete_blacklist
+    global _lang, _theme, _snapshot_dir, _delete_blacklist, _pinned_snapshots
     global _ai_enabled, _ai_base_url, _ai_model, _ai_api_key
     global _ai_extra_prompt, _ai_consented, _ai_model_options
     global _ai_cleanup_max_depth, _ai_enabled_tools
     global _ui_parent_row_bg, _ui_parent_row_dim
     global _ui_hover_group_outline, _ui_hover_group_min, _ui_tree_guide, _ui_parent_sep
+    global _ui_multiselect_exit_after_add, _ui_multiselect_double_esc
     global _ui_tool_panel_open, _ui_tool_panel_open_explicit, _ui_tool_panel_width
     global _temp_cleanup, _auto_check_updates
 
@@ -1639,12 +1722,15 @@ def reset_settings_to_defaults(*, lang: str | None = None) -> dict:
     _theme = "light"
     _snapshot_dir = ""
     _delete_blacklist = []
+    _pinned_snapshots = []
     _ui_parent_row_bg = False
     _ui_parent_row_dim = False
     _ui_hover_group_outline = False
     _ui_hover_group_min = 10
     _ui_tree_guide = True
     _ui_parent_sep = False
+    _ui_multiselect_exit_after_add = True
+    _ui_multiselect_double_esc = True
     _ui_tool_panel_open = False
     _ui_tool_panel_open_explicit = None
     _ui_tool_panel_width = wingeom.PANEL_W_DEFAULT
@@ -1838,12 +1924,15 @@ def settings_dict() -> dict:
         "snapshot_dir_builtin": builtin_snapshot_dir(),
         "snapshot_dir_is_custom": bool(_snapshot_dir),
         "delete_blacklist": get_delete_blacklist(),
+        "pinned_snapshots": get_pinned_snapshots(),
         "ui_parent_row_bg": _ui_parent_row_bg,
         "ui_parent_row_dim": _ui_parent_row_dim,
         "ui_hover_group_outline": _ui_hover_group_outline,
         "ui_hover_group_min": _ui_hover_group_min,
         "ui_tree_guide": _ui_tree_guide,
         "ui_parent_sep": _ui_parent_sep,
+        "ui_multiselect_exit_after_add": _ui_multiselect_exit_after_add,
+        "ui_multiselect_double_esc": _ui_multiselect_double_esc,
         "ui_tool_panel_open": _ui_tool_panel_open,
         "ui_tool_panel_open_explicit": _ui_tool_panel_open_explicit is not None,
         "ui_tool_panel_width": _ui_tool_panel_width,

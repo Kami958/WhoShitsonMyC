@@ -35,8 +35,13 @@ function isTreeMultiSelectMode() {
   return !!state.treeMultiSelect;
 }
 
+// 连按两下 Esc 退出多选的两次按键最大间隔
+const _TREE_ESC_DOUBLE_MS = 500;
+let _treeEscAt = 0;
+
 function setTreeMultiSelectMode(on) {
   state.treeMultiSelect = !!on;
+  _treeEscAt = 0;
   const btn = $("#treeMultiSelectBtn");
   if (btn) {
     btn.classList.toggle("is-active", state.treeMultiSelect);
@@ -56,6 +61,39 @@ function toggleTreeMultiSelectMode() {
   if (typeof toast === "function") {
     toast(state.treeMultiSelect ? t("treeMultiSelectOn") : t("treeMultiSelectOff"));
   }
+}
+
+/**
+ * 全局 Esc 在弹窗、菜单都关掉之后调用：设置开启且处于多选时，连按两下退出多选。
+ * 单按一下只提示，不和关弹窗的 Esc 抢意思。
+ */
+function handleTreeMultiSelectEscape() {
+  if (!state.treeMultiSelect) {
+    _treeEscAt = 0;
+    return;
+  }
+  const s = state._settings;
+  if (s && s.ui_multiselect_double_esc === false) {
+    _treeEscAt = 0;
+    return;
+  }
+  const now = Date.now();
+  if (now - _treeEscAt <= _TREE_ESC_DOUBLE_MS) {
+    _treeEscAt = 0;
+    setTreeMultiSelectMode(false);
+    if (typeof toast === "function") toast(t("treeMultiSelectOff"));
+    return;
+  }
+  _treeEscAt = now;
+  if (typeof toast === "function") toast(t("treeMultiSelectEscHint"));
+}
+
+/** 多选里把选中项加入待删除后，按设置退出多选；本来不在多选就不动。 */
+function exitTreeMultiSelectAfterPendingAdd() {
+  if (!state.treeMultiSelect) return;
+  const s = state._settings;
+  if (s && s.ui_multiselect_exit_after_add === false) return;
+  setTreeMultiSelectMode(false);
 }
 
 function treeSelectionCount() {
@@ -433,7 +471,7 @@ async function doCompare() {
   } finally {
     state.comparing = false;
     setCompareBusy("");
-    if (emptyTitle && empty && !empty.classList.contains("hidden")) {
+    if (emptyTitle) {
       emptyTitle.textContent = prevEmptyTitle || t("emptyTitle");
     }
     btn.textContent = t("compare");
@@ -515,7 +553,7 @@ async function browseSnapshot(path) {
   } finally {
     state.comparing = false;
     setCompareBusy("");
-    if (emptyTitle && empty && !empty.classList.contains("hidden")) {
+    if (emptyTitle) {
       emptyTitle.textContent = prevEmptyTitle || t("emptyTitle");
     }
     updatePickers();
@@ -2251,6 +2289,7 @@ async function ctxCommand(cmd) {
     } else if (typeof addCompareNodesToPending === "function") {
       addCompareNodesToPending(nodes);
       clearTreeSelection();
+      exitTreeMultiSelectAfterPendingAdd();
     } else {
       toast(t("deleteFail"), true);
     }

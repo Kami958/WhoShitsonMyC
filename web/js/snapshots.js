@@ -7,6 +7,85 @@ function _normPath(p) {
   return String(p || "").replace(/\//g, "\\");
 }
 
+/** 置顶图钉图标（Material push_pin）。 */
+const _PIN_ICON =
+  '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">' +
+  '<path fill="currentColor" d="M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z"/>' +
+  "</svg>";
+
+/** 当前置顶路径列表副本。 */
+function getPinnedList() {
+  const list = state._settings && state._settings.pinned_snapshots;
+  return Array.isArray(list) ? list.slice() : [];
+}
+
+/** 置顶集合：按归一化路径比对，兼容分隔符差异。 */
+function pinnedPathSet() {
+  const set = new Set();
+  for (const p of getPinnedList()) set.add(_normPath(p));
+  return set;
+}
+
+/** 置顶的快照在同组内排到最前，其余保持当前排序。 */
+function pinFirstSnapshots(items, pins) {
+  if (!pins || pins.size === 0) return items;
+  const head = [];
+  const tail = [];
+  for (const s of items) {
+    (pins.has(_normPath(s.path)) ? head : tail).push(s);
+  }
+  return [...head, ...tail];
+}
+
+/** 写回置顶列表：乐观更新先改本地再落盘，失败回退。 */
+async function toggleSnapshotPin(path) {
+  if (!path) return;
+  const settings = (state._settings = state._settings || {});
+  const prev = getPinnedList();
+  const key = _normPath(path);
+  const next = prev.filter((p) => _normPath(p) !== key);
+  const nowPinned = next.length === prev.length;
+  if (nowPinned) next.push(path);
+  settings.pinned_snapshots = next;
+  renderSnapshotList();
+
+  let res;
+  try {
+    res = await state.api.set_pinned_snapshots(next);
+  } catch (e) {
+    settings.pinned_snapshots = prev;
+    renderSnapshotList();
+    toast(String(e), true);
+    return;
+  }
+  if (res && res.error) {
+    settings.pinned_snapshots = prev;
+    renderSnapshotList();
+    toast(res.error, true);
+    return;
+  }
+  settings.pinned_snapshots = (res && res.pinned_snapshots) || next;
+  renderSnapshotList();
+}
+
+/** 快照删掉后把对应置顶记录摘掉，保留其余顺序。 */
+async function unpinSnapshots(paths) {
+  const gone = new Set((paths || []).map(_normPath));
+  const prev = getPinnedList();
+  const next = prev.filter((p) => !gone.has(_normPath(p)));
+  if (next.length === prev.length) return;
+  const settings = (state._settings = state._settings || {});
+  settings.pinned_snapshots = next;
+  try {
+    const res = await state.api.set_pinned_snapshots(next);
+    if (res && !res.error && res.pinned_snapshots) {
+      settings.pinned_snapshots = res.pinned_snapshots;
+    }
+  } catch (e) {
+    /* 置顶记录清理失败不影响删除结果，下次置顶操作会重写列表 */
+  }
+}
+
 /** 内容指纹：同一扫描结果（可在不同路径）视为同一条。优先用后端 content_key。 */
 function contentKeyOf(s) {
   if (!s) return "";
@@ -334,17 +413,19 @@ function toggleFolderCollapsed(name) {
 }
 
 /** 构建单条快照 DOM；展示顺序：路径 → 时间 → 备注 → 元信息 → 操作。 */
-function buildSnapEl(s) {
+function buildSnapEl(s, pins) {
   const isOld = s.path === state.oldPath;
   const isNew = s.path === state.newPath;
   const isFlash = !!_flashSnapPath && _normPath(s.path) === _flashSnapPath;
+  const isPinned = !!(pins && pins.has(_normPath(s.path)));
 
   const el = document.createElement("div");
   el.className =
     "snap" +
     (isOld ? " sel-old" : "") +
     (isNew ? " sel-new" : "") +
-    (isFlash ? " snap-flash" : "");
+    (isFlash ? " snap-flash" : "") +
+    (isPinned ? " is-pinned" : "");
   el.dataset.path = s.path;
 
   const role =
@@ -362,8 +443,13 @@ function buildSnapEl(s) {
   const freeText = s.free_size > 0
     ? `${t("freeLabel")} ${fmtBytes(s.free_size)}`
     : `${t("freeLabel")} ${t("freeUnknown")}`;
+  const pinTitle = t(isPinned ? "snapUnpinTitle" : "snapPinTitle");
+  const pinBtn =
+    `<button type="button" class="snap-pin${isPinned ? " is-on" : ""}" data-act="pin"` +
+    ` title="${escapeHtml(pinTitle)}" aria-label="${escapeHtml(pinTitle)}"` +
+    ` aria-pressed="${isPinned ? "true" : "false"}">${_PIN_ICON}</button>`;
   el.innerHTML = `
-    <div class="snap-root">${escapeHtml(s.root)}${role}${zipTag}</div>
+    <div class="snap-root"><span class="snap-root-main">${escapeHtml(s.root)}${role}${zipTag}</span>${pinBtn}</div>
     ${noteLine}
     <div class="snap-time"><span class="snap-ago">${fmtAgo(s.scanned_at)}</span> <span class="snap-free">${freeText}</span></div>
     <div class="snap-meta">${fmtTime(s.scanned_at)} · ${t("filesN", (s.file_count || 0).toLocaleString())}占 ${fmtBytes(s.total_size)}</div>
@@ -400,6 +486,13 @@ function buildSnapEl(s) {
     };
   }
   el.querySelector('[data-act="del"]').onclick = () => deleteSnapshot(s.path);
+  const pinBtnEl = el.querySelector('[data-act="pin"]');
+  if (pinBtnEl) {
+    pinBtnEl.onclick = (e) => {
+      e.stopPropagation();
+      toggleSnapshotPin(s.path);
+    };
+  }
   return { el, isFlash };
 }
 
@@ -410,8 +503,12 @@ function renderSnapshotList() {
     list.innerHTML = `<div class="side-empty">${t("noSnapshots")}</div>`;
     return;
   }
-  const ordered = [...state.snapshots].sort(
-    SNAP_SORTERS[state.snapSort] || SNAP_SORTERS["time-desc"]
+  const pins = pinnedPathSet();
+  const ordered = pinFirstSnapshots(
+    [...state.snapshots].sort(
+      SNAP_SORTERS[state.snapSort] || SNAP_SORTERS["time-desc"]
+    ),
+    pins
   );
   const groups = groupSnapshotsByFolder(ordered);
   let flashEl = null;
@@ -468,7 +565,7 @@ function renderSnapshotList() {
         body.appendChild(empty);
       } else {
         for (const s of items) {
-          const { el, isFlash } = buildSnapEl(s);
+          const { el, isFlash } = buildSnapEl(s, pins);
           body.appendChild(el);
           if (isFlash) flashEl = el;
         }
@@ -816,6 +913,7 @@ async function deleteSnapshotFolder(name, itemCount) {
   if (paths.has(state.oldPath)) state.oldPath = "";
   if (paths.has(state.newPath)) state.newPath = "";
   for (const p of paths) delete state.importedPaths[_normPath(p)];
+  if (deleteSnapshots) unpinSnapshots([...paths]);
   if (state.compared && hitCompare) resetCompareView();
   delete state.folderCollapsed[name];
   await loadSnapshots({ quiet: true });
@@ -969,6 +1067,7 @@ async function deleteSnapshot(path) {
   if (state.oldPath === path) state.oldPath = "";
   if (state.newPath === path) state.newPath = "";
   delete state.importedPaths[_normPath(path)];
+  unpinSnapshots([path]);
   if (state.compared && inCompare) resetCompareView();
   await loadSnapshots({ quiet: true });
   toast(

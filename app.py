@@ -457,6 +457,16 @@ class Api:
                 f"保存备注失败：{exc}", f"Failed to save note: {exc}")}
         return {"ok": True, "note": text, "path": os.path.abspath(str(path or ""))}
 
+    def set_pinned_snapshots(self, paths: list | None = None) -> dict:
+        """整体写回置顶快照列表，返回落盘后的权威值。
+
+        置顶只影响左侧列表在同一文件夹内的排序，不动快照文件本身。
+        """
+        return {
+            "ok": True,
+            "pinned_snapshots": store.set_pinned_snapshots(paths or []),
+        }
+
     # ---- 应用日志（内存；默认不落盘） ------------------------------------
 
     def get_app_log(self, limit: int = 400) -> dict:
@@ -1578,12 +1588,13 @@ class Api:
         )
         return {"ok": True, "link": link or ""}
 
-    def restore_directory_link(self, link: str = "") -> dict:
+    def restore_directory_link(self, link: str = "", permanent: bool = False) -> dict:
         """后台线程还原一条链接：目标复制回原路径，删链接，备份移入回收站。
 
+        ``permanent=True`` 时备份改为永久删除（不进回收站）。
         事件：``migrate-dir-restore-progress`` {stage, done, total,
         bytes_done, bytes_total, current} / ``migrate-dir-restore-done``
-        {ok, link, target, recycled_backup?, error?, code?}。
+        {ok, link, target, recycled_backup?, backup_permanent?, error?, code?}。
         返回 ``{"started": True}``；已有还原在跑则返回 error。
         """
         if self._restore_thread and self._restore_thread.is_alive():
@@ -1601,7 +1612,7 @@ class Api:
         self._restore_cancel.clear()
         self._restore_thread = threading.Thread(
             target=self._run_directory_restore,
-            args=(_link,),
+            args=(_link, bool(permanent)),
             daemon=True,
         )
         self._restore_thread.start()
@@ -1612,7 +1623,7 @@ class Api:
         self._restore_cancel.set()
         return {"ok": True}
 
-    def _run_directory_restore(self, link: str) -> None:
+    def _run_directory_restore(self, link: str, permanent: bool = False) -> None:
         """后台线程体：执行还原并推送进度与终态事件。"""
         def on_progress(info: dict) -> None:
             self._emit("migrate-dir-restore-progress", dict(info or {}))
@@ -1620,7 +1631,10 @@ class Api:
         rec_snapshot = fs_migrate.get_link_record(link or "") or {}
         try:
             result = fs_migrate.restore_link(
-                link, progress=on_progress, cancel=self._restore_cancel.is_set
+                link,
+                progress=on_progress,
+                cancel=self._restore_cancel.is_set,
+                permanent=bool(permanent),
             )
         except fs_migrate.MigrateError as exc:
             code = str(exc.message or "fail")
@@ -1672,6 +1686,7 @@ class Api:
         applog.info(
             f"directory link restored | link={result.get('link')} "
             f"recycled_backup={result.get('recycled_backup') or ''} "
+            f"backup_permanent={bool(result.get('backup_permanent'))} "
             f"recycled_target={result.get('recycled_target') or ''}"
         )
         fs_migrate.record_history({
@@ -1686,11 +1701,12 @@ class Api:
             "error": "",
             "code": "",
             "backup_cleaned": bool(result.get("recycled_backup") or False),
+            "backup_permanent": bool(result.get("backup_permanent") or False),
         })
         self._emit("migrate-dir-restore-done", result)
 
-    def delete_link_backup(self, link: str = "") -> dict:
-        """删除某条链接的备份目录（移到回收站）。"""
+    def delete_link_backup(self, link: str = "", permanent: bool = False) -> dict:
+        """删除某条链接的备份目录。默认移到回收站；``permanent=True`` 永久删除。"""
         rec = fs_migrate.get_link_record(link or "")
         if not rec:
             return {
@@ -1704,7 +1720,7 @@ class Api:
                 "code": "no_backup",
             }
         try:
-            fs_delete.delete_to_recycle(backup)
+            fs_delete.delete_path(backup, permanent=bool(permanent))
         except fs_delete.DeleteError as exc:
             code = str(exc.message or exc)
             return {"error": _delete_error_message(code), "code": code}
@@ -1713,7 +1729,9 @@ class Api:
                 "error": i18n.t(f"删除失败：{exc}", f"Delete failed: {exc}"),
                 "code": "os",
             }
-        applog.info(f"link backup deleted | link={link or ''} backup={backup}")
+        applog.info(
+            f"link backup deleted | link={link or ''} backup={backup} permanent={bool(permanent)}"
+        )
         fs_migrate.record_history({
             "ts": time.time(),
             "op": "delbackup",
@@ -1726,8 +1744,13 @@ class Api:
             "error": "",
             "code": "",
             "backup_cleaned": True,
+            "backup_permanent": bool(permanent),
         })
-        return {"ok": True, "backup": backup}
+        return {
+            "ok": True,
+            "backup": backup,
+            "permanent": bool(permanent),
+        }
 
     def remove_directory_link_record(self, link: str = "") -> dict:
         """从登记移除一条链接记录（不碰磁盘；用于链接已不存在的情况）。"""

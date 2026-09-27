@@ -882,6 +882,17 @@ function classifyPendingResult(res, errText) {
   return { status: "fail", message: msg };
 }
 
+/**
+ * 卡片上要直接显示的错误详情。
+ * 「不存在」的状态标签已把意思说完（后端文案也是同一个意思），不重复一行。
+ */
+function pendingDetailMessage(it) {
+  const res = it && it.result;
+  const st = res && res.status;
+  if (!st || st === "ok" || st === "missing") return "";
+  return String(res.message || "");
+}
+
 function pendingStatusLabel(status) {
   if (status === "ok") return t("pendingStatusOk");
   if (status === "missing") return t("pendingStatusMissing");
@@ -1127,8 +1138,10 @@ function renderPendingList() {
       const badge = stLabel
         ? `<span class="pending-item-status" title="${escapeHtml(stTitle)}">${escapeHtml(stLabel)}</span>`
         : "";
+      const detail = pendingDetailMessage(it);
       return (
         `<div class="pending-item${stClass}" data-id="${escapeHtml(it.id)}">` +
+        `<div class="pending-item-head">` +
         `<div class="pending-item-main">` +
         `<span class="pending-item-icon" aria-hidden="true">${icon}</span>` +
         `<div class="pending-item-text">` +
@@ -1138,6 +1151,8 @@ function renderPendingList() {
         badge +
         `<button type="button" class="btn-plain compact pending-item-locate" data-locate-id="${escapeHtml(it.id)}" data-i18n-title="pendingLocate" title="${escapeHtml(t("pendingLocate"))}">${escapeHtml(t("pendingLocate"))}</button>` +
         `<button type="button" class="btn-plain compact pending-item-remove" data-remove-id="${escapeHtml(it.id)}" data-i18n-title="pendingRemove" title="${escapeHtml(t("pendingRemove"))}">✕</button>` +
+        `</div>` +
+        (detail ? `<div class="pending-item-error">${escapeHtml(detail)}</div>` : "") +
         `</div>`
       );
     })

@@ -153,6 +153,18 @@ function wireEvents() {
       if (_settingsDraft) _settingsDraft.ui_parent_sep = !!e.target.checked;
     };
   }
+  const uiMultiselectExitChk = $("#uiMultiselectExitChk");
+  if (uiMultiselectExitChk) {
+    uiMultiselectExitChk.onchange = (e) => {
+      if (_settingsDraft) _settingsDraft.ui_multiselect_exit_after_add = !!e.target.checked;
+    };
+  }
+  const uiMultiselectDoubleEscChk = $("#uiMultiselectDoubleEscChk");
+  if (uiMultiselectDoubleEscChk) {
+    uiMultiselectDoubleEscChk.onchange = (e) => {
+      if (_settingsDraft) _settingsDraft.ui_multiselect_double_esc = !!e.target.checked;
+    };
+  }
   const snapDirChoose = $("#snapDirChooseBtn");
   if (snapDirChoose) snapDirChoose.onclick = chooseSnapDir;
   const snapDirReset = $("#snapDirResetBtn");
@@ -288,6 +300,9 @@ function wireEvents() {
       if (typeof addCompareNodesToPending === "function") {
         addCompareNodesToPending(nodes);
         if (typeof clearTreeSelection === "function") clearTreeSelection();
+        if (typeof exitTreeMultiSelectAfterPendingAdd === "function") {
+          exitTreeMultiSelectAfterPendingAdd();
+        }
       }
     };
   }
@@ -439,7 +454,12 @@ function wireEvents() {
         return;
       }
       const so = $("#settingsOverlay");
-      if (so && !so.classList.contains("hidden")) closeSettings();
+      if (so && !so.classList.contains("hidden")) {
+        closeSettings();
+        return;
+      }
+      // 没有弹窗要关时才轮到多选的连按两下 Esc
+      if (typeof handleTreeMultiSelectEscape === "function") handleTreeMultiSelectEscape();
     }
   });
 

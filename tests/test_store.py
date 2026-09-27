@@ -40,6 +40,7 @@ from core.store import (
     set_log_level,
     set_log_sanitize,
     set_note,
+    set_pinned_snapshots,
     set_scan_workers,
     set_snapshot_dir,
     set_theme,
@@ -862,3 +863,42 @@ def test_reset_clears_tool_panel_state():
     assert store.get_tool_panel_open() is False
     assert store.get_tool_panel_width() == 340
     assert store.has_explicit_tool_panel_open() is False
+
+
+def test_multiselect_prefs_default_on_and_roundtrip():
+    """多选的两个开关默认开；关掉后写盘、重读、恢复默认都跟得上。"""
+    d = store.settings_dict()
+    assert d["ui_multiselect_exit_after_add"] is True
+    assert d["ui_multiselect_double_esc"] is True
+    apply_settings(
+        {
+            "ui_multiselect_exit_after_add": False,
+            "ui_multiselect_double_esc": False,
+        }
+    )
+    assert store.settings_dict()["ui_multiselect_exit_after_add"] is False
+    assert store.settings_dict()["ui_multiselect_double_esc"] is False
+    # 写盘后重读，关掉的状态不丢
+    _apply_loaded(_load_settings_yaml(settings_path()))
+    assert store.settings_dict()["ui_multiselect_exit_after_add"] is False
+    assert store.settings_dict()["ui_multiselect_double_esc"] is False
+    reset_settings_to_defaults(lang="en")
+    d = store.settings_dict()
+    assert d["ui_multiselect_exit_after_add"] is True
+    assert d["ui_multiselect_double_esc"] is True
+
+
+def test_pinned_snapshots_roundtrip(tmp_path):
+    """置顶列表：保留置顶顺序、去空白与重复项、写盘重读、恢复默认清空。"""
+    a = str(tmp_path / "snaps" / "a.db")
+    b = str(tmp_path / "snaps" / "b.db")
+    assert store.get_pinned_snapshots() == []
+    assert set_pinned_snapshots([b, a, "", "  ", a]) == [b, a]
+    _apply_loaded(_load_settings_yaml(settings_path()))
+    assert store.get_pinned_snapshots() == [b, a]
+    assert store.settings_dict()["pinned_snapshots"] == [b, a]
+    # 整体替换走 apply_settings 也认
+    apply_settings({"pinned_snapshots": [a]})
+    assert store.get_pinned_snapshots() == [a]
+    reset_settings_to_defaults(lang="en")
+    assert store.get_pinned_snapshots() == []

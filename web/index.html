@@ -29,7 +29,7 @@
       try { localStorage.setItem("theme", theme); } catch (e) {}
     })();
   </script>
-  <link rel="stylesheet" href="style.css?v=1.1.5.3" />
+  <link rel="stylesheet" href="style.css?v=1.1.6" />
 </head>
 <body>
   <div class="layout">
@@ -268,7 +268,7 @@
           <div class="pending-foot">
             <label class="pending-permanent-row" for="pendingPermanentChk">
               <input id="pendingPermanentChk" type="checkbox" />
-              <span data-i18n="pendingPermanent">彻底删除（不进回收站）</span>
+              <span data-i18n="pendingPermanent">彻底删除</span>
             </label>
             <div class="pending-foot-actions">
               <button id="pendingClearBtn" class="btn-plain compact" type="button" data-i18n="pendingClear">清空</button>
@@ -280,6 +280,10 @@
           <div class="link-head">
             <div class="link-view-tabs" role="tablist" aria-label="目录链接视图">
               <button id="linkViewList" class="link-view-tab active" type="button" role="tab" aria-selected="true" data-i18n="linkViewList">迁移列表</button>
+              <button id="linkViewQueue" class="link-view-tab" type="button" role="tab" aria-selected="false">
+                <span data-i18n="linkViewQueue">迁移队列</span>
+                <span id="linkQueueCount" class="link-history-count"></span>
+              </button>
               <button id="linkViewHistory" class="link-view-tab" type="button" role="tab" aria-selected="false">
                 <span data-i18n="linkHistoryTitle">迁移历史</span>
                 <span id="linkHistoryCount" class="link-history-count"></span>
@@ -318,6 +322,17 @@
             <div id="linkList" class="link-list" aria-live="polite"></div>
           </div>
 
+          <!-- 迁移队列视图：任务在这里排队，按顺序串行执行；进度跟在进行中的那一项上 -->
+          <div id="linkQueueView" class="link-view hidden">
+            <p id="linkQueueEmpty" class="link-empty" data-i18n="queueEmpty">队列里还没有任务，点击[新建迁移]添加任务</p>
+            <div id="linkQueueList" class="link-queue-list hidden" aria-live="polite"></div>
+            <div class="link-queue-foot">
+              <button id="queueStartBtn" class="btn-primary compact" type="button" data-i18n="queueStart">开始</button>
+              <button id="queuePauseBtn" class="btn-plain compact hidden" type="button" data-i18n="queuePause">暂停</button>
+              <button id="queueCancelBtn" class="btn-plain compact hidden" type="button" data-i18n="cancel">取消</button>
+            </div>
+          </div>
+
           <!-- 迁移历史视图 -->
           <div id="linkHistoryView" class="link-view hidden">
             <div class="link-history-filter" role="group" aria-label="操作筛选">
@@ -348,9 +363,10 @@
             </div>
           </div>
 
-          <!-- 新建迁移表单：默认隐藏，点「新建迁移」或从对比树右键进入时显示 -->
+          <!-- 迁移表单：默认隐藏。新建时点「新建迁移」或从对比树右键进入；
+               编辑队列项时填进同一套输入框，由 migrate.js 切换模式。 -->
           <div id="linkCreate" class="hidden">
-            <p class="migrate-intro" data-i18n="migrateIntro">把目录整体搬到另一个位置，原路径保留为目录联接</p>
+            <p class="migrate-intro" data-i18n="migrateIntro">使用Windows的目录链接功能将目录整体搬到另一个位置但仍在原位置留有入口，不影响其他程序访问使用</p>
             <div class="migrate-field">
               <label for="migrateSourceInput" class="migrate-label" data-i18n="migrateSource">源目录</label>
               <div class="migrate-row">
@@ -370,14 +386,10 @@
               <input id="migrateCleanBackup" type="checkbox" />
               <span data-i18n="migrateCleanBackup">迁移后将原目录备份移入回收站</span>
             </label>
-            <div id="migrateProgress" class="migrate-progress hidden">
-              <div class="migrate-progress-bar"><i id="migrateProgressFill" style="width:0%"></i></div>
-              <div id="migrateProgressText" class="migrate-progress-text"></div>
-            </div>
             <div class="migrate-actions">
-              <button id="migrateBackBtn" class="btn-plain compact" type="button" data-i18n="linkBack">返回列表</button>
-              <button id="migrateStartBtn" class="btn-primary compact" type="button" data-i18n="migrateStart">开始迁移</button>
-              <button id="migrateCancelBtn" class="btn-plain compact hidden" type="button" data-i18n="cancel">取消</button>
+              <button id="migrateBackBtn" class="btn-ghost" type="button" data-i18n="linkBack">返回队列</button>
+              <button id="migrateEnqueueBtn" class="btn-primary compact" type="button" data-i18n="queueEnqueue">加入队列</button>
+              <button id="migrateSaveBtn" class="btn-primary compact hidden" type="button" data-i18n="queueSaveEdit">保存修改</button>
             </div>
           </div>
         </div>
@@ -757,6 +769,26 @@
             </div>
             <p class="settings-help-panel hidden" data-help-panel="uiTreeGuide" data-i18n="uiTreeGuideTitle">每层子目录块左侧画竖线，嵌套目录呈阶梯状边界</p>
           </div>
+          <div class="settings-field">
+            <div class="settings-row">
+              <span class="settings-label">
+                <label for="uiMultiselectExitChk" data-i18n="uiMultiselectExit">加入待删除后退出多选</label>
+                <button type="button" class="settings-q" data-help="uiMultiselectExit" data-i18n-title="uiMultiselectExitTitle" title="对比树多选中把选中项加入待删除列表后，自动关掉多选状态" aria-label="?">?</button>
+              </span>
+              <input id="uiMultiselectExitChk" type="checkbox" checked />
+            </div>
+            <p class="settings-help-panel hidden" data-help-panel="uiMultiselectExit" data-i18n="uiMultiselectExitTitle">对比树多选中把选中项加入待删除列表后，自动关掉多选状态</p>
+          </div>
+          <div class="settings-field">
+            <div class="settings-row">
+              <span class="settings-label">
+                <label for="uiMultiselectDoubleEscChk" data-i18n="uiMultiselectDoubleEsc">连按两下 Esc 退出多选</label>
+                <button type="button" class="settings-q" data-help="uiMultiselectDoubleEsc" data-i18n-title="uiMultiselectDoubleEscTitle" title="多选状态下半秒内连按两下 Esc 退出多选，单按一下只提示" aria-label="?">?</button>
+              </span>
+              <input id="uiMultiselectDoubleEscChk" type="checkbox" checked />
+            </div>
+            <p class="settings-help-panel hidden" data-help-panel="uiMultiselectDoubleEsc" data-i18n="uiMultiselectDoubleEscTitle">多选状态下半秒内连按两下 Esc 退出多选，单按一下只提示</p>
+          </div>
         </div>
         <div class="settings-pane hidden" data-settings-pane="log" role="tabpanel">
           <p class="settings-hint log-privacy-hint" data-i18n="logPrivacyHint">日志默认不保存，仅存在于软件本次运行中，若需要可使用导出功能</p>
@@ -1035,19 +1067,19 @@
   <!-- Toast 提示 -->
   <div id="toast" class="toast hidden"></div>
 
-  <script src="js/state.js?v=1.1.5.3"></script>
-  <script src="js/i18n.js?v=1.1.5.3"></script>
-  <script src="js/util.js?v=1.1.5.3"></script>
-  <script src="js/theme.js?v=1.1.5.3"></script>
-  <script src="js/snapshots.js?v=1.1.5.3"></script>
-  <script src="js/pick.js?v=1.1.5.3"></script>
-  <script src="js/compare.js?v=1.1.5.3"></script>
-  <script src="js/scan.js?v=1.1.5.3"></script>
-  <script src="js/settings.js?v=1.1.5.3"></script>
-  <script src="js/modules.js?v=1.1.5.3"></script>
-  <script src="js/pending.js?v=1.1.5.3"></script>
-  <script src="js/migrate.js?v=1.1.5.3"></script>
-  <script src="js/ai.js?v=1.1.5.3"></script>
-  <script src="js/app.js?v=1.1.5.3"></script>
+  <script src="js/state.js?v=1.1.6"></script>
+  <script src="js/i18n.js?v=1.1.6"></script>
+  <script src="js/util.js?v=1.1.6"></script>
+  <script src="js/theme.js?v=1.1.6"></script>
+  <script src="js/snapshots.js?v=1.1.6"></script>
+  <script src="js/pick.js?v=1.1.6"></script>
+  <script src="js/compare.js?v=1.1.6"></script>
+  <script src="js/scan.js?v=1.1.6"></script>
+  <script src="js/settings.js?v=1.1.6"></script>
+  <script src="js/modules.js?v=1.1.6"></script>
+  <script src="js/pending.js?v=1.1.6"></script>
+  <script src="js/migrate.js?v=1.1.6"></script>
+  <script src="js/ai.js?v=1.1.6"></script>
+  <script src="js/app.js?v=1.1.6"></script>
 </body>
 </html>
