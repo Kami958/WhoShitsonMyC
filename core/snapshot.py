@@ -43,6 +43,18 @@ _ENTRY_COLS_V5 = (
     "id, parent_id, name, size, is_dir, mtime, reparse_tag, link_target"
 )
 
+# 反链查询（哪些链接指向某个目录）要在快照里按链接目标找行。这类行只占全部
+# 条目很小一部分（实测 F: 2.25M 条目里 0.85%），所以建成部分索引，只索引
+# reparse_tag <> 0 的行，实测占 1.2-1.5MB，约为快照文件的百分之一。
+# 条件写 reparse_tag <> 0 而不是两个标签的等值，是因为查询里标签是绑定参数，
+# 索引条件要与查询条件文本一致才会被采用；放宽的代价是把 OneDrive 占位符这类
+# 不相干的行也索引进去（C: 快照 85374 行 reparse 行里 84568 行是它）。
+# 查询侧漏掉这个条件就退回整表扫描（见 core/differ.py 的 _LINK_CANDIDATE_SQL）。
+LINK_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS idx_entries_link "
+    "ON entries(reparse_tag, link_target) WHERE reparse_tag <> 0"
+)
+
 
 def entry_columns(version: int) -> str:
     """按快照格式版本返回 entries 表 SELECT 列清单。
@@ -253,6 +265,7 @@ class SnapshotWriter:
         # 只需 parent_id 一个索引（按父查子是唯一的查询模式）。
         cur = self._conn.cursor()
         cur.execute("CREATE INDEX idx_entries_parent ON entries(parent_id)")
+        cur.execute(LINK_INDEX_SQL)
         self._conn.commit()
 
     def _write_meta(self, meta: SnapshotMeta) -> None:
@@ -284,6 +297,38 @@ class SnapshotWriter:
 
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
+
+
+class NullWriter:
+    """不落盘的写入端：把扫描产出的行接住丢掉。
+
+    接口与 :class:`SnapshotWriter` 一样，扫描主流程不为「要不要落盘」分叉：
+    行照常从 worker 流过来，进度、文件数、目录数、总大小照常统计，只是不
+    写任何文件。反查链接的扫盘模式用它——只为一个结果把整盘写进临时库再
+    回头查一遍，白白占着磁盘和内存，磁盘写满时还会直接失败。
+    """
+
+    def add_row(self, row: EntryRow) -> None:
+        """接住一条行，丢掉。"""
+        return None
+
+    def add_rows(self, rows: list[EntryRow] | tuple[EntryRow, ...]) -> None:
+        """接住一批行，丢掉。"""
+        return None
+
+    def finalize(self, meta: SnapshotMeta) -> None:
+        """什么都不写。统计值由扫描主流程算好放在 ``meta`` 里。"""
+        return None
+
+    def close(self) -> None:
+        """没有连接要关。"""
+        return None
+
+    def __enter__(self) -> "NullWriter":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
 
 
 def read_meta(db_path: str) -> SnapshotMeta:

@@ -3,7 +3,7 @@
 
 /**
  * items[].result: null | { status: 'ok'|'missing'|'blacklist'|'blocked'|'fail', message?: string }
- * @type {{ open: boolean, tab: string, items: Array, permanent: boolean, executing: boolean }}
+ * @type {{ open: boolean, tab: string, items: Array, permanent: boolean, executing: boolean, batch: ?object }}
  */
 const _tool = {
   open: false,
@@ -11,6 +11,8 @@ const _tool = {
   items: [],
   permanent: false,
   executing: false,
+  // 批量执行中：{total, done, ok, fail, currentId, currentRoot, currentRel, items}
+  batch: null,
   // 待删除列表排序：added-desc|added-asc|name-asc|name-desc|size-desc|path-asc
   sort: "added-desc",
 };
@@ -1139,14 +1141,17 @@ function renderPendingList() {
         ? `<span class="pending-item-status" title="${escapeHtml(stTitle)}">${escapeHtml(stLabel)}</span>`
         : "";
       const detail = pendingDetailMessage(it);
+      const running = !!(_tool.batch && _tool.batch.currentId === it.id);
+      // 正在删的项：第二行换成进度，不再显示体积与增减
+      const metaText = running ? pendingRunningText() : pendingMetaLine(it);
       return (
-        `<div class="pending-item${stClass}" data-id="${escapeHtml(it.id)}">` +
+        `<div class="pending-item${stClass}${running ? " is-running" : ""}" data-id="${escapeHtml(it.id)}">` +
         `<div class="pending-item-head">` +
         `<div class="pending-item-main">` +
         `<span class="pending-item-icon" aria-hidden="true">${icon}</span>` +
         `<div class="pending-item-text">` +
         `<div class="pending-item-name" title="${escapeHtml(it.full)}">${escapeHtml(it.name)}</div>` +
-        `<div class="pending-item-meta" title="${escapeHtml(it.full)}">${escapeHtml(pendingMetaLine(it))}</div>` +
+        `<div class="pending-item-meta" title="${escapeHtml(it.full)}">${escapeHtml(metaText)}</div>` +
         `</div></div>` +
         badge +
         `<button type="button" class="btn-plain compact pending-item-locate" data-locate-id="${escapeHtml(it.id)}" data-i18n-title="pendingLocate" title="${escapeHtml(t("pendingLocate"))}">${escapeHtml(t("pendingLocate"))}</button>` +
@@ -1198,6 +1203,67 @@ function locatePendingItem(it) {
   }
 }
 
+/** 批量执行的整体进度文案：正在删第几项、已成功与失败各多少。 */
+function pendingBatchText() {
+  const b = _tool.batch;
+  if (!b) return "";
+  const cur = Math.min(b.total, b.done + 1);
+  return (
+    t("pendingBatchAt", cur, b.total) +
+    " | " +
+    t("pendingBatchCounts", b.ok, b.fail)
+  );
+}
+
+/** 正在删的那一项自己的进度文案：只报它已经删掉多少项；第几项由底部那行负责。 */
+function pendingRunningText() {
+  const b = _tool.batch;
+  if (!b) return "";
+  let text = t("pendingDeleting");
+  if (Number(b.items) > 0) {
+    text += ` | ${t("pendingDeletedItems", Number(b.items).toLocaleString())}`;
+  }
+  return text;
+}
+
+function renderPendingProgress() {
+  const box = $("#pendingProgress");
+  if (!box) return;
+  const b = _tool.batch;
+  box.classList.toggle("hidden", !b);
+  if (!b) return;
+  const fill = $("#pendingProgressFill");
+  if (fill) {
+    const pct = b.total > 0 ? Math.round((b.done / b.total) * 100) : 0;
+    fill.style.width = `${Math.min(100, pct)}%`;
+  }
+  const text = $("#pendingProgressText");
+  if (text) text.textContent = pendingBatchText();
+}
+
+/**
+ * 后端推来的逐项进度（只有彻底删除有，回收站是系统一次调用）。
+ * 按 root/rel 认领：执行期间用户可能又加了别的项。
+ */
+function onDeleteProgress(payload) {
+  const b = _tool.batch;
+  if (!b || !b.currentId) return;
+  const p = payload || {};
+  if (String(p.root || "") !== String(b.currentRoot || "")) return;
+  if (String(p.rel || "") !== String(b.currentRel || "")) return;
+  b.items = Number(p.items) || 0;
+  // 只动这一行：整表重渲染会把滚动位置与展开态一起抖掉
+  const list = $("#pendingList");
+  if (!list) return;
+  const rows = list.querySelectorAll(".pending-item");
+  for (const row of rows) {
+    if (row.getAttribute("data-id") !== b.currentId) continue;
+    const meta = row.querySelector(".pending-item-meta");
+    if (meta) meta.textContent = pendingRunningText();
+    return;
+  }
+}
+
 async function executePendingDeletes() {
   if (_tool.executing) return;
   if (!state.api || !state.api.delete_path) {
@@ -1238,11 +1304,28 @@ async function executePendingDeletes() {
   }
 
   _tool.executing = true;
+  _tool.batch = {
+    total: n,
+    done: 0,
+    ok: 0,
+    fail: 0,
+    currentId: "",
+    currentRoot: "",
+    currentRel: "",
+    items: 0,
+  };
   updatePendingBadge();
+  renderPendingProgress();
   let okCount = 0;
   let failCount = 0;
   try {
     for (const it of items) {
+      _tool.batch.currentId = it.id;
+      _tool.batch.currentRoot = it.root;
+      _tool.batch.currentRel = it.rel;
+      _tool.batch.items = 0;
+      // 先标出在删哪一项，删大目录时这一行会一直停着
+      renderPendingList();
       try {
         const res = await state.api.delete_path(it.root, it.rel, permanent);
         if (res && res.error) {
@@ -1259,10 +1342,16 @@ async function executePendingDeletes() {
         failCount += 1;
         it.result = classifyPendingResult(null, String(e) || t("deleteFail"));
       }
+      _tool.batch.done += 1;
+      _tool.batch.ok = okCount;
+      _tool.batch.fail = failCount;
+      renderPendingProgress();
       renderPendingList();
     }
   } finally {
     _tool.executing = false;
+    _tool.batch = null;
+    renderPendingProgress();
     renderPendingList();
   }
   if (okCount > 0 && failCount === 0) {

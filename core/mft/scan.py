@@ -16,7 +16,7 @@ from collections.abc import Callable
 
 from ..i18n import t
 from ..models import SnapshotMeta
-from ..snapshot import EntryRow, SnapshotWriter
+from ..snapshot import EntryRow, NullWriter, SnapshotWriter
 from .pipeline import read_and_parse_mft
 from .tree import MftTreeError, build_entry_rows_from_compact
 from .volume import (
@@ -31,6 +31,8 @@ from .volume import (
 
 ProgressCallback = Callable[[int, str], None]
 CancelCheck = Callable[[], bool]
+# 链接回调：on_link(相对扫描根的路径, 重解析点标签, 原始目标)
+LinkCallback = Callable[[str, int, str], None]
 
 _PROGRESS_MIN_INTERVAL = 0.22
 _ROWS_DONE = object()
@@ -144,7 +146,7 @@ class _AsyncRowWriter:
 
     def __init__(
         self,
-        writer: SnapshotWriter,
+        writer: SnapshotWriter | NullWriter,
         *,
         maxsize: int = 64,
     ) -> None:
@@ -219,10 +221,13 @@ def scan_mft_to_snapshot(
     now: float | None = None,
     timer: object | None = None,
     workers: int | None = None,
+    on_link: LinkCallback | None = None,
 ) -> SnapshotMeta:
-    """用 MFT 扫描盘符根并写入 ``db_path``。
+    """用 MFT 扫描盘符根。
 
     阶段：pipeline 读 $MFT+多进程紧凑解析 → 建树并异步写 SQLite → 建索引。
+    ``db_path`` 传 ``None`` 时跳过落库，只把盘扫一遍并把统计值与 ``on_link``
+    交回去（反查链接的扫盘模式）。
 
     Raises:
         MftUnavailable: 不满足条件或读/解析失败（应回退）。
@@ -353,8 +358,18 @@ def scan_mft_to_snapshot(
         if gc_was_enabled:
             gc.disable()
         try:
-            with SnapshotWriter(db_path, root=meta.root) as writer:
+            if db_path is None:
+                writer_ctx = NullWriter()
+            else:
+                writer_ctx = SnapshotWriter(db_path, root=meta.root)
+            with writer_ctx as writer:
                 async_w = _AsyncRowWriter(writer)
+                # 不落库时（反查的扫盘模式）没有「写入」这回事，进度文案别乱说
+                tree_msg = (
+                    t("MFT：构建目录树", "MFT: building tree")
+                    if db_path is None
+                    else t("MFT：构建并写入", "MFT: building & writing")
+                )
                 try:
 
                     def on_batch(rows: list[EntryRow]) -> None:
@@ -364,10 +379,7 @@ def scan_mft_to_snapshot(
                         # 用已提交行数跳动（写线程可能略滞后）
                         pg.emit(
                             async_w.written,
-                            t(
-                                f"MFT：构建并写入 {async_w.written}",
-                                f"MFT: building & writing {async_w.written}",
-                            ),
+                            f"{tree_msg} {async_w.written}",
                         )
 
                     if _span_start:
@@ -381,6 +393,7 @@ def scan_mft_to_snapshot(
                                 cancel=cancel,
                                 on_batch=on_batch,
                                 timer=timer,
+                                on_link=on_link,
                             )
                         )
                         del table

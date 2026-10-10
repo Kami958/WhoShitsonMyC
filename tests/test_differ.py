@@ -6,8 +6,22 @@ import sqlite3
 
 import pytest
 
-from core.differ import Diff, DiffRootMismatch, compare_snapshots
-from core.models import ChangeKind, Entry, SnapshotMeta
+from core.differ import (
+    Diff,
+    DiffRootMismatch,
+    _LINK_CANDIDATE_SQL,
+    _LINK_REL_BATCH,
+    compare_snapshots,
+)
+from core.link_match import abs_under_root, link_norm
+from core.models import (
+    REPARSE_TAG_MOUNT_POINT,
+    REPARSE_TAG_SYMLINK,
+    SNAPSHOT_FORMAT_VERSION,
+    ChangeKind,
+    Entry,
+    SnapshotMeta,
+)
 from core.scanner import scan_to_snapshot
 from core.snapshot import SnapshotError, write_snapshot
 from core import i18n
@@ -500,7 +514,7 @@ def test_search_kind_unchanged(make_tree, tmp_path):
 
 def test_search_cancel(monkeypatch, make_tree, tmp_path):
     """搜索中途取消应抛 SearchCancelled，取消后可正常发起新搜索。"""
-    from core import differ as differ_mod
+    from core.differ_pkg import search as diff_impl
     from core.differ import SearchCancelled
 
     old, new = _pair(
@@ -510,19 +524,19 @@ def test_search_cancel(monkeypatch, make_tree, tmp_path):
         {"box": {"cancel_me.txt": 90, "keep.txt": 5}},
     )
     with Diff(old, new) as diff:
-        orig = differ_mod._hits_with_paths
+        orig = diff_impl._hits_with_paths
 
         def hook(*args, **kwargs):
             # 模拟用户在首批查询完成后点了取消
             diff.cancel_search()
             return orig(*args, **kwargs)
 
-        monkeypatch.setattr(differ_mod, "_hits_with_paths", hook)
+        monkeypatch.setattr(diff_impl, "_hits_with_paths", hook)
         with pytest.raises(SearchCancelled):
             diff.search_by_name("cancel")
 
         # 被取消的关键词不应留下缓存污染
-        monkeypatch.setattr(differ_mod, "_hits_with_paths", orig)
+        monkeypatch.setattr(diff_impl, "_hits_with_paths", orig)
         nodes, total = diff.search_by_name("cancel")
         assert total == 1
         assert nodes[0].name == "cancel_me.txt"
@@ -590,3 +604,257 @@ def test_close_releases_file_handles(make_tree, tmp_path):
     diff.close()
     os.remove(old)  # 关掉后可删
     assert not os.path.exists(old)
+
+
+# ---- 反向链接查询（links_to） ----
+
+_LINKS_ROOT = "C:\\probe"
+
+
+def _links_entries(dirs, links):
+    """造快照条目：根 + 目录列表 + 链接列表。
+
+    Args:
+        dirs: 目录相对路径列表，如 ``["real", "sub"]``。
+        links: ``(相对路径, 链接目标, reparse_tag)`` 列表。
+    """
+    entries = [Entry(id=1, parent_id=None, name="", size=0, is_dir=True)]
+    ids: dict[str, int] = {"": 1}
+    next_id = 2
+    for d in dirs:
+        parent = ""
+        parts = d.split("\\")
+        for i, part in enumerate(parts):
+            cur = "\\".join(parts[: i + 1])
+            if cur in ids:
+                continue
+            ids[cur] = next_id
+            entries.append(Entry(
+                id=next_id, parent_id=ids[parent], name=part, size=0, is_dir=True,
+            ))
+            next_id += 1
+            parent = cur
+    for path, target, tag in links:
+        parent_rel, name = path.rsplit("\\", 1) if "\\" in path else ("", path)
+        entries.append(Entry(
+            id=next_id, parent_id=ids[parent_rel], name=name, size=0, is_dir=True,
+            reparse_tag=tag, link_target=target,
+        ))
+        next_id += 1
+    return entries
+
+
+def _links_to(tmp_path, dirs, links, path, *, new_version=SNAPSHOT_FORMAT_VERSION,
+              root=_LINKS_ROOT):
+    """把 entries 写成一对新旧快照（同根），对当前侧反查 path 这个目录。"""
+    entries = _links_entries(dirs, links)
+    old_db = os.path.join(tmp_path, "old.db")
+    new_db = os.path.join(tmp_path, "new.db")
+    write_snapshot(
+        old_db, root, entries,
+        SnapshotMeta(root=root, scanned_at=0.0, format_version=3),
+    )
+    write_snapshot(
+        new_db, root, entries,
+        SnapshotMeta(root=root, scanned_at=1.0, format_version=new_version),
+    )
+    with Diff(old_db, new_db) as diff:
+        return diff.links_to_abs(abs_under_root(root, path or ""))
+
+
+def test_links_to_finds_junction(tmp_path):
+    """目标为绝对路径的目录联接出现在结果里。"""
+    res = _links_to(
+        tmp_path, ["real"],
+        [("link", "C:\\probe\\real", REPARSE_TAG_MOUNT_POINT)],
+        "real",
+    )
+    assert res["ok"] is True
+    assert res["total"] == 1
+    assert res["unresolved_total"] == 0
+    link = res["links"][0]
+    assert link["path"] == "link"
+    assert link["name"] == "link"
+    assert link["kind"] == "junction"
+    assert link["target"] == "C:\\probe\\real"
+
+
+def test_links_to_ignores_other_targets(tmp_path):
+    """指向别的目录的链接不出现在结果里。"""
+    res = _links_to(
+        tmp_path, ["real", "other"],
+        [
+            ("a", "C:\\probe\\real", REPARSE_TAG_MOUNT_POINT),
+            ("b", "C:\\probe\\other", REPARSE_TAG_MOUNT_POINT),
+        ],
+        "real",
+    )
+    assert [it["path"] for it in res["links"]] == ["a"]
+    assert res["total"] == 1
+
+
+def test_links_to_case_and_separator_insensitive(tmp_path):
+    """目标写成大写盘符加正斜杠仍命中。"""
+    res = _links_to(
+        tmp_path, ["real"],
+        [("link", "c:/PROBE/Real", REPARSE_TAG_SYMLINK)],
+        "real",
+    )
+    assert res["total"] == 1
+    assert res["links"][0]["kind"] == "symlink"
+
+
+def test_links_to_trailing_separator(tmp_path):
+    """目标带尾随反斜杠仍命中。"""
+    res = _links_to(
+        tmp_path, ["real"],
+        [("link", "C:\\probe\\real\\", REPARSE_TAG_MOUNT_POINT)],
+        "real",
+    )
+    assert res["total"] == 1
+
+
+def test_links_to_relative_target_resolved(tmp_path):
+    """相对目标按链接所在目录展开；逃出扫描根的相对目标不计。"""
+    res = _links_to(
+        tmp_path, ["real", "sub"],
+        [
+            ("sub\\link", "..\\real", REPARSE_TAG_SYMLINK),
+            ("sub\\out", "..\\..\\real", REPARSE_TAG_SYMLINK),
+        ],
+        "real",
+    )
+    assert [it["path"] for it in res["links"]] == ["sub\\link"]
+    assert res["unresolved_total"] == 0
+
+
+def test_links_to_skips_volume_guid(tmp_path):
+    """卷 GUID 目标指向卷而不是目录，两个列表都不出现。"""
+    res = _links_to(
+        tmp_path, ["real", "sub"],
+        [("sub\\odd", "\\\\?\\Volume{11111111-2222-3333-4444-555555555555}\\x",
+          REPARSE_TAG_SYMLINK)],
+        "real",
+    )
+    assert res["total"] == 0
+    assert res["unresolved_total"] == 0
+
+
+def test_links_to_skips_other_reparse_tags(tmp_path):
+    """非目录联接/符号链接的重解析点不进候选集。"""
+    res = _links_to(
+        tmp_path, ["real"],
+        [("link", "C:\\probe\\real", 0x8000001A)],
+        "real",
+    )
+    assert res["total"] == 0
+    assert res["unresolved_total"] == 0
+
+
+def test_links_to_empty_target_skipped(tmp_path):
+    """link_target 为空的行两个列表都不出现。"""
+    res = _links_to(
+        tmp_path, ["real"],
+        [("link", "", REPARSE_TAG_MOUNT_POINT)],
+        "real",
+    )
+    assert res["total"] == 0
+    assert res["unresolved_total"] == 0
+
+
+def test_links_to_unsupported_v4(tmp_path):
+    """v4 快照没有 link_target 列，返回 unsupported。"""
+    res = _links_to(
+        tmp_path, ["real"],
+        [("link", "C:\\probe\\real", REPARSE_TAG_MOUNT_POINT)],
+        "real", new_version=4,
+    )
+    assert res["unsupported"] is True
+    assert res["format_version"] == 4
+    assert res["min_version"] == 5
+    assert res["links"] == []
+    assert res["total"] == 0
+
+
+def test_links_to_outside_root_ignored(tmp_path):
+    """指向快照范围之外的绝对目标两个列表都不出现。"""
+    res = _links_to(
+        tmp_path, ["real"],
+        [("link", "D:\\other\\real", REPARSE_TAG_MOUNT_POINT)],
+        "real",
+    )
+    assert res["total"] == 0
+    assert res["unresolved_total"] == 0
+
+
+def test_links_to_excludes_subdirectories(tmp_path):
+    """只精确匹配右键的那个目录，不返回指向其子目录的链接。"""
+    res = _links_to(
+        tmp_path, ["real", "real\\sub"],
+        [("link", "C:\\probe\\real\\sub", REPARSE_TAG_MOUNT_POINT)],
+        "real",
+    )
+    assert res["total"] == 0
+
+
+def test_links_to_root_target(tmp_path):
+    """目标为扫描根本身时，查空路径能返回它。"""
+    res = _links_to(
+        tmp_path, ["real"],
+        [("link", "C:\\probe\\", REPARSE_TAG_MOUNT_POINT)],
+        "",
+    )
+    assert [it["path"] for it in res["links"]] == ["link"]
+    assert res["total"] == 1
+
+
+def test_links_to_drive_root(tmp_path):
+    """扫描根是盘根时，目标路径不多一个分隔符，反查照样命中。"""
+    res = _links_to(
+        tmp_path, ["real"],
+        [("link", "C:\\real", REPARSE_TAG_MOUNT_POINT)],
+        "real", root="C:\\",
+    )
+    assert res["ok"] is True
+    assert [it["path"] for it in res["links"]] == ["link"]
+    assert res["total"] == 1
+
+
+def test_links_to_batches_relative_targets(tmp_path):
+    """相对目标多到一批装不下时，跨批的命中照样返回。"""
+    links = [
+        (f"sub\\l{i}", "..\\real", REPARSE_TAG_SYMLINK)
+        for i in range(_LINK_REL_BATCH + 1)
+    ]
+    res = _links_to(tmp_path, ["real", "sub"], links, "real")
+    assert res["total"] == _LINK_REL_BATCH + 1
+    assert res["unresolved_total"] == 0
+
+
+def test_links_query_uses_link_index(tmp_path):
+    """反链查询读候选行时走快照建的链接行索引，不做整表扫描。
+
+    索引是部分索引（只覆盖 reparse_tag <> 0 的行），SQLite 只在查询条件里
+    出现同一个条件时才采用它，所以这里连查询语句一起验。
+    """
+    db = os.path.join(tmp_path, "s.db")
+    entries = _links_entries(
+        ["real"], [("link", "C:\\probe\\real", REPARSE_TAG_MOUNT_POINT)]
+    )
+    write_snapshot(
+        db, _LINKS_ROOT, entries,
+        SnapshotMeta(
+            root=_LINKS_ROOT, scanned_at=0.0,
+            format_version=SNAPSHOT_FORMAT_VERSION,
+        ),
+    )
+    conn = sqlite3.connect(db)
+    try:
+        plan = conn.execute(
+            "EXPLAIN QUERY PLAN " + _LINK_CANDIDATE_SQL,
+            (REPARSE_TAG_MOUNT_POINT, REPARSE_TAG_SYMLINK),
+        ).fetchall()
+    finally:
+        conn.close()
+    detail = " ".join(str(row[3]) for row in plan)
+    assert "idx_entries_link" in detail

@@ -88,6 +88,7 @@ _AI_EXCLUDES = [
     "modules.ai.client",
     "modules.ai.prompts",
     "modules.ai.service",
+    "modules.ai.service_pkg",
     "modules.ai.packing",
     "modules.ai.tools",
     "httpx",

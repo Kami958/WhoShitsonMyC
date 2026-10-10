@@ -472,7 +472,7 @@ def test_choose_mft_procs_formula(monkeypatch):
 
     monkeypatch.delenv("WSMC_MFT_WORKERS", raising=False)
     monkeypatch.delenv("WSMC_MFT_PROCS", raising=False)
-    monkeypatch.setattr(parallel.os, "cpu_count", lambda: 12)
+    monkeypatch.setattr("os.cpu_count", lambda: 12)
     # min(cpu-1=11, n//50k)：百万条约 20 → 11
     assert parallel.choose_mft_procs(1_000_000) == 11
     # 小卷：5 万以下 → 1
@@ -625,6 +625,13 @@ def test_compact_table_carries_link_target():
     link = next(r for r in rows if r.name == "link")
     assert link.reparse_tag == 0xA0000003
     assert link.link_target == r"D:\360download\目标"
+
+    # 同一趟就把链接回调出去；链接在根下，路径从记录号爬父链现算
+    seen: list[tuple[str, int, str]] = []
+    build_entry_rows_from_compact(
+        table, on_link=lambda rel, tag, raw: seen.append((rel, tag, raw))
+    )
+    assert seen == [("link", 0xA0000003, r"D:\360download\目标")]
 
 
 def test_parse_serial_with_usa_flag_on_bytes():

@@ -93,7 +93,8 @@ function updatePickers() {
 }
 
 /** 打开快照选择下拉。同一 anchor 再次点击则收起，点另一个则切换内容。 */
-function openDropdown(which, anchor) {
+function openDropdown(which, anchor, opts) {
+  const o = opts || {};
   const dd = $("#dropdown");
   if (!dd.classList.contains("hidden") && _ddAnchor === anchor) {
     dd.classList.add("hidden");
@@ -102,16 +103,19 @@ function openDropdown(which, anchor) {
   }
   _ddAnchor = anchor;
   dd.innerHTML = "";
+  // 已选中项：对比条看两侧的 old/new，其它调用方用 opts.current 给路径
+  const curOld = o.current !== undefined ? "" : state.oldPath;
+  const curNew = o.current !== undefined ? o.current : state.newPath;
   if (state.snapshots.length === 0) {
     dd.innerHTML = `<div class="dd-empty">${t("noSnapshots")}</div>`;
   } else {
     for (const s of state.snapshots) {
       const item = document.createElement("div");
       item.className = "dd-item";
-      if (state.oldPath && s.path === state.oldPath) {
+      if (curOld && s.path === curOld) {
         item.classList.add("is-current-old");
       }
-      if (state.newPath && s.path === state.newPath) {
+      if (curNew && s.path === curNew) {
         item.classList.add("is-current-new");
       }
       const noteText = (s.note || "").trim();
@@ -125,15 +129,33 @@ function openDropdown(which, anchor) {
         <div class="m">${escapeHtml(s.root)} · <span class="dd-free">${freeText}</span> · ${fmtBytes(s.total_size)}</div>
         ${noteHtml}`;
       item.onclick = () => {
-        selectSnapshot(which, s.path);
+        if (o.onPick) o.onPick(s);
+        else selectSnapshot(which, s.path);
         dd.classList.add("hidden");
       };
       dd.appendChild(item);
     }
   }
   const r = anchor.getBoundingClientRect();
-  dd.style.left = `${r.left}px`;
-  dd.style.top = `${r.bottom + 4}px`;
   dd.style.minWidth = `${r.width}px`;
+  // 先占位再量尺寸，量完才定位置，所以量的时候先藏起来免得闪一下
+  dd.style.visibility = "hidden";
   dd.classList.remove("hidden");
+  const gap = 4;
+  const edge = 8;
+  const dh = dd.offsetHeight;
+  const dw = Math.max(r.width, dd.offsetWidth);
+  let top = r.bottom + gap;
+  if (top + dh > window.innerHeight - edge) {
+    // 下方放不下就翻到上方；两边都放不下（窗口太矮）时贴住下边
+    const above = r.top - dh - gap;
+    top = above >= edge ? above : Math.max(edge, window.innerHeight - dh - edge);
+  }
+  let left = r.left;
+  if (left + dw > window.innerWidth - edge) {
+    left = Math.max(edge, window.innerWidth - dw - edge);
+  }
+  dd.style.left = `${left}px`;
+  dd.style.top = `${top}px`;
+  dd.style.visibility = "";
 }

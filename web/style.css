@@ -25,6 +25,12 @@
   --grow: #cf222e;
   --shrink: #1a7f37;
   --warn: #9a6700;
+  /* 迁移历史里五种操作的类型色 */
+  --op-migrate: #1f6feb;
+  --op-restore: #0a7d8c;
+  --op-delbackup: #bc4c00;
+  --op-delold: #cf222e;
+  --op-linkfind: #6e7781;
   --shadow: 0 6px 24px rgba(120, 130, 140, 0.3);
 }
 
@@ -44,6 +50,11 @@
   --grow: #ff6b61;
   --shrink: #46b658;
   --warn: #e3b341;
+  --op-migrate: #4c8dff;
+  --op-restore: #3fbccb;
+  --op-delbackup: #e0913f;
+  --op-delold: #ff6b61;
+  --op-linkfind: #9aa4ae;
   --shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
 }
 
@@ -738,7 +749,6 @@ body.is-sidebar-resizing .main {
   background: transparent; border: 1px solid var(--border); color: var(--text-dim);
   border-radius: 4px; padding: 7px 16px; cursor: pointer; font-size: 13px;
 }
-.btn-ghost:hover { border-color: var(--grow); color: var(--grow); }
 .btn-plain {
   background: none; border: 1px solid transparent; color: var(--text-muted);
   border-radius: 4px; padding: 5px 8px; cursor: pointer; font-size: 13px;
@@ -1574,8 +1584,11 @@ body.is-search-panel-resizing .main {
 .empty-title { font-size: 17px; font-weight: 700; color: var(--text); }
 .empty-hint { color: var(--text-muted); font-size: 13px; max-width: 420px; line-height: 1.9; }
 
-/* ---- 下拉选择 ---- */.dropdown {
-  position: fixed; z-index: 50; background: var(--bg-side);
+/* ---- 下拉选择 ---- */
+/* 这个下拉会从各种弹窗内部打开（如反查链接的快照选择），层级要高于所有遮罩，
+   遮罩最高到 130（见 #uninstallDoneOverlay），取 200 与标题栏、提示条同层。 */
+.dropdown {
+  position: fixed; z-index: 200; background: var(--bg-side);
   border: 1px solid var(--border); border-radius: 4px; box-shadow: var(--shadow);
   max-height: 340px; overflow-y: auto; min-width: 260px;
 }
@@ -1945,6 +1958,36 @@ body.is-tool-panel-resizing .main {
   background: color-mix(in srgb, #8e44ad 12%, transparent);
 }
 .pending-item-remove { flex-shrink: 0; padding: 2px 6px; }
+/* 批量删除的总体进度：占满一行，把勾选框与按钮挤到下一行 */
+.pending-progress {
+  flex: 1 1 100%;
+  margin-bottom: 2px;
+}
+.pending-progress-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--border-soft);
+  overflow: hidden;
+}
+.pending-progress-bar i {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.15s ease;
+}
+.pending-progress-text {
+  margin-top: 5px;
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+/* 正在删的这一项：描边与文字提亮，与已完成的项区分开 */
+.pending-item.is-running {
+  border-color: var(--accent);
+}
+.pending-item.is-running .pending-item-meta {
+  color: var(--text);
+}
 .pending-foot {
   border-top: 1px solid var(--border);
   padding: 10px 12px;
@@ -1988,53 +2031,274 @@ body.is-tool-panel-resizing .main {
   margin-left: auto;
 }
 /* ---- 目录链接管理 ---- */
-.link-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 10px 6px;
+/* 目录迁移还在试验阶段，最上面先说一句。做成一条淡淡的提醒带，
+   上下留一样的内边距，左边跟下面 tab 的文字对齐 */
+.link-experimental {
+  margin: 0;
+  padding: 8px 12px 8px 20px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
   flex-shrink: 0;
 }
-/* 视图切换组靠左，方便在「迁移列表 / 迁移历史」间切换 */
-.link-view-tabs {
+/* 视图切换：通栏条，下边框横贯面板；选中项用底部色条标注 */
+.link-tabs-bar {
   display: flex;
-  align-items: center;
-  margin-right: auto;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  overflow: hidden;
+  align-items: stretch;
+  gap: 2px;
+  padding: 0 8px;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border);
 }
 .link-view-tab {
   appearance: none;
   border: none;
+  border-bottom: 2px solid transparent;
   background: transparent;
   color: var(--text-muted);
   font-size: 12px;
-  padding: 6px 10px;
+  padding: 9px 12px;
   cursor: pointer;
   display: flex;
   align-items: center;
   gap: 4px;
 }
-.link-view-tab + .link-view-tab { border-left: 1px solid var(--border); }
 .link-view-tab:hover { color: var(--text); background: var(--bg-hover); }
 .link-view-tab.active {
-  background: color-mix(in srgb, var(--accent) 12%, var(--bg));
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+/* 列表视图的按钮行：[新建迁移] 起头，[反查链接] 并排，刷新推右。
+   三个按钮统一到 30px 高：无边框的补一条透明边框，行内才齐平 */
+.link-list-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 10px;
+  flex-shrink: 0;
+}
+.link-list-actions .btn-primary,
+.link-list-actions .btn-ghost {
+  padding: 5px 12px;
+  font-size: 12px;
+  line-height: 18px;
+  border: 1px solid transparent;
+}
+.link-list-actions .btn-ghost { border-color: var(--border); }
+.link-list-actions .summary-icon-btn { margin-left: auto; }
+
+/* ---- 反查链接弹窗 ---- */
+.link-find-card { width: min(680px, 94vw); }
+/* 字段行：左边一列标签，右边一列控件，与设置面板的字段行同构 */
+.link-find-field {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 0 18px;
+  margin-top: 12px;
+}
+.link-find-label {
+  flex: 0 0 auto;
+  min-width: 40px;
+  padding-top: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+/* 输入框与[选择]拼成一个控件：同高、共边、只留外侧圆角 */
+.link-find-group { flex: 1; min-width: 0; display: flex; }
+.link-find-control { flex: 1; min-width: 0; }
+/* .note-input 是给备注文本框用的，长宽与边距都要压回单行输入框。
+   这里用 .note-card 提一级权重，避免被定义在后面的 .note-input 盖掉。 */
+.note-card .link-find-path {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  height: auto;
+  margin: 0;
+  padding: 8px 10px;
+  resize: none;
+  font-size: 13px;
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.link-find-pick {
+  flex-shrink: 0;
+  padding: 0 14px;
+  border: 1px solid var(--border);
+  border-left: none;
+  border-radius: 0 4px 4px 0;
+  background: var(--bg-hover);
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+}
+.link-find-pick:hover { border-color: var(--accent); color: var(--accent); }
+.link-find-modes {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.link-find-mode {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 6px 14px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.link-find-mode:hover { color: var(--text); }
+.link-find-mode.active {
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg));
   color: var(--accent);
   font-weight: 600;
 }
-/* 新建按钮靠右，与刷新并排 */
-.link-head .btn-primary {
-  padding: 7px 14px;
-  font-size: 13px;
-}
-.link-head .summary-icon-btn {
+.link-find-check {
+  display: flex;
+  align-items: center;
+  gap: 5px;
   flex-shrink: 0;
+  font-size: 12px;
+  cursor: pointer;
+}
+.link-find-drive-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+.link-find-pane-hint { margin-top: 6px; font-size: 12px; color: var(--text-muted); }
+.link-find-drives { display: flex; flex-wrap: wrap; gap: 6px; }
+.link-find-drives .link-find-pane-hint { margin-top: 0; }
+.link-find-drive {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.link-find-drive:hover { border-color: var(--accent); }
+.link-find-drive input { margin: 0; }
+/* 任务在跑时盘勾选锁住，鼠标不要再给可点的暗示 */
+.link-find-check:has(input:disabled),
+.link-find-drive:has(input:disabled) { cursor: default; }
+.link-find-drive:has(input:disabled):hover { border-color: var(--border); }
+.link-find-progress { margin: 12px 18px 0; }
+.link-find-progress-track {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border-soft);
+  overflow: hidden;
+}
+.link-find-progress-track i {
+  display: block;
+  width: 30%;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+  animation: link-find-slide 1.2s ease-in-out infinite;
+}
+@keyframes link-find-slide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(340%); }
+}
+.link-find-progress-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+.link-find-progress-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.link-find-status {
+  margin: 10px 18px 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.link-find-status.is-error { color: var(--grow); }
+.link-find-results {
+  max-height: 44vh;
+  overflow-y: auto;
+  margin: 12px 18px 0;
+  border-top: 1px solid var(--border-soft);
+}
+/* 反查结果行左侧的勾选框；不能导入的行占一个等宽空位，让类型标签对齐 */
+.link-find-row-check {
+  flex-shrink: 0;
+  margin: 0;
+  cursor: pointer;
+}
+.link-find-row-check-blank {
+  flex-shrink: 0;
+  display: inline-block;
+  width: 13px;
+}
+.link-find-group-title {
+  margin: 8px 4px 2px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+/* 每条结果整行可点，点了用资源管理器打开链接所在目录 */
+.link-find-result {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 4px;
+  font-size: 13px;
+  border-bottom: 1px solid var(--border-soft);
+  cursor: pointer;
+}
+.link-find-result:hover { background: var(--bg-hover); }
+.link-find-result-static { cursor: default; }
+.link-find-result-kind {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.link-find-result-path {
+  flex: 1;
+  min-width: 0;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.link-find-result-target {
+  flex-shrink: 0;
+  max-width: 40%;
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* 反查结果行右侧的「已在管理」标记 */
+.link-find-result-note {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--text-muted);
 }
 
 /* ---- 迁移历史 ---- */
-/* 「迁移历史」是工具行里按钮组的一个视图。展开后是扁平列表，状态用色点+
-   文案表达，整条不铺色块、不做边条，贴合应用的扁平工具语言。 */
+/* 迁移历史是工具行里按钮组的一个视图。展开后是扁平列表，状态用带底色的标签与
+   左侧竖线表达，卡片不铺整块底色，贴合应用的扁平工具语言。 */
 .link-view {
   flex: 1;
   min-height: 0;
@@ -2069,14 +2333,29 @@ body.is-tool-panel-resizing .main {
   padding: 2px 10px 12px;
 }
 .link-history-item {
-  padding: 10px 4px;
+  position: relative;
+  padding: 10px 4px 10px 14px;
   border-bottom: 1px solid var(--border-soft);
   font-size: 13px;
   line-height: 1.5;
   color: var(--text);
 }
 .link-history-item:last-child { border-bottom: none; }
-/* 首行：状态点 + 操作 + 状态 + 数量，时间靠右。字号与卡片一致，不再偏小。 */
+/* 左侧竖线表达结果：成功绿、失败红、取消黄；长度随卡片伸缩，上下各留空隙，不与卡片边界重合 */
+.link-history-item::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 3px;
+  border-radius: 2px;
+  background: transparent;
+}
+.link-history-item.is-success::before { background: var(--shrink); }
+.link-history-item.is-failed::before { background: var(--grow); }
+.link-history-item.is-cancelled::before { background: var(--warn); }
+/* 首行：操作 + 状态标签 + 数量，时间靠右。字号与卡片一致，不再偏小。 */
 .link-history-item-head {
   display: flex;
   align-items: center;
@@ -2084,22 +2363,36 @@ body.is-tool-panel-resizing .main {
   color: var(--text-muted);
   min-width: 0;
 }
-.link-history-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  flex-shrink: 0;
-  background: var(--text-muted);
-}
-.link-history-item.is-success .link-history-dot { background: var(--shrink); }
-.link-history-item.is-failed .link-history-dot { background: var(--grow); }
-.link-history-item.is-cancelled .link-history-dot { background: var(--warn); }
+/* 操作类型用颜色区分：迁移蓝、还原青、删除备份橙、删除旧迁移红、反查灰 */
+.link-history-item.op-migrate { --op: var(--op-migrate); }
+.link-history-item.op-restore { --op: var(--op-restore); }
+.link-history-item.op-delbackup { --op: var(--op-delbackup); }
+.link-history-item.op-delold { --op: var(--op-delold); }
+.link-history-item.op-linkfind { --op: var(--op-linkfind); }
 .link-history-op {
+  color: var(--op);
   font-weight: 600;
-  color: var(--text);
   flex-shrink: 0;
 }
-.link-history-status { flex-shrink: 0; }
+/* 结果用淡底徐章，颜色与左侧竖线一致 */
+.link-history-status {
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+.link-history-item.is-success .link-history-status {
+  background: color-mix(in srgb, var(--shrink) 14%, transparent);
+  color: var(--shrink);
+}
+.link-history-item.is-failed .link-history-status {
+  background: color-mix(in srgb, var(--grow) 14%, transparent);
+  color: var(--grow);
+}
+.link-history-item.is-cancelled .link-history-status {
+  background: color-mix(in srgb, var(--warn) 14%, transparent);
+  color: var(--warn);
+}
 .link-history-num {
   min-width: 0;
   white-space: nowrap;
@@ -2115,7 +2408,7 @@ body.is-tool-panel-resizing .main {
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
 }
-/* 路径两行：左标签列（原路径/目标）+ 右路径，与卡片行对齐，便于扫描 */
+/* 路径两行：左标签列（访问路径/存放位置）+ 右路径，与卡片行对齐，便于扫描 */
 .link-history-item-paths {
   display: flex;
   flex-direction: column;
@@ -2123,15 +2416,18 @@ body.is-tool-panel-resizing .main {
   margin-top: 6px;
   min-width: 0;
 }
+/* 路径行：标签、路径与行尾按钮在同一垂直中线上，行高被按钮撑高时上下留白一致 */
 .link-history-pathrow {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 10px;
   min-width: 0;
 }
+/* 标签列宽度按最长标签留位，标签过长（如英文的 Old migration）自行撑开而不是压住路径 */
 .link-history-plabel {
   flex-shrink: 0;
-  width: 42px;
+  min-width: 52px;
+  white-space: nowrap;
   font-size: 12px;
   color: var(--text-muted);
 }
@@ -2144,8 +2440,15 @@ body.is-tool-panel-resizing .main {
   text-overflow: ellipsis;
 }
 .link-history-path { color: var(--text); }
+/* 反查记录的[查看结果]与目录同一行，靠右端；面板变窄时先压路径再压按钮 */
+.link-history-path-acts {
+  margin-left: auto;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+}
 .link-history-target { color: var(--text-muted); }
-/* 备份清理等结果说明单独占一行：混在首行数量里会被窄面板省略号吃掉 */
+/* 结果说明（备份清理、反查查到几条与查询来源）单独占一行：混在首行数量里会被窄面板省略号吃掉 */
 .link-history-note {
   margin-top: 5px;
   font-size: 12px;
@@ -2160,11 +2463,9 @@ body.is-tool-panel-resizing .main {
   font-size: 12px;
   line-height: 1.4;
 }
-/* 成功项：操作、状态、路径、时间、标签一律走主色（黑），让成功记录视觉压过失败/取消；
-   失败/取消保持原 muted 配色以区分。 */
+/* 成功项：路径、时间、标签走正文色，比失败和取消更清楚；
+   操作名与状态各有自己的颜色，不参与这条规则。 */
 .link-history-item.is-success .link-history-plabel,
-.link-history-item.is-success .link-history-op,
-.link-history-item.is-success .link-history-status,
 .link-history-item.is-success .link-history-time,
 .link-history-item.is-success .link-history-path,
 .link-history-item.is-success .link-history-target {
@@ -2189,11 +2490,39 @@ body.is-tool-panel-resizing .main {
 }
 .link-history-open:hover { background: var(--bg-hover); }
 .link-history-open:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+/* 反查记录里的[查看结果]：单条边框按钮，不要像路径那样铺满整行 */
+.link-history-linkfind {
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--accent);
+  font-size: 12px;
+}
+.link-history-linkfind:hover { border-color: var(--accent); }
+/* 迁移列表里的路径也可点击：同样还原成普通文本外观，字体与字号沿用所在行的规则 */
+.link-open-path {
+  appearance: none;
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 3px;
+}
+/* 卡片整卡悬停时也会变成 --bg-hover，路径按钮再用同一底色就看不出任何反馈；
+   改成文字色混出来的一层淡底，在卡片本身任何底色上都看得见。 */
+.link-open-path:hover {
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+}
+.link-open-path:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
 /* 搜索框：图标 + 输入 + 清空键，居中 13px、占满工具行宽 */
 .link-history-filter {
   display: flex;
   align-items: center;
-  margin: 0 10px 6px;
+  margin: 8px 10px 6px;
   border: 1px solid var(--border);
   border-radius: 4px;
   overflow: hidden;
@@ -2284,7 +2613,7 @@ body.is-tool-panel-resizing .main {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin: 6px 10px 4px;
+  margin: 0 10px 8px;
   padding: 0;
 }
 .link-list-search-wrap {
@@ -2388,7 +2717,9 @@ body.is-tool-panel-resizing .main {
 }
 .link-card-row-label {
   flex-shrink: 0;
-  width: 42px;
+  /* 标签最长四字（访问路径、存放位置），列宽按最长标签留位，过长时自行撑开而不是折行 */
+  min-width: 52px;
+  white-space: nowrap;
   font-size: 12px;
   color: var(--text-muted);
   letter-spacing: 0.04em;
@@ -2559,7 +2890,7 @@ body.is-tool-panel-resizing .main {
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
-/* 状态色点与迁移历史同一套读法：颜色在点上，文字保持中性 */
+/* 状态用色点表达：颜色在点上，文字保持中性 */
 .link-queue-dot {
   width: 7px;
   height: 7px;
@@ -2572,12 +2903,6 @@ body.is-tool-panel-resizing .main {
 .link-queue-item.is-failed .link-queue-dot { background: var(--grow); }
 .link-queue-item.is-cancelled .link-queue-dot { background: var(--warn); }
 .link-queue-status { flex-shrink: 0; color: var(--text-muted); }
-.link-queue-flag {
-  flex-shrink: 0;
-  font-size: 12px;
-  color: var(--text-muted);
-  opacity: 0.8;
-}
 .link-queue-acts {
   margin-left: auto;
   flex-shrink: 0;
@@ -2594,7 +2919,9 @@ body.is-tool-panel-resizing .main {
 }
 .link-queue-label {
   flex-shrink: 0;
-  width: 42px;
+  /* 与迁移列表、迁移历史保持同一列宽，标签最长四字，过长时撑开而不是折行 */
+  min-width: 52px;
+  white-space: nowrap;
   font-size: 12px;
   color: var(--text-muted);
   line-height: 1.45;
@@ -2610,8 +2937,25 @@ body.is-tool-panel-resizing .main {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-/* 进度条长在队列项里，去掉面板级进度的左右外边距 */
-.link-queue-progress { margin: 8px 0 0; }
+/* 备份处理行的值：与路径行同排版；彻底删除不可恢复，用告警色标出来 */
+.link-queue-value {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.link-queue-value.is-danger { color: var(--grow); }
+/* 进度条长在队列项里：与上方信息之间用一道通栏横线分段，
+   负外边距让横线顶到卡片边缘，内边距把进度条带回与卡片内容同一条左边缘 */
+.link-queue-item .link-queue-progress {
+  margin: 8px -12px 0;
+  padding: 8px 12px 0;
+  border-top: 1px solid var(--border-soft);
+}
 .link-queue-progress .migrate-progress-text { font-size: 12px; }
 .link-queue-error {
   margin-top: 5px;
@@ -2628,8 +2972,59 @@ body.is-tool-panel-resizing .main {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px;
+  padding: 10px 12px;
   border-top: 1px solid var(--border-soft);
+  flex-shrink: 0;
+  /* 面板拖到最窄时右侧按钮组换到下一行，不折行就会被裁掉 */
+  flex-wrap: wrap;
+}
+/* 底部两侧分工：左边新建迁移，右侧的开始、暂停与取消贴着面板右缘 */
+.link-queue-foot-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+/* 底栏按钮统一到 31px 高、13px 字号，与新建迁移表单底栏同一套尺寸：无边框的补一条透明边框，两端才对得齐 */
+.link-queue-foot .btn-primary,
+.link-queue-foot .btn-ghost {
+  padding: 6px 16px;
+  font-size: 13px;
+  border: 1px solid transparent;
+}
+.link-queue-foot .btn-ghost { border-color: var(--border); }
+/* 迁移成功：整行绿底闪三下示意这一项已经完成 */
+.link-queue-item.is-done.is-flash {
+  animation: queue-done-flash 0.4s ease-in-out 3;
+}
+@keyframes queue-done-flash {
+  0%, 100% { background: var(--bg); border-color: var(--border-soft); }
+  50% {
+    background: color-mix(in srgb, var(--shrink) 16%, var(--bg));
+    border-color: color-mix(in srgb, var(--shrink) 50%, var(--border-soft));
+  }
+}
+/* 完成项离场：向左滑出的同时淡出并收掉这一行的高度，后面的项跟着补位 */
+.link-queue-item.is-done.is-leaving {
+  overflow: hidden;
+  pointer-events: none;
+  max-height: 140px;
+  animation: queue-item-leave 340ms ease forwards;
+}
+@keyframes queue-item-leave {
+  0% { transform: translateX(0); opacity: 1; max-height: 140px; }
+  100% {
+    transform: translateX(-64px);
+    opacity: 0;
+    max-height: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    border-top-width: 0;
+    border-bottom-width: 0;
+  }
 }
 
 /* ---- 新建迁移表单 ---- */
@@ -2639,8 +3034,23 @@ body.is-tool-panel-resizing .main {
   display: flex;
   flex-direction: column;
 }
+/* 表单标题行：与弹窗的 note-head 同构，右上角 ✕ 回进入表单前的视图 */
+.migrate-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 8px 12px 0;
+  flex-shrink: 0;
+}
+.migrate-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
 .migrate-intro {
-  margin: 10px 12px 12px;
+  margin: 6px 12px 12px;
   font-size: 12px;
   color: var(--text-muted);
   line-height: 1.5;
@@ -2691,24 +3101,43 @@ body.is-tool-panel-resizing .main {
 }
 .migrate-hint:empty { display: none; }
 .migrate-hint.hidden { display: none; }
-.migrate-cleanup {
+/* 再次迁移弹窗：存放位置输入行 + 旧迁移三选一。卡片是 .note-card，
+   字段的左右边距按弹窗的 18px 对齐，与迁移表单不同。 */
+.remigrate-card { width: min(440px, 94vw); }
+.remigrate-card .migrate-field { margin: 12px 18px; }
+.remigrate-card .migrate-hint { margin: 0 18px; }
+.migrate-radio-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+/* 迁移表单里的备份处理横排一行，侧栏窄时自动换行 */
+.migrate-radio-group.is-row {
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+}
+.migrate-radio {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  margin: 0 12px 10px;
   font-size: 12px;
   line-height: 1.4;
-  color: var(--text-muted);
+  color: var(--text-dim);
   cursor: pointer;
   user-select: none;
 }
-.migrate-cleanup input[type="checkbox"] {
+.migrate-radio input[type="radio"] {
   width: 14px;
   height: 14px;
   flex-shrink: 0;
+  margin: 0;
   accent-color: var(--accent);
   cursor: pointer;
 }
+/* 彻底删除不可恢复，选项本身也用告警色标出，与队列卡片上的标记一致 */
+.migrate-radio.is-danger { color: var(--grow); }
+.migrate-radio.is-danger input[type="radio"] { accent-color: var(--grow); }
 .migrate-progress { margin: 0 12px 10px; }
 .migrate-progress-bar {
   height: 6px;
@@ -2722,18 +3151,25 @@ body.is-tool-panel-resizing .main {
   background: var(--accent);
   transition: width 0.15s ease;
 }
-/* 进度文案会带当前文件的完整路径，限两行，避免复制时行数乱跳 */
+/* 进度文案：状态、百分比、已写字节与总量 */
 .migrate-progress-text {
   margin-top: 5px;
   font-size: 11px;
   color: var(--text-muted);
   line-height: 1.4;
-  word-break: break-all;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  overflow: hidden;
 }
+/* 进度下面那一行：实时速度、剩余时间、当前文件名；分几段靠间距隔开，没有内容时不占位置 */
+.migrate-progress-note {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.migrate-progress-note > span + span { margin-left: 10px; }
+.migrate-progress-note:empty { display: none; }
 /* 还原进度：位于「目录链接」面板顶部，复制大目录时显示 */
 .restore-progress {
   margin: 0 12px 12px;
@@ -2772,31 +3208,33 @@ body.is-tool-panel-resizing .main {
   overflow: hidden;
 }
 .restore-progress .btn-plain.compact { flex-shrink: 0; }
+/* 只有一行文字、没有进度条的卡片（[删除备份] 事前不知道总数）：不要条上方那道间距 */
+.restore-progress-text:only-child { margin-top: 0; }
 .migrate-actions {
   margin-top: auto;
   padding: 10px 12px;
   border-top: 1px solid var(--border);
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: space-between;
   gap: 8px;
   flex-wrap: wrap;
   flex-shrink: 0;
 }
-/* 返回列表是导航，不是表单动作，推到左端与提交按钮分开 */
-.migrate-actions #migrateBackBtn {
-  margin-right: auto;
-  background: var(--bg-active);
-  border-color: var(--border);
-  color: var(--text);
-}
-.migrate-actions #migrateBackBtn:hover {
-  border-color: var(--grow);
-  color: var(--grow);
+/* 左侧 [返回队列] 可能不显示（队列为空），右侧这组始终贴右 */
+.migrate-actions-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
 }
 .migrate-actions .btn-primary.compact {
   padding: 7px 16px;
   font-size: 13px;
+}
+/* ghost 比 primary 多 1px 描边，上下各减 1px 才能齐平 */
+.migrate-actions .btn-ghost {
+  padding: 6px 16px;
 }
 /* AI 页签内容复用原面板样式 */
 .ai-head {
@@ -3302,6 +3740,72 @@ select.ai-settings-input:focus {
   line-height: 1.7;
   word-break: break-word;
 }
+/* 搬家途中提问：把卡住迁移的程序和刚变动的文件列出来 */
+.migrate-ask-card {
+  width: min(480px, 92vw);
+}
+/* 占用程序和变动文件上下排两段 */
+.migrate-ask-cols {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 12px;
+}
+.migrate-ask-cols > .migrate-ask-block {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.migrate-ask-label {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.migrate-ask-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.migrate-ask-chip {
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--bg-hover);
+  border: 1px solid var(--border-soft);
+  color: var(--text);
+  font-size: 12px;
+}
+/* 文件名横向排，一行放不下就换行，和上面程序那排一样 */
+.migrate-ask-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  max-height: 132px;
+  overflow: auto;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-dim);
+}
+.migrate-ask-file {
+  max-width: 100%;
+  min-width: 0;
+  word-break: break-all;
+}
+.migrate-ask-file.muted {
+  color: var(--text-muted);
+}
+/* 每个按钮点下去会发生什么，接在正文后面另起一行 */
+.migrate-ask-card .confirm-body {
+  white-space: pre-line;
+}
+/* 文案里的 [按钮名] 加粗，扫一眼能看到该按哪个 */
+.migrate-ask-card .confirm-body b {
+  font-weight: 600;
+}
+/* 底部三个按钮默认内边距各不相同，统一尺寸才对齐 */
+.migrate-ask-card .note-foot button {
+  padding: 8px 18px;
+  font-size: 14px;
+  min-width: 88px;
+}
 /* 弹窗里出现的绝对路径：主题色淡化版当底，圆角；CJK 不用等宽字形，只让数字/斜杠对齐。
    用 inline（而非 inline-block），让路径能随文本流在中途断开、去填满当前行剩余空隙；
    box-decoration-break: clone 让断行后的每片都保留整块底色，不会因行盒升降而掉色。 */
@@ -3653,10 +4157,18 @@ select.ai-settings-input:focus {
 }
 .note-title { margin: 0; font-size: 15px; font-weight: 600; color: var(--text); }
 .note-hint {
-  margin: 0; padding: 10px 18px 0;
+  margin: 0; padding: 10px 18px 10px;
   font-size: 13px; color: var(--text-dim);
   word-break: break-all; line-height: 1.5;
   white-space: pre-line;
+}
+/* 说明文字下面紧接的就是表单或结果区，它们自带的上边距会和说明文字的下内边距叠加，
+   这里压到 2px，总间距和原来一致 */
+.note-hint + .note-input,
+.note-hint + .link-find-field,
+.note-hint + .link-find-results,
+.note-hint + .skipped-body {
+  margin-top: 2px;
 }
 #gotoPathHint {
   box-sizing: border-box;
@@ -3687,12 +4199,20 @@ select.ai-settings-input:focus {
   outline: none;
   border-color: var(--accent);
 }
+.note-input.is-error,
+.note-input.is-error:focus {
+  border-color: var(--grow);
+}
 .note-foot {
   display: flex; align-items: center; justify-content: flex-end; gap: 8px;
   padding: 7px 18px 11px;
   border-top: 1px solid var(--border-soft);
 }
 .note-foot-spacer { flex: 1; }
+
+/* 反查弹窗的末尾元素（字段行/进度条/状态文字/结果列表）都不带下边距，
+   底栏上方的留白由底栏自己留出 */
+.link-find-card .note-foot { margin-top: 12px; }
 
 /* ---- Toast ---- */
 .toast {
@@ -3713,3 +4233,6 @@ select.ai-settings-input:focus {
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* 次要按钮悬停：边框转主题色、文字加深。放在文件末尾，同权重下能盖住各处针对 .btn-ghost 边框的单独规则。 */
+.btn-ghost:hover { border-color: var(--accent); color: var(--text); }

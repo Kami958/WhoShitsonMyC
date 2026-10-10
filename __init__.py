@@ -8,8 +8,9 @@
       models.py     数据结构定义
       snapshot.py   SQLite 快照读写
       scanner.py    磁盘遍历、生成快照
-      differ.py     两份快照对比、生成变化树
-    app.py      pywebview 桥接层（连接前端与核心引擎）
+      differ_pkg/   两份快照对比、生成变化树
+    app/        pywebview 桥接层，app/api/ 下按功能域分成多个 Mixin
+    app.py      启动入口，创建窗口后进入消息循环
     web/        HTML/CSS/JS 前端界面
     version.py  版本号（唯一来源）
 """

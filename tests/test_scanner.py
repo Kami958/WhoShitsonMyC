@@ -201,3 +201,58 @@ def test_real_junction_link_target(make_tree, tmp_path, snapshot_map):
     assert got.is_dir is True
     assert got.reparse_tag == 0xA0000003
     assert got.link_target == os.path.join(root, "real")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction only")
+def test_scan_without_snapshot_reports_links(make_tree, tmp_path):
+    """不要快照的扫描（反查的扫盘模式）不写文件，链接照常回调出来。"""
+    import _winapi
+
+    root = make_tree({"real": {"a.txt": 10}})
+    try:
+        _winapi.CreateJunction(os.path.join(root, "real"), os.path.join(root, "link"))
+    except (OSError, ValueError) as exc:  # 无权限/非 NTFS 时跳过，不误报
+        pytest.skip(f"Cannot create junction: {exc}")
+
+    seen: list[tuple[str, int, str]] = []
+    before = set(os.listdir(tmp_path))
+    meta = scan_to_snapshot(
+        root,
+        None,
+        on_link=lambda rel, tag, raw: seen.append((rel, tag, raw)),
+    )
+    assert set(os.listdir(tmp_path)) == before
+    assert (meta.file_count, meta.dir_count) == (1, 3)
+    assert seen == [("link", 0xA0000003, os.path.join(root, "real"))]
+
+
+def test_safe_name_replaces_only_lone_surrogates():
+    """孤立代理项替换为 U+FFFD；ASCII、中文、合法增补平面字符原样保留。"""
+    import core.scanner as scanner
+
+    assert scanner._safe_name("abc.txt") == "abc.txt"
+    assert scanner._safe_name("测试目录") == "测试目录"
+    assert scanner._safe_name("文档\U0001F600.txt") == "文档\U0001F600.txt"
+    assert scanner._safe_name("x\ud818y") == "x\ufffdy"
+    assert scanner._safe_name("\udc00") == "\ufffd"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="孤立代理项文件名仅 Windows 可创建")
+def test_lone_surrogate_name_does_not_break_scan(make_tree, tmp_path, snapshot_map):
+    """坏名字文件不再炸扫描：净化为 U+FFFD 入库，大小仍正确聚合。"""
+    root = make_tree({"ok.txt": 40})
+    bad = os.path.join(root, "bad\ud818name.txt")
+    try:
+        with open(bad, "wb") as f:
+            f.write(b"\0" * 60)
+    except (OSError, UnicodeEncodeError) as exc:  # 非 NTFS 等场景跳过，不误报
+        pytest.skip(f"Cannot create surrogate-named file: {exc}")
+
+    db, meta = _scan(root, tmp_path)
+
+    entries = snapshot_map(db)
+    assert entries["bad\ufffdname.txt"].size == 60
+    assert entries["bad\ufffdname.txt"].is_dir is False
+    assert entries["ok.txt"].size == 40
+    assert meta.file_count == 2
+    assert meta.total_size == 100

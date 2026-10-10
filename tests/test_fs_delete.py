@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import stat
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -214,6 +216,65 @@ def test_delete_permanent_file_and_dir(tmp_path: Path):
     assert not f.exists()
     fs_delete.delete_permanent(str(d))
     assert not d.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="junction 仅 Windows")
+def test_delete_permanent_keeps_junction_target(tmp_path: Path):
+    """彻底删除不能穿过目录联接：联接本身删掉，它指向的数据一个都不能少。"""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("x", encoding="utf-8")
+    root = tmp_path / "root"
+    (root / "inside").mkdir(parents=True)
+    (root / "inside" / "gone.txt").write_text("y", encoding="utf-8")
+    subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(root / "j"), str(outside)],
+        check=True,
+        capture_output=True,
+    )
+
+    fs_delete.delete_permanent(str(root))
+
+    assert root.exists() is False
+    assert (outside / "keep.txt").read_text(encoding="utf-8") == "x"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="只读属性只影响 Windows 的删除")
+def test_delete_permanent_readonly_file(tmp_path: Path):
+    f = tmp_path / "03_docx.zip"
+    f.write_bytes(b"x")
+    os.chmod(f, stat.S_IREAD)
+
+    fs_delete.delete_permanent(str(f))
+    assert not f.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="只读属性只影响 Windows 的删除")
+def test_delete_permanent_readonly_tree(tmp_path: Path):
+    d = tmp_path / "d"
+    (d / "sub").mkdir(parents=True)
+    f = d / "03_docx.zip"
+    f.write_bytes(b"x")
+    os.chmod(f, stat.S_IREAD)
+    os.chmod(d / "sub", stat.S_IREAD)
+    os.chmod(d, stat.S_IREAD)
+
+    fs_delete.delete_permanent(str(d))
+    assert not d.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="只读属性只影响 Windows 的删除")
+def test_delete_permanent_readonly_still_denied(tmp_path: Path, monkeypatch):
+    """清属性也压不下去时仍报错，不静默带过。"""
+    f = tmp_path / "03_docx.zip"
+    f.write_bytes(b"x")
+    os.chmod(f, stat.S_IREAD)
+    monkeypatch.setattr(os, "chmod", lambda *a, **kw: None)
+
+    with pytest.raises(fs_delete.DeleteError) as ei:
+        fs_delete.delete_permanent(str(f))
+    assert str(ei.value.message).startswith("os:")
+    assert f.exists()
 
 
 def test_delete_to_recycle_mocked():

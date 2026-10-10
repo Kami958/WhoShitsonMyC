@@ -25,6 +25,7 @@ import os
 import shutil
 import stat
 import queue
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -32,12 +33,16 @@ from dataclasses import dataclass
 
 from .i18n import t
 from .models import SnapshotMeta, clean_link_target
-from .snapshot import EntryRow, SnapshotWriter
+from .snapshot import EntryRow, NullWriter, SnapshotWriter
 
 # 进度回调：progress(files_scanned: int, current_dir: str)
 ProgressCallback = Callable[[int, str], None]
 # 取消检查：返回 True 时中止扫描
 CancelCheck = Callable[[], bool]
+# 链接回调：on_link(相对扫描根的路径, 重解析点标签, 原始目标)。每个被记成
+# 链接的行触发一次；扫盘途中就能判它指向哪，不必先落库再回头查。
+# 在 worker 线程里调用，可能并发。
+LinkCallback = Callable[[str, int, str], None]
 
 # 进度推送最短间隔（秒）。必须按墙钟硬节流：evaluate_js 跨桥很贵，
 # 绝不能「文件数一变就推」。数字用 worker 已发现量，路径取最近目录。
@@ -49,6 +54,10 @@ _ROWS_DONE = object()
 _TASK_DONE = object()
 # reparse 目录行的哨兵前缀：drain 侧据此识别并累计目录数。
 _REPARSE_DIR = "reparse_dir"
+
+# 孤立 UTF-16 代理项：任何高位/低位代理码点。合法的增补平面字符在 str 里
+# 已是单个码点，不会命中。见 _safe_name。
+_LONE_SURROGATE_RE = re.compile("[\ud800-\udfff]")
 
 
 class ScanCancelled(Exception):
@@ -104,15 +113,36 @@ def _is_reparse_point(stat) -> bool:
     return _reparse_tag(stat) != 0
 
 
+def _safe_name(name: str) -> str:
+    """替换文件名里不成对的 UTF-16 代理项为 U+FFFD，保证可按 UTF-8 编码。
+
+    NTFS 文件名是 WTF-16，个别由异常软件创建的名字会含孤立代理项
+    （如 ``\\ud818``）。这种名字经 ``os.scandir`` 原样读入后，sqlite3
+    按 UTF-8 绑定参数时抛 UnicodeEncodeError，整次扫描随之失败。
+    MFT 解析路径（mft/parse.py）按 ``errors="replace"`` 解码，天然把
+    孤立代理项替换成 U+FFFD；本函数让 scandir 路径与其行为对齐。
+    """
+    if name.isascii():
+        return name
+    try:
+        name.encode("utf-8")
+    except UnicodeEncodeError:
+        # 每个孤立代理项替换为一个 U+FFFD，与 MFT 解析路径的
+        # errors="replace" 行为一致：同一文件两种扫描路径结果相同
+        return _LONE_SURROGATE_RE.sub("\ufffd", name)
+    return name
+
+
 def _link_target(path: str) -> str:
     """读出链接指向的真实路径；读不到返回空串。
 
     ``os.readlink`` 对 junction 与符号链接都可用（junction 上
     ``os.path.islink`` 为 False，不能用它判断），返回值带 ``\\\\?\\``
-    前缀，交给 :func:`clean_link_target` 剥掉。
+    前缀，交给 :func:`clean_link_target` 剥掉。目标路径同样过
+    :func:`_safe_name`，避免孤立代理项进快照。
     """
     try:
-        return clean_link_target(os.readlink(path))
+        return _safe_name(clean_link_target(os.readlink(path)))
     except (OSError, ValueError):
         return ""
 
@@ -153,12 +183,14 @@ class _Scan:
         follow_symlinks: bool,
         cancel: CancelCheck | None,
         workers: int,
+        on_link: LinkCallback | None = None,
     ) -> None:
         self.meta = meta
         # 是否允许跟随硬链接走下去，默认是否
         self.follow = follow_symlinks
         self.cancel = cancel or (lambda: False)
         self.workers = workers
+        self.on_link = on_link
 
         self.ids = itertools.count(2)  # 1 号留给根
         self.tasks: queue.SimpleQueue = queue.SimpleQueue()
@@ -215,6 +247,9 @@ class _Scan:
                     # 迭代过程中出错（如目录内容变动），停止读取该目录。
                     break
 
+                # 存储与展示用的名字先净化；entry.path 保持原样供系统调用。
+                name = _safe_name(entry.name)
+
                 try:
                     # 每项一次 stat：权限/类型/大小/mtime 一并拿到内存再分支。
                     st = entry.stat(follow_symlinks=False)
@@ -240,53 +275,57 @@ class _Scan:
                         _DirNode(
                             id=next(self.ids),
                             parent=node,
-                            name=entry.name,
-                            rel=_child_rel(node.rel, entry.name),
+                            name=name,
+                            rel=_child_rel(node.rel, name),
                             abspath=entry.path,
                             mtime=dir_mtime,
                         )
                     )
-                elif is_dir:
-                    # 不深入的目录 = 重解析点（junction / 符号链接 / 其它）。
-                    # 记为目录行（is_dir=1、size=0、带 tag），不建子节点——
-                    # 避免把链接目录记成 0 字节文件。
-                    try:
-                        dir_mtime = int(st.st_mtime)
-                    except (OSError, AttributeError):
-                        dir_mtime = 0
-                    self.rows.put(
-                        (
-                            _REPARSE_DIR,
-                            EntryRow.directory(
+                else:
+                    # 链接项要多读一次目标；普通项零开销，遍历出来的绝大多数是普通项。
+                    link_target = _link_target(entry.path) if tag else ""
+                    if tag and self.on_link is not None:
+                        self.on_link(_child_rel(node.rel, name), tag, link_target)
+                    if is_dir:
+                        # 不深入的目录 = 重解析点（junction / 符号链接 / 其它）。
+                        # 记为目录行（is_dir=1、size=0、带 tag），不建子节点——
+                        # 避免把链接目录记成 0 字节文件。
+                        try:
+                            dir_mtime = int(st.st_mtime)
+                        except (OSError, AttributeError):
+                            dir_mtime = 0
+                        self.rows.put(
+                            (
+                                _REPARSE_DIR,
+                                EntryRow.directory(
+                                    next(self.ids),
+                                    parent_id,
+                                    name,
+                                    0,
+                                    dir_mtime,
+                                    reparse_tag=tag,
+                                    link_target=link_target,
+                                ),
+                            )
+                        )
+                    else:
+                        # 文件、或不深入的符号链接/重解析点文件：取自身大小。
+                        try:
+                            size, mtime = st.st_size, int(st.st_mtime)
+                        except (OSError, ValueError, AttributeError):
+                            size, mtime = 0, 0
+                        file_batch.append(
+                            EntryRow.file(
                                 next(self.ids),
                                 parent_id,
-                                entry.name,
-                                0,
-                                dir_mtime,
+                                name,
+                                size,
+                                mtime,
                                 reparse_tag=tag,
-                                link_target=_link_target(entry.path),
-                            ),
+                                link_target=link_target,
+                            )
                         )
-                    )
-                else:
-                    # 文件、或不深入的符号链接/重解析点文件：取自身大小。
-                    try:
-                        size, mtime = st.st_size, int(st.st_mtime)
-                    except (OSError, ValueError, AttributeError):
-                        size, mtime = 0, 0
-                    file_batch.append(
-                        EntryRow.file(
-                            next(self.ids),
-                            parent_id,
-                            entry.name,
-                            size,
-                            mtime,
-                            reparse_tag=tag,
-                            # 只有链接才多一次 readlink，普通文件零开销
-                            link_target=_link_target(entry.path) if tag else "",
-                        )
-                    )
-                    files_size += size
+                        files_size += size
 
         # 按目录一次 put，减少队列操作次数（P4）。
         if file_batch:
@@ -421,8 +460,9 @@ def scan_to_snapshot(
     now: float | None = None,
     workers: int | None = None,
     timer: object | None = None,
+    on_link: LinkCallback | None = None,
 ) -> SnapshotMeta:
-    """并行扫描 ``root`` 并把结果写入 ``db_path`` 快照文件。
+    """并行扫描 ``root``；给了 ``db_path`` 就写快照文件，没给就只扫描。
 
     这是扫描的主入口：多线程遍历 + 流式写库 + 生成 meta 一步到位。
     调用方线程充当唯一写入者，worker 线程只做目录枚举（I/O 密集，
@@ -430,7 +470,8 @@ def scan_to_snapshot(
 
     Args:
         root: 要扫描的根目录（绝对路径）。
-        db_path: 输出快照文件路径（已存在会被覆盖）。
+        db_path: 输出快照文件路径（已存在会被覆盖）；传 ``None`` 表示
+            不生成快照，只把盘扫一遍并把统计值与 ``on_link`` 交回去。
         follow_symlinks: 是否跟随符号链接/重解析点（默认 False）。
         progress: 进度回调 ``(已扫文件数, 当前目录)``。
         cancel: 取消检查，返回 True 时中止并抛 :class:`ScanCancelled`。
@@ -438,9 +479,12 @@ def scan_to_snapshot(
         workers: worker 线程数；默认 ``max(1, cpu 核数)``。应用层可用盘类型启发式默认。
         timer: 可选分段计时器（开发用，见 :mod:`core.timing_probe`）；
             生产路径传 ``None`` 即可。
+        on_link: 每遇到一个被记成链接的项就调一次
+            ``on_link(相对扫描根的路径, 重解析点标签, 原始目标)``。
+            在 worker 线程里调用，可能并发。
 
     Returns:
-        本次扫描的 :class:`SnapshotMeta`（已写入快照）。
+        本次扫描的 :class:`SnapshotMeta`。
 
     Raises:
         FileNotFoundError: ``root`` 不存在。
@@ -484,6 +528,7 @@ def scan_to_snapshot(
                         cancel=cancel,
                         now=now,
                         timer=timer,
+                        on_link=on_link,
                     )
                 except MftUnavailable:
                     if _mark:
@@ -499,7 +544,11 @@ def scan_to_snapshot(
         root_mtime = 0
 
     scan = _Scan(
-        meta, follow_symlinks=follow_symlinks, cancel=cancel, workers=workers
+        meta,
+        follow_symlinks=follow_symlinks,
+        cancel=cancel,
+        workers=workers,
+        on_link=on_link,
     )
     scan.tasks.put(
         _DirNode(
@@ -516,8 +565,14 @@ def scan_to_snapshot(
 
     if _mark:
         _mark("workers_started")
+    # ``db_path`` 为 None 时不落盘：只要结果不要快照的调用方用不写文件的
+    # 写入端，扫描主流程不为它分叉。
+    if db_path is None:
+        writer_ctx = NullWriter()
+    else:
+        writer_ctx = SnapshotWriter(db_path, root=meta.root)
     try:
-        with SnapshotWriter(db_path, root=meta.root) as writer:
+        with writer_ctx as writer:
             if _span_start:
                 _span_start("drain_rows")
             try:

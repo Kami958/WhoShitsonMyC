@@ -1471,8 +1471,8 @@ function buildNode(node, depth, ref) {
     : node.kind === "added" ? `<span class="node-tag added">${t("tagAdded")}</span>`
     : node.kind === "removed" ? `<span class="node-tag removed">${t("tagRemoved")}</span>`
     : "";
-  // 链接类型徽标（目录联接 / 符号链接 / 其它链接）。浏览与对比模式都打。
-  // title 悬浮解释该链接是什么；拿到目标路径时追加一行「链接到 X」。
+  // 链接类型徽标（目录链接 / 符号链接 / 其它链接）。浏览与对比模式都打。
+  // title 悬浮解释该链接是什么；拿到链接指向的路径时追加一行「链接到 X」。
   const linkTag = node.link_kind
     ? (() => {
         const isJunction = node.link_kind === "junction";
@@ -2234,8 +2234,13 @@ function openCtxMenu(e, node) {
     if (collapse) collapse.classList.toggle("hidden", !(node && node.is_dir && node.has_children));
     const migrate = menu.querySelector('[data-cmd="migrate"]');
     if (migrate) {
-      // 只有真实目录可迁移；链接目录已是 junction，迁移无意义
+      // 只有普通目录可迁移；链接本身已经是目录链接，迁移没有意义
       migrate.classList.toggle("hidden", !(node && node.is_dir && !node.link_kind));
+    }
+    const findLinks = menu.querySelector('[data-cmd="link-find"]');
+    if (findLinks) {
+      // 反查的目标是目录，文件行不给这一项
+      findLinks.classList.toggle("hidden", !(node && node.is_dir));
     }
     const bulk = menu.querySelector('[data-cmd="delete-selected"]');
     if (bulk) {
@@ -2276,6 +2281,8 @@ async function ctxCommand(cmd) {
     } else {
       toast(t("migrateNeedCompare"), true);
     }
+  } else if (cmd === "link-find") {
+    openLinkFindDialog(fullPath(state.compareRoot, node.path));
   } else if (cmd === "delete") {
     if (typeof addCompareNodeToPending === "function") {
       addCompareNodeToPending(node);

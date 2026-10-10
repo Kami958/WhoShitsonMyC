@@ -273,6 +273,21 @@ def is_session_cached(path: str) -> bool:
         )
 
 
+def is_session_temp_db(path: str) -> bool:
+    """``path`` 是否本进程从 ``.dbz`` 解压出来的临时 ``.db``。
+
+    这种文件由程序生成、会话结束即删，可以往上写索引；用户的快照文件不是
+    它，不在可写之列。
+    """
+    if not path:
+        return False
+    target = os.path.abspath(path)
+    with _session_lock:
+        return any(
+            os.path.abspath(entry[0]) == target for entry in _session_db.values()
+        )
+
+
 def ensure_db_path(path: str) -> str:
     """保证返回可直接给 SQLite / Diff 使用的 ``.db`` 路径。
 

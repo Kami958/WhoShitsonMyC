@@ -453,6 +453,11 @@ function wireEvents() {
         closeNoteDialog();
         return;
       }
+      const ro = $("#remigrateOverlay");
+      if (ro && !ro.classList.contains("hidden")) {
+        closeRemigrateDialog();
+        return;
+      }
       const so = $("#settingsOverlay");
       if (so && !so.classList.contains("hidden")) {
         closeSettings();
@@ -674,6 +679,7 @@ async function boot() {
   wireEvents();
   if (typeof wirePendingUi === "function") wirePendingUi();
   if (typeof wireLinkUi === "function") wireLinkUi();
+  if (typeof wireLinkFindUi === "function") wireLinkFindUi();
   if (typeof wireAiUi === "function") wireAiUi();
   await reconcileLang(); // 内部会 applyThemeButton + scheduleTitlebarSync
   // 先探测可选模块，再加载设置（AI 设置分节依赖 list_modules）
@@ -713,8 +719,11 @@ applyStaticI18n();
 applyThemeButton(false);
 
 // pywebview 注入 API 后触发 pywebviewready；若已就绪则直接启动。
+// 启动是异步的，把 promise 挂出来，预览页可以等它跑完再摆界面。
 if (window.pywebview && window.pywebview.api) {
-  boot();
+  window.__bootPromise = boot();
 } else {
-  window.addEventListener("pywebviewready", boot);
+  window.addEventListener("pywebviewready", function () {
+    window.__bootPromise = boot();
+  });
 }

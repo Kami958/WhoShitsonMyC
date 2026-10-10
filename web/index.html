@@ -29,7 +29,7 @@
       try { localStorage.setItem("theme", theme); } catch (e) {}
     })();
   </script>
-  <link rel="stylesheet" href="style.css?v=1.1.6" />
+  <link rel="stylesheet" href="style.css?v=1.1.7" />
 </head>
 <body>
   <div class="layout">
@@ -246,7 +246,7 @@
       <aside id="toolPanel" class="tool-panel hidden" aria-label="tools">
         <div class="tool-head">
           <div class="tool-tabs" role="tablist">
-            <button type="button" class="tool-tab active" role="tab" aria-selected="true" data-tool-tab="link" data-i18n="linkTab">目录链接</button>
+            <button type="button" class="tool-tab active" role="tab" aria-selected="true" data-tool-tab="link" data-i18n="linkTab">目录迁移</button>
             <button type="button" class="tool-tab" role="tab" aria-selected="false" data-tool-tab="pending" data-i18n="pendingTab">待删除</button>
             <button type="button" class="tool-tab module-off" role="tab" aria-selected="false" data-tool-tab="ai" data-module="ai" data-i18n="aiPanelTitle">问 AI（实验）</button>
           </div>
@@ -266,6 +266,10 @@
           <p id="pendingEmpty" class="pending-empty" data-i18n="pendingEmpty">暂无待删除项，可在对比树右键添加</p>
           <div id="pendingList" class="pending-list" aria-live="polite"></div>
           <div class="pending-foot">
+            <div id="pendingProgress" class="pending-progress hidden" role="status" aria-live="polite">
+              <div class="pending-progress-bar"><i id="pendingProgressFill" style="width:0%"></i></div>
+              <div id="pendingProgressText" class="pending-progress-text"></div>
+            </div>
             <label class="pending-permanent-row" for="pendingPermanentChk">
               <input id="pendingPermanentChk" type="checkbox" />
               <span data-i18n="pendingPermanent">彻底删除</span>
@@ -277,28 +281,32 @@
           </div>
         </div>
         <div id="linkPanel" class="tool-pane hidden" data-tool-pane="link" role="tabpanel" aria-label="Links">
-          <div class="link-head">
-            <div class="link-view-tabs" role="tablist" aria-label="目录链接视图">
-              <button id="linkViewList" class="link-view-tab active" type="button" role="tab" aria-selected="true" data-i18n="linkViewList">迁移列表</button>
-              <button id="linkViewQueue" class="link-view-tab" type="button" role="tab" aria-selected="false">
-                <span data-i18n="linkViewQueue">迁移队列</span>
-                <span id="linkQueueCount" class="link-history-count"></span>
-              </button>
-              <button id="linkViewHistory" class="link-view-tab" type="button" role="tab" aria-selected="false">
-                <span data-i18n="linkHistoryTitle">迁移历史</span>
-                <span id="linkHistoryCount" class="link-history-count"></span>
-              </button>
-            </div>
-            <button id="linkNewBtn" class="btn-primary compact" type="button" data-i18n="linkNew">＋ 新建迁移</button>
-            <button id="linkRefreshBtn" class="btn-plain summary-icon-btn" type="button" data-i18n-title="linkRefreshTitle" title="刷新链接列表">
-              <svg class="summary-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-                <path fill="currentColor" d="M8 2.5a5.5 5.5 0 1 0 5.27 7.02h-1.54A4 4 0 1 1 8 4v2.5l3.5-3L8 .5V2.5z"/>
-              </svg>
+          <p class="link-experimental" data-i18n="linkExperimental">实验性功能，请注意数据安全</p>
+          <div class="link-tabs-bar" role="tablist" aria-label="目录迁移视图">
+            <button id="linkViewList" class="link-view-tab active" type="button" role="tab" aria-selected="true" data-i18n="linkViewList">迁移列表</button>
+            <button id="linkViewQueue" class="link-view-tab" type="button" role="tab" aria-selected="false">
+              <span data-i18n="linkViewQueue">迁移队列</span>
+              <span id="linkQueueCount" class="link-history-count"></span>
+            </button>
+            <button id="linkViewHistory" class="link-view-tab" type="button" role="tab" aria-selected="false">
+              <span data-i18n="linkHistoryTitle">历史记录</span>
+              <span id="linkHistoryCount" class="link-history-count"></span>
             </button>
           </div>
 
           <!-- 迁移列表视图 -->
           <div id="linkListView" class="link-view">
+            <div class="link-list-actions">
+              <button id="linkNewBtn" class="btn-primary compact" type="button" data-i18n="linkNew">新建迁移</button>
+              <button id="linkFindBtn" class="btn-ghost" type="button" data-i18n="linkFind">反查链接</button>
+              <button id="linkImportBtn" class="btn-ghost" type="button" data-i18n="linkImport">导入迁移</button>
+              <button id="linkRefreshBtn" class="btn-plain summary-icon-btn" type="button" data-i18n-title="linkRefreshTitle" title="刷新链接列表">
+                <svg class="summary-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                  <path fill="currentColor" d="M8 2.5a5.5 5.5 0 1 0 5.27 7.02h-1.54A4 4 0 1 1 8 4v2.5l3.5-3L8 .5V2.5z"/>
+                </svg>
+              </button>
+            </div>
+
             <div class="link-list-tools">
               <div class="link-list-search-wrap">
                 <svg class="link-list-search-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
@@ -318,7 +326,7 @@
               </button>
             </div>
             <div id="linkListSortMenu" class="icon-menu hidden" role="menu" aria-labelledby="linkListSortBtn"></div>
-            <p id="linkEmpty" class="link-empty hidden" data-i18n="linkEmpty">还没有工具创建的目录链接</p>
+            <p id="linkEmpty" class="link-empty hidden" data-i18n="linkEmpty">还没有迁移过的目录链接</p>
             <div id="linkList" class="link-list" aria-live="polite"></div>
           </div>
 
@@ -327,19 +335,23 @@
             <p id="linkQueueEmpty" class="link-empty" data-i18n="queueEmpty">队列里还没有任务，点击[新建迁移]添加任务</p>
             <div id="linkQueueList" class="link-queue-list hidden" aria-live="polite"></div>
             <div class="link-queue-foot">
-              <button id="queueStartBtn" class="btn-primary compact" type="button" data-i18n="queueStart">开始</button>
-              <button id="queuePauseBtn" class="btn-plain compact hidden" type="button" data-i18n="queuePause">暂停</button>
-              <button id="queueCancelBtn" class="btn-plain compact hidden" type="button" data-i18n="cancel">取消</button>
+              <button id="queueNewBtn" class="btn-ghost" type="button" data-i18n="linkNew">新建迁移</button>
+              <span class="link-queue-foot-actions">
+                <button id="queueStartBtn" class="btn-primary compact" type="button" data-i18n="queueStart">开始</button>
+                <button id="queuePauseBtn" class="btn-ghost hidden" type="button" data-i18n="queuePause">暂停</button>
+                <button id="queueCancelBtn" class="btn-ghost hidden" type="button" data-i18n="cancel">取消</button>
+              </span>
             </div>
           </div>
 
-          <!-- 迁移历史视图 -->
+          <!-- 历史记录视图 -->
           <div id="linkHistoryView" class="link-view hidden">
             <div class="link-history-filter" role="group" aria-label="操作筛选">
               <button type="button" class="link-history-filter-btn active" data-op="all" data-i18n="linkHistoryFilterAll">全部</button>
               <button type="button" class="link-history-filter-btn" data-op="migrate" data-i18n="linkOpMigrate">迁移</button>
               <button type="button" class="link-history-filter-btn" data-op="restore" data-i18n="linkOpRestore">还原</button>
               <button type="button" class="link-history-filter-btn" data-op="delbackup" data-i18n="linkOpDelBackup">删除备份</button>
+              <button type="button" class="link-history-filter-btn" data-op="linkfind" data-i18n="linkOpLinkFind">反查</button>
               <button id="linkHistoryClearBtn" class="link-history-filter-btn link-history-clear" type="button" data-i18n="linkHistoryClear">清空</button>
             </div>
             <div class="link-history-search-wrap">
@@ -363,33 +375,61 @@
             </div>
           </div>
 
+          <!-- [删除备份]：删的是整棵备份树，事前不知道总数，因此只报进度文字、不放进度条 -->
+          <div id="delBackupProgress" class="restore-progress hidden" role="status" aria-live="polite">
+            <span id="delBackupProgressText" class="restore-progress-text"></span>
+          </div>
+
           <!-- 迁移表单：默认隐藏。新建时点「新建迁移」或从对比树右键进入；
                编辑队列项时填进同一套输入框，由 migrate.js 切换模式。 -->
           <div id="linkCreate" class="hidden">
-            <p class="migrate-intro" data-i18n="migrateIntro">使用Windows的目录链接功能将目录整体搬到另一个位置但仍在原位置留有入口，不影响其他程序访问使用</p>
+            <div class="migrate-head">
+              <h2 id="migrateFormTitle" class="migrate-title" data-i18n="linkNew">新建迁移</h2>
+              <button id="migrateFormCloseBtn" class="btn-plain settings-close" type="button"
+                      data-i18n-title="linkBackList" title="返回迁移列表">✕</button>
+            </div>
+            <p class="migrate-intro" data-i18n="migrateIntro">使用 Windows 的目录链接功能把目录整体迁移到另一个位置，但仍在访问路径留有入口，不影响其他程序访问这个目录</p>
             <div class="migrate-field">
-              <label for="migrateSourceInput" class="migrate-label" data-i18n="migrateSource">源目录</label>
+              <label for="migrateSourceInput" class="migrate-label" data-i18n="migrateSource">访问路径</label>
               <div class="migrate-row">
                 <input id="migrateSourceInput" class="note-input folder-name-input migrate-input" type="text" spellcheck="false" autocomplete="off" />
                 <button id="migrateSourceBrowseBtn" class="btn-plain compact" type="button" data-i18n="migrateBrowse">选择</button>
               </div>
             </div>
             <div class="migrate-field">
-              <label for="migrateDestInput" class="migrate-label" data-i18n="migrateDest">目标位置</label>
+              <label for="migrateDestInput" class="migrate-label" data-i18n="migrateDest">存放位置</label>
               <div class="migrate-row">
                 <input id="migrateDestInput" class="note-input folder-name-input migrate-input" type="text" spellcheck="false" autocomplete="off" />
                 <button id="migrateDestBrowseBtn" class="btn-plain compact" type="button" data-i18n="migrateBrowse">选择</button>
               </div>
             </div>
             <p id="migrateHint" class="migrate-hint"></p>
-            <label class="migrate-cleanup" data-i18n-title="migrateCleanBackupTip" title="原路径的文件夹会在迁移后重命名作为备份，确认迁移完成无问题后推荐将该备份删除以节省空间">
-              <input id="migrateCleanBackup" type="checkbox" />
-              <span data-i18n="migrateCleanBackup">迁移后将原目录备份移入回收站</span>
-            </label>
+            <!-- 备份处理三选一：保留 / 移入回收站 / 彻底删除，取值直接传后端；
+                 每项带一条悬停说明，讲清这一项会把备份放到哪里。 -->
+            <div class="migrate-field">
+              <span id="migrateBackupLabel" class="migrate-label" data-i18n="migrateBackupLabel" data-i18n-title="migrateBackupLabelTip" title="访问路径的文件夹会在迁移时重命名作为备份">备份处理</span>
+              <div class="migrate-radio-group is-row" role="radiogroup" aria-labelledby="migrateBackupLabel">
+                <label class="migrate-radio" data-i18n-title="migrateBackupKeepTip" title="迁移完成后备份目录留在访问路径旁，确认迁移结果无误后可在迁移列表里删除该备份以释放磁盘空间">
+                  <input type="radio" name="migrateBackupAction" value="keep" checked />
+                  <span data-i18n="migrateBackupKeep">保留</span>
+                </label>
+                <label class="migrate-radio" data-i18n-title="migrateBackupRecycleTip" title="迁移完成后把备份目录移入回收站，可通过回收站还原">
+                  <input type="radio" name="migrateBackupAction" value="recycle" />
+                  <span data-i18n="migrateBackupRecycle">移入回收站</span>
+                </label>
+                <label class="migrate-radio is-danger" data-i18n-title="migrateBackupPurgeTip" title="迁移完成后彻底删除备份目录，不进入回收站，删除后无法恢复">
+                  <input type="radio" name="migrateBackupAction" value="purge" />
+                  <span data-i18n="migrateBackupPurge">彻底删除</span>
+                </label>
+              </div>
+            </div>
             <div class="migrate-actions">
-              <button id="migrateBackBtn" class="btn-ghost" type="button" data-i18n="linkBack">返回队列</button>
-              <button id="migrateEnqueueBtn" class="btn-primary compact" type="button" data-i18n="queueEnqueue">加入队列</button>
-              <button id="migrateSaveBtn" class="btn-primary compact hidden" type="button" data-i18n="queueSaveEdit">保存修改</button>
+              <button id="migrateBackQueueBtn" class="btn-ghost" type="button" data-i18n="queueBack">返回队列</button>
+              <span class="migrate-actions-main">
+                <button id="migrateCancelBtn" class="btn-ghost" type="button" data-i18n="cancel">取消</button>
+                <button id="migrateEnqueueBtn" class="btn-primary compact" type="button" data-i18n="queueEnqueue">加入队列</button>
+                <button id="migrateSaveBtn" class="btn-primary compact hidden" type="button" data-i18n="queueSaveEdit">保存修改</button>
+              </span>
             </div>
           </div>
         </div>
@@ -445,6 +485,7 @@
     <div class="ctx-item" data-cmd="copy" data-i18n="ctxCopy">复制完整路径</div>
     <div class="ctx-item" data-cmd="collapse" data-i18n="ctxCollapse">折叠该目录</div>
     <div class="ctx-item" data-cmd="migrate" data-i18n="ctxMigrate">迁移目录</div>
+    <div class="ctx-item" data-cmd="link-find" data-i18n="linkFind">反查链接</div>
     <div class="ctx-item ctx-danger" data-cmd="delete" data-i18n="ctxDelete">加入待删除</div>
     <div class="ctx-item ctx-danger hidden" data-cmd="delete-selected" data-i18n="ctxDeleteSelected">将选中项加入待删除</div>
     <div class="ctx-item module-off" data-cmd="ask-ai" data-module="ai" data-i18n="ctxAskAi">问 AI（实验）</div>
@@ -510,6 +551,161 @@
       <div class="note-foot">
         <span class="note-foot-spacer"></span>
         <button id="skippedDoneBtn" class="btn-primary compact" type="button" data-i18n="close">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 反查链接：哪些目录链接、符号链接指向这个目录。弹窗关掉不中断任务，
+       再点[反查链接]回来可继续看进度与结果。 -->
+  <div id="linkFindOverlay" class="overlay hidden">
+    <div class="note-card link-find-card" role="dialog" aria-modal="true" aria-labelledby="linkFindTitle">
+      <div class="note-head">
+        <h2 id="linkFindTitle" class="note-title" data-i18n="linkFindTitle">反查链接</h2>
+        <button id="linkFindCloseBtn" class="btn-plain settings-close" type="button" data-i18n-title="settingsClose" title="关闭">✕</button>
+      </div>
+      <p class="note-hint" data-i18n="linkFindHint">选择要查询的目录，查出有哪些目录链接、符号链接指向它</p>
+      <div class="link-find-field">
+        <label class="link-find-label" for="linkFindPath" data-i18n="linkFindLabelPath">目录</label>
+        <div class="link-find-group">
+          <input id="linkFindPath" class="note-input link-find-path" type="text" autocomplete="off" spellcheck="false"
+                 data-i18n-placeholder="linkFindPathPlaceholder" placeholder="例如 C:\Users\you\AppData\Local" />
+          <button id="linkFindPickBtn" class="link-find-pick" type="button" data-i18n="linkFindPick">选择</button>
+        </div>
+      </div>
+      <div class="link-find-field">
+        <span id="linkFindModeLabel" class="link-find-label" data-i18n="linkFindLabelMode">方式</span>
+        <div class="link-find-modes" role="radiogroup" aria-labelledby="linkFindModeLabel">
+          <button id="linkFindModeScan" class="link-find-mode active" type="button" role="radio" aria-checked="true" data-i18n="linkFindModeScan">扫盘</button>
+          <button id="linkFindModeSnap" class="link-find-mode" type="button" role="radio" aria-checked="false" data-i18n="linkFindModeSnap">快照</button>
+        </div>
+      </div>
+      <div id="linkFindScanPane" class="link-find-field">
+        <span class="link-find-label" data-i18n="linkFindLabelScope">范围</span>
+        <div class="link-find-control">
+          <div class="link-find-drive-bar">
+            <label class="link-find-check">
+              <input id="linkFindDriveAll" type="checkbox" />
+              <span data-i18n="linkFindSelectAll">全选</span>
+            </label>
+            <div id="linkFindDrives" class="link-find-drives"></div>
+          </div>
+        </div>
+      </div>
+      <div id="linkFindSnapPane" class="link-find-field hidden">
+        <span class="link-find-label" data-i18n="linkFindSnapLabel">快照</span>
+        <div class="link-find-control">
+          <div id="linkFindSnapPick" class="pick" role="button" tabindex="0" aria-haspopup="listbox">
+            <div class="pick-inner">
+              <span class="pick-value placeholder" data-i18n="pickPlaceholder">点击选择</span>
+            </div>
+            <span class="caret">▾</span>
+          </div>
+        </div>
+      </div>
+      <div id="linkFindProgress" class="link-find-progress hidden">
+        <div class="link-find-progress-track"><i></i></div>
+        <div class="link-find-progress-line">
+          <span id="linkFindProgressText" class="link-find-progress-text"></span>
+          <button id="linkFindCancelBtn" class="btn-plain compact" type="button" data-i18n="cancel">取消</button>
+        </div>
+      </div>
+      <div id="linkFindStatus" class="link-find-status hidden"></div>
+      <div id="linkFindResults" class="link-find-results hidden" aria-live="polite"></div>
+      <div class="note-foot">
+        <button id="linkFindImportBtn" class="btn-ghost compact hidden" type="button" data-i18n="linkImportChecked" data-i18n-title="linkImportCheckedTip" disabled>导入管理</button>
+        <span class="note-foot-spacer"></span>
+        <button id="linkFindRunBtn" class="btn-primary compact" type="button" data-i18n="linkFindRun">查询</button>
+        <button id="linkFindDoneBtn" class="btn-ghost" type="button" data-i18n="close">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 历史记录里的一条反查：点开看当时查到了什么 -->
+  <div id="linkFindDetailOverlay" class="overlay hidden">
+    <div class="note-card link-find-card" role="dialog" aria-modal="true" aria-labelledby="linkFindDetailTitle">
+      <div class="note-head">
+        <h2 id="linkFindDetailTitle" class="note-title" data-i18n="linkOpLinkFind">反查</h2>
+        <button id="linkFindDetailCloseBtn" class="btn-plain settings-close" type="button" data-i18n-title="settingsClose" title="关闭">✕</button>
+      </div>
+      <p id="linkFindDetailHint" class="note-hint"></p>
+      <div id="linkFindDetailBody" class="link-find-results"></div>
+      <div class="note-foot">
+        <span class="note-foot-spacer"></span>
+        <button id="linkFindDetailDoneBtn" class="btn-primary compact" type="button" data-i18n="close">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 导入迁移：把别处建好的目录链接收进管理，只收 mklink /J 那种 -->
+  <div id="linkImportOverlay" class="overlay hidden">
+    <div class="note-card link-find-card" role="dialog" aria-modal="true" aria-labelledby="linkImportTitle">
+      <div class="note-head">
+        <h2 id="linkImportTitle" class="note-title" data-i18n="linkImportTitle">导入已有迁移</h2>
+        <button id="linkImportCloseBtn" class="btn-plain settings-close" type="button" data-i18n-title="settingsClose" title="关闭">✕</button>
+      </div>
+      <p class="note-hint" data-i18n="linkImportHint">填写目录链接自身的路径和它实际指向的存放位置，校验通过后加入迁移列表</p>
+      <div class="link-find-field">
+        <label class="link-find-label" for="linkImportPath" data-i18n="linkImportLabelLink">访问路径</label>
+        <div class="link-find-group">
+          <input id="linkImportPath" class="note-input link-find-path" type="text" autocomplete="off" spellcheck="false"
+                 data-i18n-placeholder="linkImportPathPlaceholder" placeholder="例如 C:\Users\you\Videos" />
+          <button id="linkImportPickBtn" class="link-find-pick" type="button" data-i18n="linkFindPick">选择</button>
+        </div>
+      </div>
+      <div class="link-find-field">
+        <label class="link-find-label" for="linkImportTarget" data-i18n="linkImportLabelTarget">存放位置</label>
+        <div class="link-find-group">
+          <input id="linkImportTarget" class="note-input link-find-path" type="text" autocomplete="off" spellcheck="false"
+                 data-i18n-placeholder="linkImportTargetPlaceholder" placeholder="例如 D:\Videos" />
+          <button id="linkImportTargetPickBtn" class="link-find-pick" type="button" data-i18n="linkFindPick">选择</button>
+        </div>
+      </div>
+      <div class="note-foot">
+        <span class="note-foot-spacer"></span>
+        <button id="linkImportCancelBtn" class="btn-ghost compact" type="button" data-i18n="linkImportCancel">取消</button>
+        <button id="linkImportOkBtn" class="btn-primary compact" type="button" data-i18n="linkImportOk" disabled>导入</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 迁移：把已迁移目录的存放位置从当前磁盘搬到另一块盘。
+       旧迁移「改名保留」时，完成后记录行上出现[删除旧迁移]。 -->
+  <div id="remigrateOverlay" class="overlay hidden">
+    <div class="note-card remigrate-card" role="dialog" aria-modal="true" aria-labelledby="remigrateTitle">
+      <div class="note-head">
+        <h2 id="remigrateTitle" class="note-title" data-i18n="migrateAgainTitle">迁移</h2>
+        <button id="remigrateCloseBtn" class="btn-plain settings-close" type="button" data-i18n-title="settingsClose" title="关闭">✕</button>
+      </div>
+      <p id="remigrateIntro" class="note-hint"></p>
+      <div class="migrate-field">
+        <label for="remigrateDestInput" class="migrate-label" data-i18n="migrateDest">存放位置</label>
+        <div class="migrate-row">
+          <input id="remigrateDestInput" class="note-input migrate-input" type="text" spellcheck="false" autocomplete="off" />
+          <button id="remigrateDestBrowseBtn" class="btn-plain compact" type="button" data-i18n="migrateBrowse">选择</button>
+        </div>
+      </div>
+      <p id="remigrateHint" class="migrate-hint"></p>
+      <div class="migrate-field">
+        <span id="remigrateOldLabel" class="migrate-label" data-i18n="migrateOldTarget">旧迁移处理</span>
+        <div class="migrate-radio-group" role="radiogroup" aria-labelledby="remigrateOldLabel">
+          <label class="migrate-radio">
+            <input type="radio" name="remigrateOldAction" value="keep" checked />
+            <span data-i18n="migrateOldKeep">改名保留</span>
+          </label>
+          <label class="migrate-radio">
+            <input type="radio" name="remigrateOldAction" value="recycle" />
+            <span data-i18n="migrateOldRecycle">移入回收站</span>
+          </label>
+          <label class="migrate-radio">
+            <input type="radio" name="remigrateOldAction" value="purge" />
+            <span data-i18n="migrateOldPurge">彻底删除</span>
+          </label>
+        </div>
+      </div>
+      <div class="note-foot">
+        <span class="note-foot-spacer"></span>
+        <button id="remigrateCancelBtn" class="btn-plain" type="button" data-i18n="cancel">取消</button>
+        <button id="remigrateStartBtn" class="btn-primary compact" type="button" data-i18n="migrateAgainStart">开始迁移</button>
       </div>
     </div>
   </div>
@@ -635,7 +831,7 @@
             <div class="settings-row">
               <span class="settings-label">
                 <span data-i18n="snapDir">快照存放目录</span>
-                <button type="button" class="settings-q" data-help="snapDir" data-i18n-title="snapDirTitle" title="扫描得到的快照会保存在这里。更改后点完成，会把原目录里的快照迁到新位置" aria-label="?">?</button>
+                <button type="button" class="settings-q" data-help="snapDir" data-i18n-title="snapDirTitle" title="扫描得到的快照会保存在这里。更改后点完成，原来保存的快照会迁到新的快照目录" aria-label="?">?</button>
               </span>
               <div class="settings-row-actions">
                 <button id="snapDirChooseBtn" class="btn-plain compact" type="button" data-i18n="snapDirChoose">更改</button>
@@ -644,7 +840,7 @@
               </div>
             </div>
             <p id="snapDirPathLine" class="settings-hint settings-path snap-dir-path"></p>
-            <p class="settings-help-panel hidden" data-help-panel="snapDir" data-i18n="snapDirTitle">扫描得到的快照会保存在这里。更改后点完成，会把原目录里的快照迁到新位置</p>
+            <p class="settings-help-panel hidden" data-help-panel="snapDir" data-i18n="snapDirTitle">扫描得到的快照会保存在这里。更改后点完成，原来保存的快照会迁到新的快照目录</p>
           </div>
           <div class="settings-field">
             <div class="settings-row">
@@ -970,6 +1166,34 @@
     </div>
   </div>
 
+  <!-- 搬家途中后端提问：要用户关掉占用的程序，或确认切换链接 -->
+  <div id="migrateAskOverlay" class="overlay hidden">
+    <div class="confirm-card migrate-ask-card" role="dialog" aria-modal="true" aria-labelledby="migrateAskTitle">
+      <div class="note-head">
+        <h2 id="migrateAskTitle" class="note-title" data-i18n="migrateAskTitle">切换前确认</h2>
+      </div>
+      <div class="confirm-content">
+        <p id="migrateAskBody" class="confirm-body"></p>
+        <div class="migrate-ask-cols">
+          <div id="migrateAskProcs" class="migrate-ask-block hidden">
+            <p class="migrate-ask-label" data-i18n="migrateAskProcsLabel">正在使用该目录的程序</p>
+            <div id="migrateAskProcList" class="migrate-ask-chips"></div>
+          </div>
+          <div id="migrateAskFiles" class="migrate-ask-block hidden">
+            <p class="migrate-ask-label" data-i18n="migrateAskFilesLabel">最近变动的文件</p>
+            <div id="migrateAskFileList" class="migrate-ask-files"></div>
+          </div>
+        </div>
+      </div>
+      <div class="note-foot confirm-foot">
+        <span class="note-foot-spacer"></span>
+        <button id="migrateAskCancelBtn" class="btn-ghost" type="button" data-i18n="migrateAskCancel">取消迁移</button>
+        <button id="migrateAskForceBtn" class="btn-danger hidden" type="button" data-i18n="migrateAskForce">强制切换</button>
+        <button id="migrateAskOkBtn" class="btn-primary compact" type="button" data-i18n="migrateAskContinue">继续</button>
+      </div>
+    </div>
+  </div>
+
   <!-- AI 工具设置：选择可调用的 tool -->
   <div id="aiToolsSettingsOverlay" class="overlay hidden">
     <div class="confirm-card ai-tools-settings-card" role="dialog" aria-modal="true" aria-labelledby="aiToolsSettingsDialogTitle">
@@ -1067,19 +1291,20 @@
   <!-- Toast 提示 -->
   <div id="toast" class="toast hidden"></div>
 
-  <script src="js/state.js?v=1.1.6"></script>
-  <script src="js/i18n.js?v=1.1.6"></script>
-  <script src="js/util.js?v=1.1.6"></script>
-  <script src="js/theme.js?v=1.1.6"></script>
-  <script src="js/snapshots.js?v=1.1.6"></script>
-  <script src="js/pick.js?v=1.1.6"></script>
-  <script src="js/compare.js?v=1.1.6"></script>
-  <script src="js/scan.js?v=1.1.6"></script>
-  <script src="js/settings.js?v=1.1.6"></script>
-  <script src="js/modules.js?v=1.1.6"></script>
-  <script src="js/pending.js?v=1.1.6"></script>
-  <script src="js/migrate.js?v=1.1.6"></script>
-  <script src="js/ai.js?v=1.1.6"></script>
-  <script src="js/app.js?v=1.1.6"></script>
+  <script src="js/state.js?v=1.1.7"></script>
+  <script src="js/i18n.js?v=1.1.7"></script>
+  <script src="js/util.js?v=1.1.7"></script>
+  <script src="js/theme.js?v=1.1.7"></script>
+  <script src="js/snapshots.js?v=1.1.7"></script>
+  <script src="js/pick.js?v=1.1.7"></script>
+  <script src="js/compare.js?v=1.1.7"></script>
+  <script src="js/scan.js?v=1.1.7"></script>
+  <script src="js/settings.js?v=1.1.7"></script>
+  <script src="js/modules.js?v=1.1.7"></script>
+  <script src="js/pending.js?v=1.1.7"></script>
+  <script src="js/migrate.js?v=1.1.7"></script>
+  <script src="js/linkfind.js?v=1.1.7"></script>
+  <script src="js/ai.js?v=1.1.7"></script>
+  <script src="js/app.js?v=1.1.7"></script>
 </body>
 </html>

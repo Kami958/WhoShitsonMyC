@@ -259,14 +259,28 @@ function onPyEvent(event, payload) {
     case "migrate-dir-progress":
       if (typeof onMigrateDirProgress === "function") onMigrateDirProgress(payload);
       break;
+    case "migrate-dir-ask":
+      if (typeof onMigrateDirAsk === "function") onMigrateDirAsk(payload);
+      break;
     case "migrate-dir-done":
       if (typeof onMigrateDirDone === "function") onMigrateDirDone(payload);
       break;
     case "migrate-dir-restore-progress":
       if (typeof onRestoreDirProgress === "function") onRestoreDirProgress(payload);
       break;
+    // 删除途中后端的逐项进度（仅彻底删除有，回收站是系统一次调用）
+    case "delete-progress":
+      if (typeof onDeleteProgress === "function") onDeleteProgress(payload);
+      break;
+    case "link-backup-progress":
+      if (typeof onLinkBackupProgress === "function") onLinkBackupProgress(payload);
+      break;
     case "migrate-dir-restore-done":
       if (typeof onRestoreDirDone === "function") onRestoreDirDone(payload);
+      break;
+    // 反查跑完：后端已写好历史，刷新历史列表让新记录出现（结果由弹窗自己拉）
+    case "link-find-done":
+      if (typeof refreshMigrationHistory === "function") refreshMigrationHistory();
       break;
     case "settings-applied":
       // Promise 等待方在 applySettingsAndClose 里处理

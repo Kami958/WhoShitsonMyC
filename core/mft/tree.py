@@ -32,6 +32,8 @@ MFT_ROOT = 5
 Progress = Callable[[int, str], None]
 Cancel = Callable[[], bool]
 OnBatch = Callable[[list[EntryRow]], None]
+# 链接回调：on_link(相对扫描根的路径, 重解析点标签, 原始目标)
+OnLink = Callable[[str, int, str], None]
 
 # 流式写库时每批行数（与 SnapshotWriter 批大小同量级）
 _ON_BATCH_SIZE = 10_000
@@ -115,6 +117,7 @@ def _build_from_base(
     on_batch: OnBatch | None = None,
     timer: object | None = None,
     live: list[bool] | bytearray | None = None,
+    on_link: OnLink | None = None,
 ) -> tuple[list[EntryRow], int, int, int]:
     """共用建树：栈 DFS 分配 sid + 反向上卷 + 产出行。
 
@@ -123,6 +126,8 @@ def _build_from_base(
     ``is_dir`` / ``data_size`` / ``mtime`` / ``reparse_tag`` / ``link_target``
     可为 dict（ParsedRecord 路径）或按 mft 号下标的平铺数组（紧凑路径）；
     数组路径须同时传 ``live``。
+
+    ``on_link`` 为每个带重解析点标签的行调一次，路径由记录号爬父链现算。
     """
     _ = follow_reparse  # 预留
     _span_start = getattr(timer, "span_start", None)
@@ -257,6 +262,13 @@ def _build_from_base(
     for sid in range(1, next_id):
         if cancel and cancel():
             raise MftTreeError("cancelled")
+        row_reparse = rtag_sid_arr[sid]
+        if row_reparse and on_link is not None:
+            on_link(
+                _rel_path_of(sid, parent_sid_arr, name_arr),
+                int(row_reparse),
+                ltarget_sid_arr[sid] or "",
+            )
         if is_dir_arr[sid]:
             dir_count += 1
             row = EntryRow.directory(
@@ -265,7 +277,7 @@ def _build_from_base(
                 name_arr[sid],
                 acc[sid],
                 mtime_arr[sid],
-                reparse_tag=rtag_sid_arr[sid],
+                reparse_tag=row_reparse,
                 link_target=ltarget_sid_arr[sid],
             )
         else:
@@ -276,7 +288,7 @@ def _build_from_base(
                 name_arr[sid],
                 file_size_arr[sid],
                 mtime_arr[sid],
-                reparse_tag=rtag_sid_arr[sid],
+                reparse_tag=row_reparse,
                 link_target=ltarget_sid_arr[sid],
             )
         if keep_all:
@@ -299,6 +311,26 @@ def _build_from_base(
     return rows, file_count, dir_count, total_size
 
 
+def _rel_path_of(num: int, parents: list[int | None], names: list[str]) -> str:
+    """从记录号爬到根，拼出相对扫描根的路径（``a\\b``；根目录为空串）。
+
+    只为链接调一次，不预先为每个节点存路径：整盘几百万条记录里链接只有
+    几百条，存路径反而多占一份跟节点数同量级的内存。
+    """
+    parts: list[str] = []
+    cur = num
+    while cur > 1:
+        nm = names[cur] if cur < len(names) else ""
+        if nm:
+            parts.append(nm)
+        nxt = parents[cur] if cur < len(parents) else None
+        if not nxt:
+            break
+        cur = nxt
+    parts.reverse()
+    return "\\".join(parts)
+
+
 def build_entry_rows_from_compact(
     table: CompactMftTable,
     *,
@@ -307,6 +339,7 @@ def build_entry_rows_from_compact(
     cancel: Cancel | None = None,
     on_batch: OnBatch | None = None,
     timer: object | None = None,
+    on_link: OnLink | None = None,
 ) -> tuple[list[EntryRow], int, int, int]:
     """从紧凑表建树（热路径：无 ParsedRecord）。
 
@@ -430,6 +463,7 @@ def build_entry_rows_from_compact(
         on_batch=on_batch,
         timer=timer,
         live=live,
+        on_link=on_link,
     )
 
 
