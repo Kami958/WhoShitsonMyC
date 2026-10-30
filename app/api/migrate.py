@@ -9,7 +9,16 @@ import time
 from core import applog, i18n, fs_delete, fs_migrate
 from core.scanner import query_free_size
 
-from app.bootstrap import _delete_error_message, _migrate_error_message
+from app.bootstrap import (
+    _delete_error_message,
+    _history_read_failed_message,
+    _history_recovered_message,
+    _history_write_failed_message,
+    _import_link_failed_message,
+    _link_registry_recovered_message,
+    _link_registry_write_failed_message,
+    _migrate_error_message,
+)
 
 
 # 迁移类作业的名字与它正在跑时的提示：被哪个占着就报哪一个
@@ -260,14 +269,28 @@ class MigrateMixin:
             f"directory migration ok | source={source} dest={dest} "
             f"files={result.get('files')} bytes={result.get('bytes')}"
         )
-        fs_migrate.register_link(
-            str(result.get("source") or ""),
-            str(result.get("dest") or ""),
-            str(result.get("aside") or ""),
-            files=int(result.get("files") or 0),
-            bytes_=int(result.get("bytes") or 0),
-        )
-        fs_migrate.record_history({
+        link_error_code = ""
+        try:
+            fs_migrate.register_link(
+                str(result.get("source") or ""),
+                str(result.get("dest") or ""),
+                str(result.get("aside") or ""),
+                files=int(result.get("files") or 0),
+                bytes_=int(result.get("bytes") or 0),
+            )
+        except OSError as exc:
+            # 迁移已经完成，数据在新位置，访问路径已经是链接。登记写失败
+            # 只能如实告诉用户，不能回滚，也不能吞掉。
+            link_error_code = "registry_write_failed"
+            applog.warn(
+                f"link registry write failed after migration | reason={type(exc).__name__}"
+            )
+        result["link_registered"] = not bool(link_error_code)
+        if link_error_code:
+            result["link_error_code"] = link_error_code
+            result["link_error"] = _migrate_error_message(link_error_code)
+        history_saved = False
+        history_rec = fs_migrate.record_history({
             "ts": time.time(),
             "verify": verify_info.get("mode") or "",
             "op": "migrate",
@@ -284,11 +307,23 @@ class MigrateMixin:
             "backup_cleaned": bool(result.get("backup_cleaned") or False),
             "backup_permanent": bool(result.get("backup_permanent") or False),
         })
+        history_saved = history_rec is not None
+        if not history_saved:
+            applog.warn("migration history write failed | op=migrate")
+        result["history_saved"] = history_saved
         self._emit_link_job_done(job_token, "migrate-dir-done", result)
 
     def list_directory_links(self) -> dict:
-        """列出工具创建的所有目录链接及当前状态（供「目录链接」面板渲染）。"""
-        return {"ok": True, "links": fs_migrate.link_records()}
+        """列出工具创建的所有目录链接及当前状态（供「目录链接」面板渲染）。
+
+        登记文件读取失败时另带 ``warning``，界面据此提示原文件已备份。
+        """
+        out = {"ok": True, "links": fs_migrate.link_records()}
+        recovery = fs_migrate.link_registry_recovery()
+        if recovery:
+            out["warning"] = _link_registry_recovered_message()
+            out["link_registry_recovered"] = True
+        return out
 
     def import_link(self, link: str = "", target: str = "") -> dict:
         """把一条已经在别处建好的目录链接收进登记表。
@@ -301,9 +336,14 @@ class MigrateMixin:
         except fs_migrate.MigrateError as exc:
             code = str(exc)
             return {"error": _migrate_error_message(code), "code": code}
+        except OSError:
+            return {
+                "error": _import_link_failed_message(),
+                "code": "registry_write_failed",
+            }
         except Exception as exc:  # noqa: BLE001
             applog.exception("import_link failed", exc)
-            return {"error": str(exc), "code": "fail"}
+            return {"error": _import_link_failed_message(), "code": "fail"}
         return {"ok": True, "record": rec}
 
     def import_directory_links(self, links: list | None = None) -> dict:
@@ -326,29 +366,50 @@ class MigrateMixin:
                         "error": _migrate_error_message(code),
                     }
                 )
+            except OSError:
+                failed.append({
+                    "link": str(link),
+                    "code": "registry_write_failed",
+                    "error": _import_link_failed_message(),
+                })
             except Exception as exc:  # noqa: BLE001
                 applog.exception("import_directory_links failed", exc)
-                failed.append({"link": str(link), "code": "fail", "error": str(exc)})
+                failed.append({
+                    "link": str(link),
+                    "code": "fail",
+                    "error": _import_link_failed_message(),
+                })
         if imported:
             applog.info(f"directory links imported | count={len(imported)}")
         return {"ok": True, "imported": imported, "failed": failed}
 
     def list_migration_history(self) -> dict:
-        """列出迁移/还原历史（即便链接已还原、记录被移除，仍可查）。"""
+        """列出迁移/还原历史（即便链接已还原、记录被移除，仍可查）。
+
+        历史文件读取失败并已备份时，额外返回 ``warning``，界面不能把它
+        当成正常的空历史。
+        """
         try:
-            return {"ok": True, "history": fs_migrate.load_history()}
+            out = {"ok": True, "history": fs_migrate.load_history()}
         except Exception as exc:  # noqa: BLE001
             applog.exception("list_migration_history failed", exc)
-            return {"error": str(exc), "code": "fail"}
+            return {"error": _history_read_failed_message(), "code": "fail"}
+        recovery = fs_migrate.history_recovery()
+        if recovery:
+            out["warning"] = _history_recovered_message()
+            out["history_recovered"] = True
+        return out
 
     def clear_migration_history(self) -> dict:
         """清空迁移/还原历史。"""
         try:
             n = fs_migrate.clear_history()
             return {"ok": True, "cleared": int(n)}
+        except OSError:
+            return {"error": _history_write_failed_message(), "code": "history_write_failed"}
         except Exception as exc:  # noqa: BLE001
             applog.exception("clear_migration_history failed", exc)
-            return {"error": str(exc), "code": "fail"}
+            return {"error": _history_write_failed_message(), "code": "fail"}
 
     def start_directory_remigration(
         self, link: str = "", dest: str = "", old_target_action: str = "keep"
@@ -503,7 +564,7 @@ class MigrateMixin:
             f"left={result.get('old_target_left') or ''} "
             f"removed={bool(result.get('old_target_removed'))}"
         )
-        fs_migrate.record_history({
+        history_rec = fs_migrate.record_history({
             "ts": time.time(),
             "verify": verify_info.get("mode") or "",
             "op": "migrate",
@@ -522,6 +583,13 @@ class MigrateMixin:
         payload = dict(result)
         payload["source"] = str(result.get("link") or link)
         payload["dest"] = str(result.get("target") or dest)
+        if payload.get("link_registered") is False:
+            code = str(payload.get("link_error_code") or "registry_write_failed")
+            payload["link_error"] = _migrate_error_message(code)
+            applog.warn("link registry write failed after re-migration")
+        payload["history_saved"] = history_rec is not None
+        if history_rec is None:
+            applog.warn("migration history write failed | op=remigrate")
         self._emit_link_job_done(job_token, "migrate-dir-done", payload)
 
     def delete_directory_link(self, link: str = "") -> dict:
@@ -728,7 +796,7 @@ class MigrateMixin:
             return {"error": _delete_error_message(code), "code": code}
         except OSError as exc:
             return {
-                "error": i18n.t(f"删除失败：{exc}", f"Delete failed: {exc}"),
+                "error": _delete_error_message("os"),
                 "code": "os",
             }
         fs_migrate.set_link_old_target(link_path, "")
@@ -791,7 +859,7 @@ class MigrateMixin:
             return {"error": _delete_error_message(code), "code": code}
         except OSError as exc:
             return {
-                "error": i18n.t(f"删除失败：{exc}", f"Delete failed: {exc}"),
+                "error": _delete_error_message("os"),
                 "code": "os",
             }
         applog.info(

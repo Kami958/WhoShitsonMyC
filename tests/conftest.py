@@ -15,15 +15,17 @@ def _reset_lang():
 
 
 @pytest.fixture(autouse=True)
-def _isolate_store(tmp_path, monkeypatch):
-    """每个用例前把应用数据根指到临时目录，避免读写真实 settings.yaml。"""
+def _isolate_store(tmp_path):
+    """每个用例前把应用数据根指到临时目录，避免读写真实 settings.yaml。
+
+    指向走测试专用的数据目录设置，不经过当前运行账户解析；
+    settings.yaml、links.json、迁移历史与默认快照目录都跟着落到临时目录。
+    """
     from core import store
 
     data_root = tmp_path / "wsmc-test-data"
     data_root.mkdir(exist_ok=True)
-    monkeypatch.setattr(store, "_app_base_dir_path", lambda: str(data_root))
-    monkeypatch.setattr(store, "_app_base_dir", lambda: str(data_root))
-    monkeypatch.setattr(store, "app_data_dir", lambda: str(data_root))
+    store.set_data_root_for_tests(str(data_root))
     store._data_wiped = False
     store.reset_settings_to_defaults(lang="en")
     store._scan_workers = store.default_scan_workers()

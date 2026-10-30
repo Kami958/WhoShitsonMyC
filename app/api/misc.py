@@ -8,9 +8,7 @@ import subprocess
 import threading
 import time
 
-import webview  # pywebview
-
-from app import bootstrap
+from app import bootstrap, dialogs
 from core import applog, i18n, store
 from core.compress import clear_session_cache
 from core.differ import Diff
@@ -66,6 +64,14 @@ class MiscMixin:
             applog.exception("uninstall_app_data failed", exc)
             return {"error": i18n.t(
                 f"卸载清理失败：{exc}", f"Uninstall cleanup failed: {exc}")}
+        if not result.get("ok") and "unsafe_root" in (result.get("errors") or []):
+            return {
+                "error": i18n.t(
+                    "数据目录指向磁盘根目录或网络共享的最外层目录，清理已取消。请重新选择数据文件夹后再试。",
+                    "The data folder points at a drive root or the top level of a network share, so cleanup was cancelled. Choose the data folder again and retry.",
+                ),
+                **result,
+            }
         if result.get("ok"):
             applog.info(
                 f"Uninstall cleanup ok delete_data={bool(delete_data)} "
@@ -94,44 +100,24 @@ class MiscMixin:
         """弹出「另存为」导出日志文本；取消则 cancelled。默认不自动写文件。"""
         if self._window is None:
             return {"error": i18n.t("窗口未就绪", "Window is not ready")}
-        save_dialog = getattr(
-            getattr(webview, "FileDialog", None), "SAVE", None
-        )
-        if save_dialog is None:
-            save_dialog = getattr(webview, "SAVE_DIALOG", None)
-        if save_dialog is None:
-            return {"error": i18n.t(
-                "当前环境不支持保存对话框",
-                "Save dialog is not supported in this environment",
-            )}
         stamp = time.strftime("%Y%m%d-%H%M%S")
         default_name = f"WhoShitsOnMyC-log-{stamp}.txt"
         file_types = ("Text files (*.txt)", "All files (*.*)")
         try:
-            result = self._window.create_file_dialog(
-                save_dialog,
-                allow_multiple=False,
+            paths = dialogs.create_file_dialog(
+                self._window,
+                "save",
                 save_filename=default_name,
                 file_types=file_types,
             )
-        except TypeError:
-            try:
-                result = self._window.create_file_dialog(
-                    save_dialog, False, default_name, file_types
-                )
-            except Exception as exc:  # noqa: BLE001
-                applog.exception("export_app_log dialog failed", exc)
-                return {"error": str(exc)}
-        except Exception as exc:  # noqa: BLE001
-            applog.exception("export_app_log dialog failed", exc)
-            return {"error": str(exc)}
-        if not result:
+        except dialogs.DialogError:
+            return {"error": i18n.t(
+                "无法打开保存窗口，请稍后重试。",
+                "Cannot open the save window. Try again later.",
+            )}
+        if not paths:
             return {"cancelled": True}
-        # pywebview 可能返回 str 或 list/tuple
-        if isinstance(result, (list, tuple)):
-            path = str(result[0]) if result else ""
-        else:
-            path = str(result)
+        path = paths[0]
         if not path:
             return {"cancelled": True}
         if not path.lower().endswith(".txt"):
@@ -154,43 +140,24 @@ class MiscMixin:
             return {"error": i18n.t("没有可导出的对话", "No conversation to export")}
         if self._window is None:
             return {"error": i18n.t("窗口未就绪", "Window is not ready")}
-        save_dialog = getattr(
-            getattr(webview, "FileDialog", None), "SAVE", None
-        )
-        if save_dialog is None:
-            save_dialog = getattr(webview, "SAVE_DIALOG", None)
-        if save_dialog is None:
-            return {"error": i18n.t(
-                "当前环境不支持保存对话框",
-                "Save dialog is not supported in this environment",
-            )}
         stamp = time.strftime("%Y%m%d-%H%M%S")
         default_name = f"WhoShitsOnMyC-ai-chat-{stamp}.json"
         file_types = ("JSON files (*.json)", "All files (*.*)")
         try:
-            result = self._window.create_file_dialog(
-                save_dialog,
-                allow_multiple=False,
+            paths = dialogs.create_file_dialog(
+                self._window,
+                "save",
                 save_filename=default_name,
                 file_types=file_types,
             )
-        except TypeError:
-            try:
-                result = self._window.create_file_dialog(
-                    save_dialog, False, default_name, file_types
-                )
-            except Exception as exc:  # noqa: BLE001
-                applog.exception("export_ai_chat dialog failed", exc)
-                return {"error": str(exc)}
-        except Exception as exc:  # noqa: BLE001
-            applog.exception("export_ai_chat dialog failed", exc)
-            return {"error": str(exc)}
-        if not result:
+        except dialogs.DialogError:
+            return {"error": i18n.t(
+                "无法打开保存窗口，请稍后重试。",
+                "Cannot open the save window. Try again later.",
+            )}
+        if not paths:
             return {"cancelled": True}
-        if isinstance(result, (list, tuple)):
-            path = str(result[0]) if result else ""
-        else:
-            path = str(result)
+        path = paths[0]
         if not path:
             return {"cancelled": True}
         if not path.lower().endswith(".json"):
@@ -209,40 +176,21 @@ class MiscMixin:
         """弹出打开对话框，读取 AI 对话 JSON 文本（最大约 2MB）。"""
         if self._window is None:
             return {"error": i18n.t("窗口未就绪", "Window is not ready")}
-        open_dialog = getattr(
-            getattr(webview, "FileDialog", None), "OPEN", None
-        )
-        if open_dialog is None:
-            open_dialog = getattr(webview, "OPEN_DIALOG", None)
-        if open_dialog is None:
-            return {"error": i18n.t(
-                "当前环境不支持文件选择对话框",
-                "File open dialog is not supported in this environment",
-            )}
         file_types = ("JSON files (*.json)", "All files (*.*)")
         try:
-            result = self._window.create_file_dialog(
-                open_dialog,
-                allow_multiple=False,
+            paths = dialogs.create_file_dialog(
+                self._window,
+                "open",
                 file_types=file_types,
             )
-        except TypeError:
-            try:
-                result = self._window.create_file_dialog(
-                    open_dialog, False, None, file_types
-                )
-            except Exception as exc:  # noqa: BLE001
-                applog.exception("import_ai_chat dialog failed", exc)
-                return {"error": str(exc)}
-        except Exception as exc:  # noqa: BLE001
-            applog.exception("import_ai_chat dialog failed", exc)
-            return {"error": str(exc)}
-        if not result:
+        except dialogs.DialogError:
+            return {"error": i18n.t(
+                "无法打开文件选择窗口，请稍后重试。",
+                "Cannot open the file selection window. Try again later.",
+            )}
+        if not paths:
             return {"cancelled": True}
-        if isinstance(result, (list, tuple)):
-            path = str(result[0]) if result else ""
-        else:
-            path = str(result)
+        path = paths[0]
         if not path:
             return {"cancelled": True}
         max_bytes = 2 * 1024 * 1024

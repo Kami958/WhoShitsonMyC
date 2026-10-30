@@ -881,7 +881,7 @@ async function refreshTopWithMarks() {
     renderTopLevel(res.nodes);
   } catch (err) {
     if (err && err.message !== "marks_refresh_failed") {
-      toast(t("loadFailed", err && err.message ? err.message : String(err)));
+      toast(t("loadFailed", err && err.message ? err.message : String(err)), true);
     }
     state._marksLoaded = false;
     if (state._topNodes) renderTopLevel(state._topNodes);
@@ -2037,7 +2037,7 @@ async function locateTreePath(targetPath, opts) {
       row = await revealCappedNode(tree, prefix);
     }
     if (!row) {
-      if (!silent) toast(t("treeSearchLocateFailed", prefix), true);
+      if (!silent) toastWarn(t("treeSearchLocateFailed", prefix));
       return false;
     }
     if (!isLast) {
@@ -2116,7 +2116,7 @@ function waitForChildrenLoaded(childrenEl, timeoutMs = 8000) {
 
 function openGotoPathDialog() {
   if (!state.compared) {
-    toast(t("gotoPathNeedCompare"), true);
+    toastWarn(t("gotoPathNeedCompare"));
     return;
   }
   const overlay = $("#gotoPathOverlay");
@@ -2183,7 +2183,7 @@ async function gotoPath(input) {
     if (ok) {
       closeGotoPathDialog();
       if (i < parts.length) {
-        toast(t("gotoPathPartial", prefix));
+        toastWarn(t("gotoPathPartial", prefix));
       }
       return;
     }
@@ -2271,7 +2271,8 @@ async function ctxCommand(cmd) {
     else if (res.message) toast(res.message);
   } else if (cmd === "copy") {
     const p = fullPath(state.compareRoot, node.path);
-    toast((await copyText(p)) ? t("copied", p) : t("copyFailed"), false);
+    if (await copyText(p)) toast(t("copied", p));
+    else toastWarn(t("copyFailed"));
   } else if (cmd === "collapse") {
     collapseNodeSubtree(node.path);
   } else if (cmd === "migrate") {
@@ -2292,7 +2293,7 @@ async function ctxCommand(cmd) {
   } else if (cmd === "delete-selected") {
     const nodes = selectedTreeNodes();
     if (!nodes.length) {
-      toast(t("treeSelectNeed"), true);
+      toastWarn(t("treeSelectNeed"));
     } else if (typeof addCompareNodesToPending === "function") {
       addCompareNodesToPending(nodes);
       clearTreeSelection();

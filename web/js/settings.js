@@ -8,6 +8,45 @@ async function openSnapshotDir() {
   if (res.error) toast(res.error, true);
 }
 
+async function openDataFolder() {
+  const path = (_settingsDraft && _settingsDraft.app_data_dir) || "";
+  if (!path || !state.api) return;
+  let res = null;
+  try {
+    res = await state.api.open_folder(path);
+  } catch (e) {
+    res = null;
+  }
+  if (!res || res.error) toast(t("dataFolderOpenFailed"), true);
+}
+
+/** 设置页更改数据文件夹：把当前数据移到新位置并继续使用。 */
+async function chooseDataFolder() {
+  let res;
+  try {
+    res = await state.api.choose_data_folder();
+  } catch (e) {
+    toast(t("folderPickFailed"), true);
+    return;
+  }
+  if (!res || res.cancelled) return;
+  if (res.error) {
+    toast(res.error, true);
+    return;
+  }
+  const failed = Number(res.failed) || 0;
+  const skipped = Number(res.skipped) || 0;
+  const moved = Number(res.moved) || 0;
+  const previous = res.previous_root || "";
+  const parts = [moved ? t("dataFolderChangedMoved") : t("dataFolderChanged")];
+  if (failed) parts.push(t("storageRecoveryMoveFailed", failed, previous));
+  if (skipped) parts.push(t("storageRecoveryMoveSkipped", skipped, previous));
+  if (res.snapshot_dir_reset) parts.push(t("storageRecoverySnapshotReset"));
+  if (res.pointer_saved === false) parts.push(t("storageRecoveryPointerFailed"));
+  toast(parts.join(" "), res.pointer_saved === false ? "error" : failed ? "warn" : "info");
+  await refreshAfterStorageChange();
+}
+
 function fillWorkerSelect(sel, s) {
   if (!sel) return;
   const cpu = s.cpu_count || 2;
@@ -34,8 +73,13 @@ async function loadSettings() {
   } catch (e) {
     return;
   }
+  if (!s || s.error) {
+    _settingsDraft = null;
+    return;
+  }
   state._settings = s;
   state.searchMemoryIndex = s.search_memory_index !== false;
+  applyToastTiming(s);
   _settingsDraft = {
     scan_workers: Number(s.scan_workers) || 1,
     compress_snapshots: !!s.compress_snapshots,
@@ -51,6 +95,9 @@ async function loadSettings() {
     snapshot_dir_display: s.snapshot_dir || "",
     snapshot_dir_builtin: s.snapshot_dir_builtin || "",
     snapshot_dir_is_custom: !!s.snapshot_dir_is_custom,
+    app_data_dir: s.app_data_dir || "",
+    account: s.account || "",
+    data_dir_pointer_invalid: !!s.data_dir_pointer_invalid,
     settings_path: s.settings_path || "",
     mft_platform_ok: s.mft_platform_ok !== false,
     is_admin: !!s.is_admin,
@@ -63,9 +110,30 @@ async function loadSettings() {
     ui_hover_group_min: _normalizeHoverGroupMin(s.ui_hover_group_min),
     ui_tree_guide: s.ui_tree_guide !== false,
     ui_parent_sep: s.ui_parent_sep === true,
+    ui_toast_info_base: _normalizeToastSeconds(s.ui_toast_info_base, 2),
+    ui_toast_info_max: _normalizeToastSeconds(s.ui_toast_info_max, 20),
+    ui_toast_warn_base: _normalizeToastSeconds(s.ui_toast_warn_base, 5),
+    ui_toast_warn_max: _normalizeToastSeconds(s.ui_toast_warn_max, 30),
   };
   fillAppVersionLabel(s.version || "");
   fillSettingsFormFromDraft();
+  updateSettingsWarnings(s);
+}
+
+/** 设置文件恢复与快照目录不可用的提示行；只显示后端给出的可读文案。 */
+function updateSettingsWarnings(s) {
+  const fileEl = $("#settingsFileWarnLine");
+  if (fileEl && s) {
+    const text = s.settings_warning ? String(s.settings_warning) : "";
+    fileEl.textContent = text;
+    fileEl.classList.toggle("hidden", !text);
+  }
+  const snapEl = $("#snapDirWarnLine");
+  if (snapEl) {
+    const text = s && s.snapshot_dir_warning ? String(s.snapshot_dir_warning) : "";
+    snapEl.textContent = text;
+    snapEl.classList.toggle("hidden", !text);
+  }
 }
 
 function _normalizeLogLevel(raw) {
@@ -86,6 +154,13 @@ function _normalizeHoverGroupMin(raw) {
   const n = Math.round(Number(raw));
   if (!Number.isFinite(n)) return 2;
   return Math.max(0, Math.min(50, n));
+}
+
+/** 提示停留秒数：1-120 收拢，非法回落默认值。 */
+function _normalizeToastSeconds(raw, fallback) {
+  const n = Math.round(Number(raw));
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(1, Math.min(120, n));
 }
 
 /** 把 UI 设置开关落到 <html>：关闭项加 class 供 CSS 反向覆盖。 */
@@ -163,7 +238,7 @@ function addBlacklistFromForm() {
   const path = input ? String(input.value || "").trim() : "";
   const mode = modeSel ? String(modeSel.value || "prefix").toLowerCase() : "prefix";
   if (!path) {
-    toast(t("blacklistEmpty"), true);
+    toastWarn(t("blacklistEmpty"));
     return;
   }
   if (mode === "regex") {
@@ -171,7 +246,7 @@ function addBlacklistFromForm() {
       // eslint-disable-next-line no-new
       new RegExp(path);
     } catch (e) {
-      toast(t("blacklistBadRegex"), true);
+      toastWarn(t("blacklistBadRegex"));
       return;
     }
   }
@@ -277,11 +352,42 @@ function fillSettingsFormFromDraft() {
   if (uiMultiselectExitChk) uiMultiselectExitChk.checked = d.ui_multiselect_exit_after_add !== false;
   const uiMultiselectDoubleEscChk = $("#uiMultiselectDoubleEscChk");
   if (uiMultiselectDoubleEscChk) uiMultiselectDoubleEscChk.checked = d.ui_multiselect_double_esc !== false;
+  const uiToastInfoBase = $("#uiToastInfoBase");
+  if (uiToastInfoBase) uiToastInfoBase.value = String(_normalizeToastSeconds(d.ui_toast_info_base, 2));
+  const uiToastInfoMax = $("#uiToastInfoMax");
+  if (uiToastInfoMax) uiToastInfoMax.value = String(_normalizeToastSeconds(d.ui_toast_info_max, 20));
+  const uiToastWarnBase = $("#uiToastWarnBase");
+  if (uiToastWarnBase) uiToastWarnBase.value = String(_normalizeToastSeconds(d.ui_toast_warn_base, 5));
+  const uiToastWarnMax = $("#uiToastWarnMax");
+  if (uiToastWarnMax) uiToastWarnMax.value = String(_normalizeToastSeconds(d.ui_toast_warn_max, 30));
   fillBlacklistSelect();
+  updateDataFolderLine(d);
   updateSnapDirLine({
     snapshot_dir: d.snapshot_dir_display || d.snapshot_dir_builtin || "",
     snapshot_dir_is_custom: !!d.snapshot_dir_is_custom,
   });
+}
+
+/** 数据文件夹行：当前位置、当前运行账户与指针记录状态。 */
+function updateDataFolderLine(s) {
+  const pathEl = $("#dataFolderPathLine");
+  if (pathEl) {
+    const path = (s && s.app_data_dir) || "";
+    pathEl.textContent = path ? t("dataFolderPath", path) : "";
+    pathEl.title = path;
+  }
+  const accountEl = $("#runAccountLine");
+  if (accountEl) {
+    const account = (s && s.account) || "";
+    accountEl.textContent = account ? t("runAccountLine", account) : "";
+    accountEl.classList.toggle("hidden", !account);
+  }
+  const warnEl = $("#dataFolderWarnLine");
+  if (warnEl) {
+    const invalid = !!(s && s.data_dir_pointer_invalid);
+    warnEl.textContent = invalid ? t("dataFolderPointerInvalid") : "";
+    warnEl.classList.toggle("hidden", !invalid);
+  }
 }
 
 function updateSnapDirLine(s) {
@@ -297,6 +403,360 @@ function updateSnapDirLine(s) {
   el.title = path;
 }
 
+/** 启动时检查数据目录；正常时再检查其他账户下的旧数据。 */
+async function checkStorageAtStartup() {
+  if (!state.api || !state.api.get_storage_status) return true;
+  let res = null;
+  try {
+    res = await state.api.get_storage_status();
+  } catch (e) {
+    return true;
+  }
+  if (!res) return true;
+  if (!res.ok || res.snapshot_dir_unavailable) {
+    showStorageRecovery(res);
+    return false;
+  }
+  await checkLegacyDataAtStartup();
+  return true;
+}
+
+let _legacyDataState = null;
+
+async function checkLegacyDataAtStartup() {
+  if (!state.api || !state.api.get_legacy_data) return;
+  let res = null;
+  try {
+    res = await state.api.get_legacy_data();
+  } catch (e) {
+    return;
+  }
+  const list = res && Array.isArray(res.candidates) ? res.candidates : [];
+  if (list.length) showLegacyData(list);
+}
+
+function showLegacyData(list) {
+  _legacyDataState = list;
+  const ov = $("#legacyDataOverlay");
+  if (!ov) return;
+  const item = list[0] || {};
+  const account = item.account || "";
+  const count = Number(item.snapshots) || 0;
+  const body = $("#legacyDataBody");
+  if (body) {
+    body.textContent = item.readable
+      ? t("legacyDataBody", account, count)
+      : t("legacyDataUnreadable", account);
+  }
+  const pathEl = $("#legacyDataPath");
+  if (pathEl) {
+    pathEl.textContent = t("legacyDataPath", item.path || "");
+    pathEl.title = item.path || "";
+  }
+  const importBtn = $("#legacyDataImportBtn");
+  if (importBtn) {
+    importBtn.disabled = !item.readable || !(item.has_settings || count);
+  }
+  const openBtn = $("#legacyDataOpenBtn");
+  if (openBtn) openBtn.disabled = !item.path;
+  ov.classList.remove("hidden");
+}
+
+function hideLegacyData() {
+  const ov = $("#legacyDataOverlay");
+  if (ov) ov.classList.add("hidden");
+  _legacyDataState = null;
+}
+
+let _legacyConflictState = null;
+
+async function importLegacyData() {
+  const item = (_legacyDataState || [])[0];
+  if (!item || !item.path) return;
+  if (!state.api || !state.api.scan_legacy_conflicts) {
+    await runLegacyImport({}, item.path);
+    return;
+  }
+  let res = null;
+  try {
+    res = await state.api.scan_legacy_conflicts(item.path);
+  } catch (e) {
+    toast(t("legacyConflictScanFailed"), true);
+    return;
+  }
+  if (!res || res.error) {
+    toast((res && res.error) || t("legacyConflictScanFailed"), true);
+    return;
+  }
+  const settings = Array.isArray(res.settings) ? res.settings : [];
+  const snapshots = Array.isArray(res.snapshots) ? res.snapshots : [];
+  if (!settings.length && !snapshots.length) {
+    await runLegacyImport({}, item.path);
+    return;
+  }
+  showLegacyConflicts(item.path, settings, snapshots);
+}
+
+function _legacyConflictRow(item) {
+  const row = document.createElement("div");
+  row.className = "legacy-conflict-row";
+  row.setAttribute("data-relative", item.relative || "");
+  const name = document.createElement("div");
+  name.className = "legacy-conflict-name";
+  name.textContent = item.name || "";
+  row.appendChild(name);
+  const group = `legacy-conflict-${item.relative || item.name || ""}`;
+  row.appendChild(
+    _legacyChoice(group, "current", t("legacyConflictCurrent"), item.current || {}, true)
+  );
+  row.appendChild(
+    _legacyChoice(group, "legacy", t("legacyConflictLegacy"), item.legacy || {}, false)
+  );
+  return row;
+}
+
+function _legacyChoice(group, value, label, info, checked) {
+  const wrap = document.createElement("label");
+  wrap.className = "legacy-conflict-choice";
+  const input = document.createElement("input");
+  input.type = "radio";
+  input.name = group;
+  input.value = value;
+  input.checked = checked;
+  wrap.appendChild(input);
+  const text = document.createElement("span");
+  text.textContent = t(
+    "legacyConflictMeta",
+    label,
+    fmtBytes(Number(info.size) || 0),
+    _legacyTime(info.mtime)
+  );
+  wrap.appendChild(text);
+  return wrap;
+}
+
+function _legacyTime(seconds) {
+  if (!seconds) return "";
+  try {
+    return new Date(Number(seconds) * 1000).toLocaleString();
+  } catch (e) {
+    return "";
+  }
+}
+
+function showLegacyConflicts(path, settings, snapshots) {
+  _legacyConflictState = { path, settings, snapshots };
+  const settingsWrap = $("#legacyConflictSettings");
+  const snapshotsWrap = $("#legacyConflictSnapshots");
+  if (settingsWrap) {
+    settingsWrap.innerHTML = "";
+    settings.forEach((item) => settingsWrap.appendChild(_legacyConflictRow(item)));
+    if (!settings.length) settingsWrap.appendChild(_legacyConflictEmpty());
+  }
+  if (snapshotsWrap) {
+    snapshotsWrap.innerHTML = "";
+    snapshots.forEach((item) => snapshotsWrap.appendChild(_legacyConflictRow(item)));
+    if (!snapshots.length) snapshotsWrap.appendChild(_legacyConflictEmpty());
+  }
+  const ov = $("#legacyConflictOverlay");
+  if (ov) ov.classList.remove("hidden");
+}
+
+function _legacyConflictEmpty() {
+  const empty = document.createElement("p");
+  empty.className = "legacy-conflict-empty";
+  empty.textContent = t("legacyConflictEmpty");
+  return empty;
+}
+
+function hideLegacyConflicts() {
+  const ov = $("#legacyConflictOverlay");
+  if (ov) ov.classList.add("hidden");
+  _legacyConflictState = null;
+}
+
+function _setAllLegacyChoices(value) {
+  document
+    .querySelectorAll(
+      "#legacyConflictSettings input[type=radio], #legacyConflictSnapshots input[type=radio]"
+    )
+    .forEach((input) => {
+      if (input.value === value) input.checked = true;
+    });
+}
+
+function _collectLegacyChoices() {
+  const choices = {};
+  document.querySelectorAll(".legacy-conflict-row").forEach((row) => {
+    const relative = row.getAttribute("data-relative");
+    const checked = row.querySelector("input[type=radio]:checked");
+    if (relative && checked) choices[relative] = checked.value;
+  });
+  return choices;
+}
+
+async function startLegacyImport() {
+  const data = _legacyConflictState;
+  if (!data || !data.path) return;
+  const choices = _collectLegacyChoices();
+  hideLegacyConflicts();
+  await runLegacyImport(choices, data.path);
+}
+
+async function runLegacyImport(choices, path) {
+  const item = path ? { path } : (_legacyDataState || [])[0];
+  if (!item || !item.path) return;
+  let res = null;
+  try {
+    res = await state.api.import_legacy_data(item.path, choices || {});
+  } catch (e) {
+    toast(t("legacyDataImportFailed"), true);
+    return;
+  }
+  if (!res || res.error) {
+    toast((res && res.error) || t("legacyDataImportFailed"), true);
+    return;
+  }
+  hideLegacyData();
+  const copied = Number(res.copied) || 0;
+  const overwritten = Number(res.overwritten) || 0;
+  const skipped = Number(res.skipped) || 0;
+  const failed = Number(res.failed) || 0;
+  toast(
+    t("legacyDataImported", copied, overwritten, skipped, failed),
+    failed ? "warn" : "info"
+  );
+  await refreshAfterStorageChange();
+}
+
+async function openLegacyDataPath() {
+  const item = (_legacyDataState || [])[0];
+  if (!item || !item.path || !state.api || !state.api.open_folder) return;
+  let res = null;
+  try {
+    res = await state.api.open_folder(item.path);
+  } catch (e) {
+    res = null;
+  }
+  if (!res || res.error) toast(t("legacyDataOpenFailed"), true);
+}
+
+let _storageRecoveryState = null;
+
+function showStorageRecovery(res) {
+  _storageRecoveryState = res || {};
+  const ov = $("#storageRecoveryOverlay");
+  const body = $("#storageRecoveryBody");
+  if (!ov || !body) return;
+  const snapIssue = !!(res && res.snapshot_dir_unavailable);
+  const title = $("#storageRecoveryTitle");
+  if (title) {
+    const key = snapIssue ? "storageRecoverySnapTitle" : "storageRecoveryTitle";
+    title.setAttribute("data-i18n", key);
+    title.textContent = t(key);
+  }
+  body.textContent = String((res && res.message) || t("storageRecoveryBody"));
+  const openBtn = $("#storageRecoveryOpenBtn");
+  if (openBtn) openBtn.disabled = !(res && res.path);
+  const snapBtn = $("#storageRecoverySnapBtn");
+  if (snapBtn) snapBtn.classList.toggle("hidden", !snapIssue);
+  const chooseBtn = $("#storageRecoveryChooseBtn");
+  if (chooseBtn) chooseBtn.classList.toggle("hidden", snapIssue);
+  ov.classList.remove("hidden");
+}
+
+function hideStorageRecovery() {
+  const ov = $("#storageRecoveryOverlay");
+  if (ov) ov.classList.add("hidden");
+  _storageRecoveryState = null;
+}
+
+async function chooseStorageRecoveryFolder() {
+  let res;
+  try {
+    res = await state.api.choose_data_folder();
+  } catch (e) {
+    toast(t("folderPickFailed"), true);
+    return;
+  }
+  if (!res || res.cancelled) return;
+  if (res.error) {
+    toast(res.error, true);
+    return;
+  }
+  hideStorageRecovery();
+  const failed = Number(res.failed) || 0;
+  const skipped = Number(res.skipped) || 0;
+  const moved = Number(res.moved) || 0;
+  const previous = res.previous_root || "";
+  const parts = [];
+  if (res.target_had_config) parts.push(t("storageRecoveryFound"));
+  if (moved) parts.push(t("storageRecoveryMovedIn"));
+  if (!res.target_had_config && !moved) parts.push(t("storageRecoveryUsingNew"));
+  if (failed) parts.push(t("storageRecoveryMoveFailed", failed, previous));
+  if (skipped) parts.push(t("storageRecoveryMoveSkipped", skipped, previous));
+  if (res.snapshot_dir_reset) parts.push(t("storageRecoverySnapshotReset"));
+  if (res.pointer_saved === false) parts.push(t("storageRecoveryPointerFailed"));
+  toast(parts.join(" "), res.pointer_saved === false ? "error" : failed ? "warn" : "info");
+  await refreshAfterStorageChange();
+}
+
+/** 内置快照目录不可用时，直接在恢复面板里换一个可写的快照目录。 */
+async function chooseStorageRecoverySnapshotFolder() {
+  let res;
+  try {
+    res = await state.api.choose_snapshot_dir();
+  } catch (e) {
+    toast(t("folderPickFailed"), true);
+    return;
+  }
+  if (!res || res.cancelled) return;
+  if (res.error) {
+    toast(res.error, true);
+    return;
+  }
+  hideStorageRecovery();
+  toast(t("storageRecoverySnapshotChosen"));
+  await refreshAfterStorageChange();
+}
+
+async function openStorageRecoveryPath() {
+  const stored = _storageRecoveryState || {};
+  const path = stored.problem_path || stored.path || "";
+  if (!path || !state.api || !state.api.open_folder) return;
+  let res = null;
+  try {
+    res = await state.api.open_folder(path);
+  } catch (e) {
+    res = null;
+  }
+  if (!res || res.error) toast(t("storageRecoveryOpenFailed"), true);
+}
+
+async function quitFromStorageRecovery() {
+  if (state.api && state.api.quit_app) {
+    try {
+      await state.api.quit_app();
+    } catch (e) {}
+  }
+}
+
+async function refreshAfterStorageChange() {
+  if (typeof reconcileLang === "function") {
+    try {
+      await reconcileLang();
+    } catch (e) {}
+  }
+  try {
+    await loadSettings();
+  } catch (e) {}
+  if (typeof loadSnapshots === "function") loadSnapshots({ quiet: true });
+  if (typeof refreshLinkList === "function") refreshLinkList();
+  if (typeof refreshMigrationHistoryCount === "function") {
+    refreshMigrationHistoryCount();
+  }
+}
+
 /** 只改草稿：弹文件夹选择，点完成才生效。 */
 async function chooseSnapDir() {
   let res;
@@ -308,7 +768,7 @@ async function chooseSnapDir() {
       res = await state.api.choose_snapshot_dir();
     }
   } catch (e) {
-    toast(String(e), true);
+    toast(t("folderPickFailed"), true);
     return;
   }
   if (!res || res.cancelled) return;
@@ -328,6 +788,7 @@ async function chooseSnapDir() {
     snapshot_dir: path,
     snapshot_dir_is_custom: true,
   });
+  updateSettingsWarnings(null);
 }
 
 /** 草稿恢复内置目录；点完成才写后端。 */
@@ -344,6 +805,7 @@ function resetSnapDirDraft() {
     snapshot_dir: builtin,
     snapshot_dir_is_custom: false,
   });
+  updateSettingsWarnings(null);
 }
 
 /** 设置页签切换（通用 / 日志…）。 */
@@ -741,17 +1203,61 @@ function updateMigrateProgress(payload) {
   }
 }
 
-function toastMigrateDone(mig) {
+function migrateDoneText(mig, showFiles) {
   const moved = Number(mig && mig.moved) || 0;
   const skipped = Number(mig && mig.skipped) || 0;
   const failed = Number(mig && mig.failed) || 0;
-  if (failed || skipped) {
-    toast(t("snapDirMigratePartial", moved, skipped, failed), failed > 0);
-  } else if (moved) {
-    toast(t("snapDirMigrated", moved));
-  } else {
-    toast(t("snapDirMigrateNone"));
+  if (!moved && !skipped && !failed) return t("snapDirMigrateNone");
+  const parts = [];
+  if (moved) parts.push(t("snapDirMigrated", moved));
+  if (skipped) parts.push(t("snapDirMigrateSkipped", skipped));
+  if (failed) {
+    parts.push(t("snapDirMigrateFailed", failed));
+    if (showFiles) {
+      const errors = Array.isArray(mig && mig.errors) ? mig.errors : [];
+      const names = errors
+        .filter((e) => String(e).includes(":"))
+        .slice(0, 5)
+        .map((e) => String(e).split(":")[0].trim())
+        .filter(Boolean);
+      if (names.length) {
+        let listed = t("snapDirMigrateNameJoin", names);
+        if (failed > names.length) {
+          listed += " " + t("snapDirMigrateMore", failed - names.length);
+        }
+        parts.push(t("snapDirMigrateFailedFiles", listed));
+      }
+    }
   }
+  return t("snapDirMigrateSummary", parts, failed > 0);
+}
+
+function toastMigrateDone(mig, showFiles) {
+  const failed = Number(mig && mig.failed) || 0;
+  toast(migrateDoneText(mig, showFiles), failed > 0);
+}
+
+/** 把快照迁移结果写在设置页快照目录下方，供设置保存失败时查看。 */
+function renderSnapDirMigrateNote(mig, dest) {
+  const el = $("#snapDirMigrateLine");
+  if (!el) return;
+  const moved = Number(mig && mig.moved) || 0;
+  const skipped = Number(mig && mig.skipped) || 0;
+  const failed = Number(mig && mig.failed) || 0;
+  if (!moved && !skipped && !failed) {
+    el.textContent = "";
+    el.classList.add("hidden");
+    return;
+  }
+  const target = String(dest || "").trim() || t("snapDir");
+  const parts = [];
+  if (moved) parts.push(t("snapDirNoteMoved", moved, target));
+  if (skipped) parts.push(t("snapDirNoteSkipped", skipped));
+  if (failed) parts.push(t("snapDirNoteFailed", failed));
+  el.textContent = failed
+    ? t("snapDirNoteSummaryFailed", parts, target)
+    : t("snapDirNoteSummaryDone", parts, target);
+  el.classList.remove("hidden");
 }
 
 /**
@@ -799,6 +1305,7 @@ async function applySettingsAndClose() {
     closeSettings();
     return;
   }
+  renderSnapDirMigrateNote(null);
   // 从表单再读一遍，防止漏绑 change
   const workerSel = $("#workerSel");
   const compressChk = $("#compressChk");
@@ -857,6 +1364,18 @@ async function applySettingsAndClose() {
     ui_multiselect_double_esc: $("#uiMultiselectDoubleEscChk")
       ? !!$("#uiMultiselectDoubleEscChk").checked
       : _settingsDraft.ui_multiselect_double_esc !== false,
+    ui_toast_info_base: $("#uiToastInfoBase")
+      ? _normalizeToastSeconds($("#uiToastInfoBase").value, 2)
+      : _normalizeToastSeconds(_settingsDraft.ui_toast_info_base, 2),
+    ui_toast_info_max: $("#uiToastInfoMax")
+      ? _normalizeToastSeconds($("#uiToastInfoMax").value, 20)
+      : _normalizeToastSeconds(_settingsDraft.ui_toast_info_max, 20),
+    ui_toast_warn_base: $("#uiToastWarnBase")
+      ? _normalizeToastSeconds($("#uiToastWarnBase").value, 5)
+      : _normalizeToastSeconds(_settingsDraft.ui_toast_warn_base, 5),
+    ui_toast_warn_max: $("#uiToastWarnMax")
+      ? _normalizeToastSeconds($("#uiToastWarnMax").value, 30)
+      : _normalizeToastSeconds(_settingsDraft.ui_toast_warn_max, 30),
     snapshot_dir: _settingsDraft.snapshot_dir_is_custom
       ? (_settingsDraft.snapshot_dir || "")
       : "",
@@ -864,6 +1383,8 @@ async function applySettingsAndClose() {
       ? _settingsDraft.delete_blacklist
       : [],
   };
+  payload.ui_toast_info_max = Math.max(payload.ui_toast_info_max, payload.ui_toast_info_base);
+  payload.ui_toast_warn_max = Math.max(payload.ui_toast_warn_max, payload.ui_toast_warn_base);
 
   // 是否可能触发迁移：草稿目录与当前生效目录不同
   const prevDir =
@@ -931,9 +1452,10 @@ async function applySettingsAndClose() {
       state.searchMemoryIndex = kick.search_memory_index !== false;
     }
     applyUiSettingFlags(state._settings);
+    applyToastTiming(state._settings);
     toast(t("settingsApplied"));
     if (payload.use_mft && state._settings && !state._settings.is_admin) {
-      toast(t("mftNeedAdmin"));
+      toastWarn(t("mftNeedAdmin"));
     }
     if (kick && kick.snapshot_dir_changed) {
       toastMigrateDone(kick.migrate || {});
@@ -948,7 +1470,22 @@ async function applySettingsAndClose() {
 
   if (!res || res.cancelled) return;
   if (res.ok === false || res.error) {
-    toast(res.error || t("settingsApplyFailed"), true);
+    const msg = res.error || t("settingsApplyFailed");
+    const mig = res.migrate || {};
+    const moved = Number(mig.moved) || 0;
+    const skipped = Number(mig.skipped) || 0;
+    const failed = Number(mig.failed) || 0;
+    if (moved || skipped || failed) {
+      renderSnapDirMigrateNote(mig, draftDir);
+      await openSettings("general");
+      if (_settingsDraft) {
+        _settingsDraft.snapshot_dir = draftDir || payload.snapshot_dir || "";
+        _settingsDraft.snapshot_dir_display = draftDir;
+        _settingsDraft.snapshot_dir_is_custom = !!payload.snapshot_dir;
+        updateSnapDirLine(_settingsDraft);
+      }
+    }
+    toast(msg, true);
     return;
   }
 
@@ -959,15 +1496,16 @@ async function applySettingsAndClose() {
     state.searchMemoryIndex = res.search_memory_index !== false;
   }
   applyUiSettingFlags(state._settings);
+  applyToastTiming(state._settings);
   const dirChanged = !!(res && res.snapshot_dir_changed);
   const mig = (res && res.migrate) || {};
 
   toast(t("settingsApplied"));
   if (payload.use_mft && state._settings && !state._settings.is_admin) {
-    toast(t("mftNeedAdmin"));
+    toastWarn(t("mftNeedAdmin"));
   }
   if (dirChanged) {
-    toastMigrateDone(mig);
+    toastMigrateDone(mig, true);
     loadSnapshots();
   }
 }
@@ -1006,6 +1544,7 @@ async function resetSettingsToDefaults() {
   // 主题 / 语言与后端对齐
   applyThemeValue(res.theme);
   applyUiSettingFlags(res);
+  applyToastTiming(res);
   const lang = res.lang === "zh" || res.lang === "en" ? res.lang : "en";
   // setLang 会 syncBackend；后端已是默认，值相同不写盘
   if (lang !== LANG) setLang(lang);
@@ -1039,7 +1578,12 @@ async function resetSettingsToDefaults() {
     ui_hover_group_min: _normalizeHoverGroupMin(res.ui_hover_group_min),
     ui_tree_guide: res.ui_tree_guide !== false,
     ui_parent_sep: res.ui_parent_sep === true,
+    ui_toast_info_base: _normalizeToastSeconds(res.ui_toast_info_base, 2),
+    ui_toast_info_max: _normalizeToastSeconds(res.ui_toast_info_max, 20),
+    ui_toast_warn_base: _normalizeToastSeconds(res.ui_toast_warn_base, 5),
+    ui_toast_warn_max: _normalizeToastSeconds(res.ui_toast_warn_max, 30),
   };
   fillSettingsFormFromDraft();
+  updateSettingsWarnings(res);
   toast(t("resetSettingsDone"));
 }

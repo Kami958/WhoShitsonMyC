@@ -5,7 +5,11 @@
 
 async function newScan() {
   const res = await state.api.choose_folder();
-  if (!res.path) return;
+  if (res && res.error) {
+    toast(res.error, true);
+    return;
+  }
+  if (!res || !res.path) return;
   // 尽量用最新 is_admin / use_mft，避免启动后权限状态陈旧
   try {
     const s = await state.api.get_settings();
@@ -17,7 +21,7 @@ async function newScan() {
   const mftOn = !!(state._settings && state._settings.use_mft);
   const isAdmin = !!(state._settings && state._settings.is_admin);
   if (mftOn && isDriveRootPath(res.path) && !isAdmin) {
-    toast(t("scanMftFallbackNonAdmin"));
+    toastWarn(t("scanMftFallbackNonAdmin"));
   }
   const started = await state.api.start_scan(res.path);
   if (started.error) {
@@ -227,7 +231,7 @@ function onPyEvent(event, payload) {
       hideScanOverlay();
       {
         const elapsedTxt = fmtElapsed(payload && payload.elapsed_s);
-        if (payload.warning) toast(payload.warning, true);
+        if (payload.warning) toastWarn(payload.warning);
         else if (elapsedTxt) toast(t("scanDoneWithTime", elapsedTxt));
         else toast(t("scanDone"));
       }

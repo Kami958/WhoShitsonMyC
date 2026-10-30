@@ -6,9 +6,17 @@ import json
 import os
 import threading
 import time
+from . import applog
+from .corrupt_backup import backup_corrupt_file
 from .fs_delete import normalize_abs
 from .migrate_fs import MigrateError, _fs_path, _is_reparse, _link_target, _same_path
 from .models import clean_link_target, reparse_kind
+
+
+# 读取失败时记下损坏副本；后续写入前据此确认备份仍在。
+_registry_recovered_path = ""
+_registry_recovered_reason = ""
+_registry_recovered_backup = ""
 
 
 def _registry_path() -> str:
@@ -17,29 +25,103 @@ def _registry_path() -> str:
     return os.path.join(store.app_data_dir(), "links.json")
 
 
+def link_registry_recovery() -> dict | None:
+    """本次会话链接登记是否从损坏文件恢复过；供界面提示。"""
+    if not _registry_recovered_reason:
+        return None
+    return {
+        "path": _registry_recovered_path,
+        "reason": _registry_recovered_reason,
+        "backup": _registry_recovered_backup,
+    }
+
+
+def _recover_registry(path: str, reason: str) -> None:
+    """备份读取失败的登记文件并记录状态。"""
+    global _registry_recovered_path, _registry_recovered_reason
+    global _registry_recovered_backup
+    if (
+        _registry_recovered_path == path
+        and _registry_recovered_backup
+        and os.path.isfile(_registry_recovered_backup)
+    ):
+        return
+    backup = backup_corrupt_file(path)
+    _registry_recovered_path = path
+    _registry_recovered_reason = reason
+    _registry_recovered_backup = backup
+    applog.warn(
+        f"link registry unreadable | reason={reason} backup={backup or '(none)'}"
+    )
+
+
+def _ensure_registry_backup(path: str) -> None:
+    """写入登记前确认损坏副本存在；做不出副本时拒绝覆盖唯一原件。"""
+    global _registry_recovered_backup
+    if not _registry_recovered_reason or _registry_recovered_path != path:
+        return
+    if _registry_recovered_backup and os.path.isfile(_registry_recovered_backup):
+        return
+    if not os.path.isfile(path):
+        return
+    backup = backup_corrupt_file(path)
+    if backup:
+        _registry_recovered_backup = backup
+        return
+    raise OSError("corrupt link registry backup unavailable")
+
+
+def _clear_registry_recovery() -> None:
+    global _registry_recovered_path, _registry_recovered_reason
+    global _registry_recovered_backup
+    _registry_recovered_path = ""
+    _registry_recovered_reason = ""
+    _registry_recovered_backup = ""
+
+
 def load_links() -> list[dict]:
-    """读全部登记；文件缺失/损坏返回空表。"""
+    """读全部登记；文件缺失返回空表，损坏则先备份再返回空表。"""
     try:
-        with open(_registry_path(), "r", encoding="utf-8") as f:
+        path = _registry_path()
+    except OSError as exc:
+        applog.warn(f"link registry path unavailable | reason={type(exc).__name__}")
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        if isinstance(data, list):
-            return [d for d in data if isinstance(d, dict) and d.get("link")]
-    except (OSError, ValueError):
-        pass
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError) as exc:
+        _recover_registry(path, "encoding" if isinstance(exc, UnicodeError) else "invalid")
+        return []
+    if isinstance(data, list):
+        return [d for d in data if isinstance(d, dict) and d.get("link")]
+    _recover_registry(path, "malformed")
     return []
 
 
 def save_links(links: list[dict]) -> None:
-    """原子写登记文件（先写临时文件再 replace）。"""
+    """原子写登记文件（先写临时文件再 replace）。
+
+    写入失败抛出 OSError，由迁移流程转成用户可读的登记失败结果。若本次
+    会话从损坏文件恢复过，写之前先确认损坏副本仍在。
+    """
+    path = _registry_path()
+    _ensure_registry_backup(path)
+    tmp = path + ".tmp"
     try:
-        path = _registry_path()
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(links, f, ensure_ascii=False, indent=2)
         os.replace(tmp, path)
-    except OSError:
-        pass
+    except OSError as exc:
+        applog.warn(f"link registry write failed | reason={type(exc).__name__}")
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+    _clear_registry_recovery()
 
 
 def link_kind(path: str) -> str:
@@ -202,7 +284,14 @@ def set_link_old_target(link: str, old_target: str) -> None:
                     rec["old_target"] = old_target
                 else:
                     rec.pop("old_target", None)
-                save_links(links)
+                try:
+                    save_links(links)
+                except OSError as exc:
+                    # 旧迁移路径是附加信息，写不进去不能把已完成的再次迁移
+                    # 报成失败；登记主体已在 register_link 中单独检查。
+                    applog.warn(
+                        f"link old target write failed | reason={type(exc).__name__}"
+                    )
                 return
 
 
@@ -223,7 +312,12 @@ def remove_link_record(link: str) -> None:
             if not _same_path(str(r.get("link") or ""), link)
         ]
         if len(kept) != len(links):
-            save_links(kept)
+            try:
+                save_links(kept)
+            except OSError as exc:
+                applog.warn(
+                    f"link record remove write failed | reason={type(exc).__name__}"
+                )
 
 
 def link_records() -> list[dict]:

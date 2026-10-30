@@ -29,7 +29,7 @@
       try { localStorage.setItem("theme", theme); } catch (e) {}
     })();
   </script>
-  <link rel="stylesheet" href="style.css?v=1.1.7" />
+  <link rel="stylesheet" href="style.css?v=1.1.8.2" />
 </head>
 <body>
   <div class="layout">
@@ -238,6 +238,12 @@
         </div>
         <div id="tree" class="tree"></div>
       </div>
+
+      <!-- Toast 提示：限定在对比树区域内，多条堆叠，新的在底部 -->
+      <div class="toast-wrap">
+        <div id="toastStack" class="toast-stack" role="region" aria-live="polite" aria-label="提示"></div>
+      </div>
+      <button id="toastClearBtn" class="toast-clear hidden" type="button" data-i18n="toastClearAll" data-i18n-title="toastClearAll" aria-label="清除全部提示" title="清除全部">清除全部</button>
     </main>
 
     <!-- 右侧工具栏：待删除（常驻）+ AI（有模块时页签切换） -->
@@ -767,6 +773,7 @@
       </div>
       <div class="settings-body">
         <div class="settings-pane active" data-settings-pane="general" role="tabpanel">
+          <p id="settingsFileWarnLine" class="settings-hint hidden"></p>
           <div class="settings-field">
             <div class="settings-row">
               <span class="settings-label">
@@ -830,16 +837,33 @@
           <div class="settings-field">
             <div class="settings-row">
               <span class="settings-label">
+                <span data-i18n="dataFolder">数据文件夹</span>
+              </span>
+              <div class="settings-row-actions">
+                <button id="dataFolderChooseBtn" class="btn-ghost compact" type="button" data-i18n="dataFolderChoose">更改</button>
+                <button id="dataFolderOpenBtn" class="btn-ghost compact" type="button" data-i18n="dataFolderOpen">打开</button>
+              </div>
+            </div>
+            <p id="dataFolderPathLine" class="settings-hint settings-path"></p>
+            <p id="runAccountLine" class="settings-hint"></p>
+            <p id="dataFolderWarnLine" class="settings-hint is-warn hidden"></p>
+            <p class="settings-hint" data-i18n="dataFolderHint">更改后，原有设置和快照会移到新位置。</p>
+          </div>
+          <div class="settings-field">
+            <div class="settings-row">
+              <span class="settings-label">
                 <span data-i18n="snapDir">快照存放目录</span>
                 <button type="button" class="settings-q" data-help="snapDir" data-i18n-title="snapDirTitle" title="扫描得到的快照会保存在这里。更改后点完成，原来保存的快照会迁到新的快照目录" aria-label="?">?</button>
               </span>
               <div class="settings-row-actions">
-                <button id="snapDirChooseBtn" class="btn-plain compact" type="button" data-i18n="snapDirChoose">更改</button>
-                <button id="snapDirResetBtn" class="btn-plain compact" type="button" data-i18n="snapDirReset">恢复默认</button>
-                <button id="snapDirOpenBtn" class="btn-plain compact" type="button" data-i18n="snapDirOpen">打开</button>
+                <button id="snapDirChooseBtn" class="btn-ghost compact" type="button" data-i18n="snapDirChoose">更改</button>
+                <button id="snapDirResetBtn" class="btn-ghost compact" type="button" data-i18n="snapDirReset">恢复默认</button>
+                <button id="snapDirOpenBtn" class="btn-ghost compact" type="button" data-i18n="snapDirOpen">打开</button>
               </div>
             </div>
             <p id="snapDirPathLine" class="settings-hint settings-path snap-dir-path"></p>
+            <p id="snapDirWarnLine" class="settings-hint is-warn hidden"></p>
+            <p id="snapDirMigrateLine" class="settings-hint hidden"></p>
             <p class="settings-help-panel hidden" data-help-panel="snapDir" data-i18n="snapDirTitle">扫描得到的快照会保存在这里。更改后点完成，原来保存的快照会迁到新的快照目录</p>
           </div>
           <div class="settings-field">
@@ -984,6 +1008,40 @@
               <input id="uiMultiselectDoubleEscChk" type="checkbox" checked />
             </div>
             <p class="settings-help-panel hidden" data-help-panel="uiMultiselectDoubleEsc" data-i18n="uiMultiselectDoubleEscTitle">多选状态下半秒内连按两下 Esc 退出多选，单按一下只提示</p>
+          </div>
+          <div class="settings-field">
+            <div class="settings-row">
+              <span class="settings-label">
+                <span data-i18n="uiToastInfo">普通提示留存时长</span>
+                <button type="button" class="settings-q" data-help="uiToastInfo" data-i18n-title="uiToastInfoTitle" title="提示条从基础时长开始显示，文字超过 15 字后每多 2 字增加 1 秒，达到最长时长后不再增加" aria-label="?">?</button>
+              </span>
+              <span class="settings-row-actions toast-time-actions">
+                <label class="hover-min-label" for="uiToastInfoBase" data-i18n="uiToastBase">基础</label>
+                <input id="uiToastInfoBase" class="hover-min-input" type="number" min="1" max="20" step="1" value="2" />
+                <span class="hover-min-label" data-i18n="uiToastSeconds">秒</span>
+                <label class="hover-min-label" for="uiToastInfoMax" data-i18n="uiToastMax">最长</label>
+                <input id="uiToastInfoMax" class="hover-min-input" type="number" min="1" max="60" step="1" value="20" />
+                <span class="hover-min-label" data-i18n="uiToastSeconds">秒</span>
+              </span>
+            </div>
+            <p class="settings-help-panel hidden" data-help-panel="uiToastInfo" data-i18n="uiToastInfoTitle">提示条从基础时长开始显示，文字超过 15 字后每多 2 字增加 1 秒，达到最长时长后不再增加</p>
+          </div>
+          <div class="settings-field">
+            <div class="settings-row">
+              <span class="settings-label">
+                <span data-i18n="uiToastWarn">警告提示留存时长</span>
+                <button type="button" class="settings-q" data-help="uiToastWarn" data-i18n-title="uiToastWarnTitle" title="警告提示按同一规则计算留存时长，基础时长和最长时长可以单独设置" aria-label="?">?</button>
+              </span>
+              <span class="settings-row-actions toast-time-actions">
+                <label class="hover-min-label" for="uiToastWarnBase" data-i18n="uiToastBase">基础</label>
+                <input id="uiToastWarnBase" class="hover-min-input" type="number" min="1" max="30" step="1" value="5" />
+                <span class="hover-min-label" data-i18n="uiToastSeconds">秒</span>
+                <label class="hover-min-label" for="uiToastWarnMax" data-i18n="uiToastMax">最长</label>
+                <input id="uiToastWarnMax" class="hover-min-input" type="number" min="1" max="120" step="1" value="30" />
+                <span class="hover-min-label" data-i18n="uiToastSeconds">秒</span>
+              </span>
+            </div>
+            <p class="settings-help-panel hidden" data-help-panel="uiToastWarn" data-i18n="uiToastWarnTitle">警告提示按同一规则计算留存时长，基础时长和最长时长可以单独设置</p>
           </div>
         </div>
         <div class="settings-pane hidden" data-settings-pane="log" role="tabpanel">
@@ -1166,6 +1224,69 @@
     </div>
   </div>
 
+  <!-- 数据目录不可用：启动恢复入口 -->
+  <div id="storageRecoveryOverlay" class="overlay hidden">
+    <div class="confirm-card" role="dialog" aria-modal="true" aria-labelledby="storageRecoveryTitle">
+      <div class="note-head">
+        <h2 id="storageRecoveryTitle" class="note-title" data-i18n="storageRecoveryTitle">数据文件夹不可用</h2>
+      </div>
+      <div class="confirm-content">
+        <p id="storageRecoveryBody" class="confirm-body"></p>
+      </div>
+      <div class="note-foot confirm-foot">
+        <button id="storageRecoveryOpenBtn" class="btn-ghost" type="button" data-i18n="storageRecoveryOpen">打开所在位置</button>
+        <span class="note-foot-spacer"></span>
+        <button id="storageRecoveryQuitBtn" class="btn-plain" type="button" data-i18n="storageRecoveryQuit">退出程序</button>
+        <button id="storageRecoverySnapBtn" class="btn-primary compact hidden" type="button" data-i18n="storageRecoverySnapChoose">选择快照文件夹</button>
+        <button id="storageRecoveryChooseBtn" class="btn-primary compact" type="button" data-i18n="storageRecoveryChoose">选择其他文件夹</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="legacyDataOverlay" class="overlay hidden">
+    <div class="confirm-card" role="dialog" aria-modal="true" aria-labelledby="legacyDataTitle">
+      <div class="note-head">
+        <h2 id="legacyDataTitle" class="note-title" data-i18n="legacyDataTitle">发现旧版本数据</h2>
+      </div>
+      <div class="confirm-content">
+        <p id="legacyDataBody" class="confirm-body"></p>
+        <p id="legacyDataPath" class="settings-path"></p>
+      </div>
+      <div class="note-foot confirm-foot">
+        <button id="legacyDataOpenBtn" class="btn-ghost" type="button" data-i18n="legacyDataOpen">打开旧位置</button>
+        <span class="note-foot-spacer"></span>
+        <button id="legacyDataLaterBtn" class="btn-plain" type="button" data-i18n="legacyDataLater">稍后再说</button>
+        <button id="legacyDataImportBtn" class="btn-primary compact" type="button" data-i18n="legacyDataImport">导入到当前数据文件夹</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="legacyConflictOverlay" class="overlay hidden">
+    <div class="confirm-card legacy-conflict-card" role="dialog" aria-modal="true" aria-labelledby="legacyConflictTitle">
+      <div class="note-head">
+        <h2 id="legacyConflictTitle" class="note-title" data-i18n="legacyConflictTitle">同名文件</h2>
+      </div>
+      <div class="confirm-content legacy-conflict-content">
+        <p class="confirm-body" data-i18n="legacyConflictBody">以下文件在当前数据文件夹和旧数据文件夹中同名，请选择每一项保留哪一份。</p>
+        <div class="legacy-conflict-group">
+          <h3 class="legacy-conflict-heading" data-i18n="legacyConflictSettings">设置文件</h3>
+          <div id="legacyConflictSettings" class="legacy-conflict-list"></div>
+        </div>
+        <div class="legacy-conflict-group">
+          <h3 class="legacy-conflict-heading" data-i18n="legacyConflictSnapshots">快照</h3>
+          <div id="legacyConflictSnapshots" class="legacy-conflict-list legacy-conflict-scroll"></div>
+        </div>
+      </div>
+      <div class="note-foot confirm-foot">
+        <button id="legacyConflictKeepCurrentBtn" class="btn-ghost compact" type="button" data-i18n="legacyConflictKeepCurrent">全部保留当前</button>
+        <button id="legacyConflictKeepLegacyBtn" class="btn-ghost compact" type="button" data-i18n="legacyConflictKeepLegacy">全部保留旧版本</button>
+        <span class="note-foot-spacer"></span>
+        <button id="legacyConflictCancelBtn" class="btn-plain" type="button" data-i18n="legacyConflictCancel">取消</button>
+        <button id="legacyConflictStartBtn" class="btn-primary compact" type="button" data-i18n="legacyConflictStart">开始导入</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 搬家途中后端提问：要用户关掉占用的程序，或确认切换链接 -->
   <div id="migrateAskOverlay" class="overlay hidden">
     <div class="confirm-card migrate-ask-card" role="dialog" aria-modal="true" aria-labelledby="migrateAskTitle">
@@ -1288,23 +1409,22 @@
     </div>
   </div>
 
-  <!-- Toast 提示 -->
-  <div id="toast" class="toast hidden"></div>
+  <!-- Toast 提示已移入对比树区域 -->
 
-  <script src="js/state.js?v=1.1.7"></script>
-  <script src="js/i18n.js?v=1.1.7"></script>
-  <script src="js/util.js?v=1.1.7"></script>
-  <script src="js/theme.js?v=1.1.7"></script>
-  <script src="js/snapshots.js?v=1.1.7"></script>
-  <script src="js/pick.js?v=1.1.7"></script>
-  <script src="js/compare.js?v=1.1.7"></script>
-  <script src="js/scan.js?v=1.1.7"></script>
-  <script src="js/settings.js?v=1.1.7"></script>
-  <script src="js/modules.js?v=1.1.7"></script>
-  <script src="js/pending.js?v=1.1.7"></script>
-  <script src="js/migrate.js?v=1.1.7"></script>
-  <script src="js/linkfind.js?v=1.1.7"></script>
-  <script src="js/ai.js?v=1.1.7"></script>
-  <script src="js/app.js?v=1.1.7"></script>
+  <script src="js/state.js?v=1.1.8.2"></script>
+  <script src="js/i18n.js?v=1.1.8.2"></script>
+  <script src="js/util.js?v=1.1.8.2"></script>
+  <script src="js/theme.js?v=1.1.8.2"></script>
+  <script src="js/snapshots.js?v=1.1.8.2"></script>
+  <script src="js/pick.js?v=1.1.8.2"></script>
+  <script src="js/compare.js?v=1.1.8.2"></script>
+  <script src="js/scan.js?v=1.1.8.2"></script>
+  <script src="js/settings.js?v=1.1.8.2"></script>
+  <script src="js/modules.js?v=1.1.8.2"></script>
+  <script src="js/pending.js?v=1.1.8.2"></script>
+  <script src="js/migrate.js?v=1.1.8.2"></script>
+  <script src="js/linkfind.js?v=1.1.8.2"></script>
+  <script src="js/ai.js?v=1.1.8.2"></script>
+  <script src="js/app.js?v=1.1.8.2"></script>
 </body>
 </html>

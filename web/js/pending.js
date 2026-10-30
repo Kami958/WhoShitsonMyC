@@ -549,7 +549,7 @@ function addCompareNodeToPending(node) {
 function addCompareNodesToPending(nodes) {
   const list = Array.isArray(nodes) ? nodes : [];
   if (!list.length) {
-    toast(t("treeSelectNeed"), true);
+    toastWarn(t("treeSelectNeed"));
     return { added: 0, skippedDup: 0 };
   }
   if (!state.compareRoot) {
@@ -594,7 +594,7 @@ function addCompareNodesToPending(nodes) {
     toast(t("pendingExists"));
     openToolPanel("pending");
   } else {
-    toast(t("treeSelectNeed"), true);
+    toastWarn(t("treeSelectNeed"));
   }
   return { added, skippedDup };
 }
@@ -727,7 +727,7 @@ async function proposePendingItems(items, opts) {
   const quiet = !!options.quiet;
   const list = Array.isArray(items) ? items : [];
   if (!list.length) {
-    if (!quiet) toast(t("pendingProposeNone"), true);
+    if (!quiet) toast(t("pendingProposeNone"));
     return { ok: false, added: 0, rejected: 0 };
   }
   const defaultRoot = state.compareRoot || "";
@@ -749,7 +749,7 @@ async function proposePendingItems(items, opts) {
     });
   });
   if (!normalized.length) {
-    if (!quiet) toast(t("pendingProposeNone"), true);
+    if (!quiet) toast(t("pendingProposeNone"));
     return { ok: false, added: 0, rejected: 0 };
   }
 
@@ -760,7 +760,7 @@ async function proposePendingItems(items, opts) {
       return { ok: false, added: 0, rejected: 0, cancelled: true };
     }
     if (!selected.length) {
-      if (!quiet) toast(t("pendingChecklistEmpty"), true);
+      if (!quiet) toast(t("pendingChecklistEmpty"));
       return { ok: false, added: 0, rejected: 0, cancelled: true };
     }
   }
@@ -825,15 +825,15 @@ async function proposePendingItems(items, opts) {
     openToolPanel("pending");
     if (!quiet) toast(t("pendingProposeAdded", added));
   } else if (rejectedCount > 0) {
-    if (!quiet) toast(t("pendingProposeFiltered", rejectedCount), true);
+    if (!quiet) toastWarn(t("pendingProposeFiltered", rejectedCount));
   } else if (skippedDup > 0) {
     if (!quiet) toast(t("pendingExists"));
     openToolPanel("pending");
   } else {
-    if (!quiet) toast(t("pendingProposeNone"), true);
+    if (!quiet) toast(t("pendingProposeNone"));
   }
   if (added > 0 && rejectedCount > 0 && !quiet) {
-    toast(t("pendingProposeFiltered", rejectedCount), true);
+    toastWarn(t("pendingProposeFiltered", rejectedCount));
   }
   return {
     ok: added > 0,
@@ -877,7 +877,8 @@ function classifyPendingResult(res, errText) {
     code === "drive_root" ||
     code === "outside" ||
     code === "invalid" ||
-    code === "recycle_unsupported"
+    code === "recycle_unsupported" ||
+    code === "recycle_unavailable"
   ) {
     return { status: "blocked", message: msg };
   }
@@ -1184,7 +1185,7 @@ function renderPendingList() {
 function locatePendingItem(it) {
   if (!it || !it.rel) return;
   if (!state.compared) {
-    toast(t("pendingLocateNoTree"), true);
+    toastWarn(t("pendingLocateNoTree"));
     return;
   }
   if (
@@ -1193,13 +1194,13 @@ function locatePendingItem(it) {
     _treePathKey(String(it.root).replace(/[\\/]+$/, "")) !==
       _treePathKey(String(state.compareRoot).replace(/[\\/]+$/, ""))
   ) {
-    toast(t("pendingLocateOtherRoot"), true);
+    toastWarn(t("pendingLocateOtherRoot"));
     return;
   }
   if (typeof locateTreePath === "function") {
     locateTreePath(it.rel);
   } else {
-    toast(t("pendingLocateNoTree"), true);
+    toastWarn(t("pendingLocateNoTree"));
   }
 }
 
@@ -1273,7 +1274,7 @@ async function executePendingDeletes() {
   // 已成功的不再重试；失败/缺失等可再执行
   const items = _tool.items.filter((it) => !it.result || it.result.status !== "ok");
   if (!items.length) {
-    toast(t("pendingEmpty"), true);
+    toast(t("pendingEmpty"));
     return;
   }
   const permanent = !!_tool.permanent;
@@ -1361,7 +1362,8 @@ async function executePendingDeletes() {
         : `${t("deletedRecycle")} · ${t("deleteRefreshHint")}`
     );
   } else if (okCount > 0 || failCount > 0) {
-    toast(t("pendingPartial", okCount, failCount), failCount > 0);
+    const severe = okCount === 0 && failCount > 0;
+    toast(t("pendingPartial", okCount, failCount), severe ? "error" : "warn");
   }
 }
 
@@ -1437,7 +1439,7 @@ function wirePendingUi() {
     clOk.onclick = () => {
       const selected = _pendingChecklistCollectChecked();
       if (!selected.length) {
-        toast(t("pendingChecklistEmpty"), true);
+        toast(t("pendingChecklistEmpty"));
         return;
       }
       closePendingChecklistDialog(selected);

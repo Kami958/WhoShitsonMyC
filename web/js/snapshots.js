@@ -146,19 +146,30 @@ async function loadSnapshots(opts) {
   const quiet = !!(opts && opts.quiet);
   let managed = [];
   let folders = [];
+  let loadError = "";
   try {
-    managed = (await state.api.list_snapshots()) || [];
+    const res = await state.api.list_snapshots();
+    if (Array.isArray(res)) {
+      managed = res;
+    } else if (res && res.error) {
+      loadError = String(res.error);
+    }
   } catch (e) {
-    if (!quiet) toast(String(e), true);
-    managed = [];
+    loadError = String(e);
   }
   try {
     if (state.api.list_snapshot_folders) {
-      folders = (await state.api.list_snapshot_folders()) || [];
+      const res = await state.api.list_snapshot_folders();
+      if (Array.isArray(res)) {
+        folders = res;
+      } else if (!loadError && res && res.error) {
+        loadError = String(res.error);
+      }
     }
   } catch (e) {
-    folders = [];
+    if (!loadError) loadError = String(e);
   }
+  if (loadError && !quiet) toast(loadError, true);
   // 合并列表里出现过、但磁盘空夹未返回的 folder 名（防御）
   const folderSet = new Set(
     (folders || []).map((n) => String(n || "").trim()).filter(Boolean)
@@ -215,12 +226,13 @@ async function loadSnapshots(opts) {
   state.snapshots = mergeSnapshotLists(managed, importedKeep);
   renderSnapshotList();
   updatePickers();
-  return managed.length;
+  return loadError ? null : managed.length;
 }
 
 /** 用户点击刷新：重扫默认目录，保留手动导入。 */
 async function refreshSnapshots() {
   const n = await loadSnapshots();
+  if (n === null) return;
   toast(t("refreshDone", n));
 }
 
@@ -403,12 +415,15 @@ function groupSnapshotsByFolder(ordered) {
 
 function isFolderCollapsed(name) {
   const key = name || "";
-  return !!state.folderCollapsed[key];
+  // 未归类默认展开，其他文件夹默认折叠
+  if (key === "") return false;
+  const collapsed = state.folderCollapsed[key];
+  return collapsed === undefined ? true : !!collapsed;
 }
 
 function toggleFolderCollapsed(name) {
   const key = name || "";
-  state.folderCollapsed[key] = !state.folderCollapsed[key];
+  state.folderCollapsed[key] = !isFolderCollapsed(name);
   renderSnapshotList();
 }
 
@@ -760,11 +775,10 @@ function openRenameFolderDialog(folder) {
         toast(t("folderRenameFailed", res.error), true);
         return;
       }
-      // 折叠状态键跟着改
-      if (state.folderCollapsed[folder]) {
-        delete state.folderCollapsed[folder];
-        state.folderCollapsed[name] = true;
-      }
+      // 折叠状态跟着改名，保留用户当前的展开或折叠状态
+      const wasCollapsed = isFolderCollapsed(folder);
+      delete state.folderCollapsed[folder];
+      state.folderCollapsed[name] = wasCollapsed;
       closeFolderDialog();
       // 路径会变：刷新列表；对比选中若在该夹内需靠 load 后 path 更新
       const oldPaths = new Set(
@@ -929,13 +943,13 @@ async function deleteSnapshotFolder(name, itemCount) {
   }
   const renamed = (res && res.renamed) || [];
   if (renamed.length) {
-    setTimeout(() => toast(t("folderDeletedRenamed", renamed), false, 5200), 600);
+    setTimeout(() => toastWarn(t("folderDeletedRenamed", renamed)), 600);
   }
 }
 
 function openNoteDialog(s) {
   if (!s || !s.path) {
-    toast(t("noteCleared"), true);
+    toast(t("noteNeedSnapshot"));
     return;
   }
   _noteTarget = s;

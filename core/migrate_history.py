@@ -7,11 +7,74 @@ import os
 import threading
 import uuid
 
+from . import applog
+from .corrupt_backup import backup_corrupt_file
+
+
+# 读取失败时记下损坏副本；后续写入前据此确认备份仍在。
+_history_recovered_path = ""
+_history_recovered_reason = ""
+_history_recovered_backup = ""
+
 
 def _history_path() -> str:
     from . import store
 
     return os.path.join(store.app_data_dir(), "migration_history.json")
+
+
+def history_recovery() -> dict | None:
+    """本次会话迁移历史是否从损坏文件恢复过；供界面提示。"""
+    if not _history_recovered_reason:
+        return None
+    return {
+        "path": _history_recovered_path,
+        "reason": _history_recovered_reason,
+        "backup": _history_recovered_backup,
+    }
+
+
+def _recover_history(path: str, reason: str) -> None:
+    """备份读取失败的历史文件并记录状态。"""
+    global _history_recovered_path, _history_recovered_reason
+    global _history_recovered_backup
+    if (
+        _history_recovered_path == path
+        and _history_recovered_backup
+        and os.path.isfile(_history_recovered_backup)
+    ):
+        return
+    backup = backup_corrupt_file(path)
+    _history_recovered_path = path
+    _history_recovered_reason = reason
+    _history_recovered_backup = backup
+    applog.warn(
+        f"migration history unreadable | reason={reason} backup={backup or '(none)'}"
+    )
+
+
+def _ensure_history_backup(path: str) -> None:
+    """写入历史前确认损坏副本存在；做不出副本时拒绝覆盖唯一原件。"""
+    global _history_recovered_backup
+    if not _history_recovered_reason or _history_recovered_path != path:
+        return
+    if _history_recovered_backup and os.path.isfile(_history_recovered_backup):
+        return
+    if not os.path.isfile(path):
+        return
+    backup = backup_corrupt_file(path)
+    if backup:
+        _history_recovered_backup = backup
+        return
+    raise OSError("corrupt migration history backup unavailable")
+
+
+def _clear_history_recovery() -> None:
+    global _history_recovered_path, _history_recovered_reason
+    global _history_recovered_backup
+    _history_recovered_path = ""
+    _history_recovered_reason = ""
+    _history_recovered_backup = ""
 
 
 def _normalize_link_rows(raw: object) -> list[dict]:
@@ -84,33 +147,49 @@ def _normalize_history_entry(raw: dict) -> dict | None:
 
 
 def load_history() -> list[dict]:
-    """读历史记录；文件缺失/损坏返回空表。"""
+    """读历史记录；文件缺失返回空表，损坏则先备份再返回空表。"""
     try:
-        with open(_history_path(), "r", encoding="utf-8") as f:
+        path = _history_path()
+    except OSError as exc:
+        applog.warn(f"migration history path unavailable | reason={type(exc).__name__}")
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        if isinstance(data, list):
-            out: list[dict] = []
-            for d in data:
-                norm = _normalize_history_entry(d)
-                if norm is not None:
-                    out.append(norm)
-            return out
-    except (OSError, ValueError):
-        pass
-    return []
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError) as exc:
+        _recover_history(path, "encoding" if isinstance(exc, UnicodeError) else "invalid")
+        return []
+    if not isinstance(data, list):
+        _recover_history(path, "malformed")
+        return []
+    out: list[dict] = []
+    for d in data:
+        norm = _normalize_history_entry(d)
+        if norm is not None:
+            out.append(norm)
+    return out
 
 
 def _save_history(items: list[dict]) -> None:
-    """原子写历史（先临时文件再 replace）。"""
+    """原子写历史（先临时文件再 replace）；失败抛出 OSError。"""
+    path = _history_path()
+    _ensure_history_backup(path)
+    tmp = path + ".tmp"
     try:
-        path = _history_path()
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(items, f, ensure_ascii=False, indent=2)
         os.replace(tmp, path)
-    except OSError:
-        pass
+    except OSError as exc:
+        applog.warn(f"migration history write failed | reason={type(exc).__name__}")
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+    _clear_history_recovery()
 
 
 def record_history(entry: dict) -> dict | None:
@@ -129,7 +208,10 @@ def record_history(entry: dict) -> dict | None:
         items.sort(key=lambda d: float(d.get("ts") or 0), reverse=True)
         if len(items) > _MAX_HISTORY:
             items = items[:_MAX_HISTORY]
-        _save_history(items)
+        try:
+            _save_history(items)
+        except OSError:
+            return None
     return norm
 
 

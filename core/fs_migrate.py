@@ -63,6 +63,7 @@ from .migrate_links import (
     import_link,
     link_kind,
     link_records,
+    link_registry_recovery,
     link_target_abs,
     load_links,
     register_link,
@@ -81,6 +82,7 @@ from .migrate_history import (
     _normalize_link_rows,
     _save_history,
     clear_history,
+    history_recovery,
     load_history,
     record_history,
 )
@@ -1463,13 +1465,19 @@ def remigrate_link(
     finally:
         watcher.stop()
 
-    register_link(
-        link_path,
-        dst,
-        backup,
-        files=int(ver.get("files") or 0),
-        bytes_=int(ver.get("bytes") or 0),
-    )
+    registry_error = ""
+    try:
+        register_link(
+            link_path,
+            dst,
+            backup,
+            files=int(ver.get("files") or 0),
+            bytes_=int(ver.get("bytes") or 0),
+        )
+    except OSError:
+        # 链接已经切换完成，数据在新位置，不能因为登记写不进去就回滚。
+        # 由调用方在完成结果里告诉用户需要重新导入登记。
+        registry_error = "registry_write_failed"
 
     if action != "keep" and cancel():
         # 删除可能拖很久，进破坏性步骤前再查一次取消；真开始删之后不再受理取消，
@@ -1523,6 +1531,8 @@ def remigrate_link(
         "skipped": len(ver.get("skipped") or copied.get("skipped") or []),
         "settled": bool(settle.get("quiet")),
         "settled_files": int(settle.get("synced") or 0),
+        "link_registered": not bool(registry_error),
+        "link_error_code": registry_error,
     }
 
 

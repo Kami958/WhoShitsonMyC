@@ -716,6 +716,7 @@ body.is-sidebar-resizing .main {
   margin: -2px 0 6px; padding: 0 0 0 2px;
   font-size: 12px; line-height: 1.5; color: var(--text-muted);
 }
+.settings-hint.is-warn { color: var(--grow); }
 .settings-path {
   word-break: break-all; font-family: ui-monospace, Consolas, monospace;
   font-size: 11px;
@@ -726,6 +727,9 @@ body.is-sidebar-resizing .main {
 }
 .settings-row-actions .btn-plain.compact {
   padding: 4px 8px; font-size: 12px;
+}
+.settings-row-actions .btn-ghost.compact {
+  padding: 3px 10px; font-size: 12px;
 }
 .snap-dir-path { margin: 0 0 4px; }
 .settings-foot {
@@ -759,6 +763,7 @@ body.is-sidebar-resizing .main {
 
 /* ---- 主区 ---- */
 .main {
+  position: relative;
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -3824,6 +3829,9 @@ select.ai-settings-input:focus {
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
 }
+#storageRecoveryOverlay .confirm-card {
+  width: min(480px, 94vw);
+}
 .confirm-foot {
   flex-wrap: wrap;
   row-gap: 10px;
@@ -4209,21 +4217,119 @@ select.ai-settings-input:focus {
   border-top: 1px solid var(--border-soft);
 }
 .note-foot-spacer { flex: 1; }
+.legacy-conflict-card { width: min(620px, 94vw); }
+.legacy-conflict-content { max-height: min(62vh, 520px); overflow-y: auto; }
+.legacy-conflict-group + .legacy-conflict-group { margin-top: 12px; }
+.legacy-conflict-heading {
+  font-size: 12px; font-weight: 600; color: var(--text-muted); margin: 0 0 6px;
+}
+.legacy-conflict-list { display: flex; flex-direction: column; gap: 6px; }
+.legacy-conflict-scroll { max-height: 220px; overflow-y: auto; padding-right: 4px; }
+.legacy-conflict-row {
+  border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px;
+}
+.legacy-conflict-name {
+  font-size: 12px; font-weight: 600; margin-bottom: 4px; word-break: break-all;
+}
+.legacy-conflict-choice {
+  display: flex; align-items: center; gap: 6px; padding: 2px 0;
+  font-size: 12px; color: var(--text-muted); cursor: pointer;
+}
+.legacy-conflict-choice input { margin: 0; }
+.legacy-conflict-empty {
+  font-size: 12px; color: var(--text-muted); margin: 0; padding: 4px 0;
+}
 
 /* 反查弹窗的末尾元素（字段行/进度条/状态文字/结果列表）都不带下边距，
    底栏上方的留白由底栏自己留出 */
 .link-find-card .note-foot { margin-top: 12px; }
 
 /* ---- Toast ---- */
-.toast {
-  position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%);
-  background: var(--bg-side); border: 1px solid var(--border); border-radius: 4px;
-  padding: 10px 18px; box-shadow: var(--shadow); z-index: 200;
-  color: var(--text); font-size: 13px; max-width: min(70%, 520px);
-  line-height: 1.45; white-space: pre-wrap; word-break: break-word;
-  text-align: left;
+.toast-wrap {
+  position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%);
+  z-index: 200;
+  display: flex; flex-direction: column; align-items: center;
+  width: min(92%, 520px);
+  max-height: calc(100% - 32px);
+  pointer-events: none;
 }
-.toast.err { border-color: var(--grow); color: var(--grow); }
+.toast-clear {
+  position: absolute;
+  right: 16px;
+  bottom: 16px;
+  z-index: 201;
+  pointer-events: auto;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-side);
+  color: var(--text-muted);
+  font-size: 12px; line-height: 1.5;
+  cursor: pointer;
+}
+.toast-clear:hover { border-color: var(--accent); color: var(--text); }
+.toast-stack {
+  width: 100%; max-height: calc(100% - 30px); min-height: 0;
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  overflow-y: auto; overflow-x: hidden;
+  padding: 2px;
+  pointer-events: auto;
+  scrollbar-width: none;
+}
+.toast-stack::-webkit-scrollbar { width: 0; height: 0; display: none; }
+.toast {
+  position: relative;
+  display: inline-flex; align-items: center; gap: 10px;
+  width: auto; max-width: 100%;
+  vertical-align: top;
+  background: var(--bg-side); border: 1px solid transparent; border-radius: 4px;
+  padding: 10px 12px 10px 18px; box-shadow: var(--shadow);
+  color: var(--text); font-size: 13px; line-height: 1.45; text-align: center;
+  overflow: hidden;
+  opacity: 0; transform: translateY(8px);
+  transition: opacity 0.16s ease, transform 0.16s ease, box-shadow 0.16s ease;
+}
+.toast.toast-enter { opacity: 1; transform: translateY(0); }
+.toast.toast-leaving { opacity: 0; transform: translateY(8px); }
+.toast-slot {
+  position: relative;
+  display: block;
+  width: 100%;
+  text-align: center;
+}
+.toast-stack:has(.toast:hover) .toast:not(:hover):not(.toast-leaving) { opacity: 0.62; }
+.toast-slot .toast:hover {
+  position: absolute; top: 0; left: 0; right: 0;
+  margin: 0 auto;
+  width: fit-content; max-width: 100%;
+  z-index: 4;
+  box-shadow: 0 8px 28px rgba(20, 30, 40, 0.22);
+}
+.toast-slot .toast:hover .toast-text {
+  display: block; -webkit-line-clamp: unset;
+}
+.toast-ring {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  pointer-events: none;
+}
+.toast-ring rect { fill: none; stroke: var(--accent); stroke-width: 2; }
+.toast-warn { color: var(--warn); }
+.toast-warn .toast-ring rect { stroke: var(--warn); }
+.toast-error { color: var(--grow); }
+.toast-error .toast-ring rect { stroke: var(--grow); }
+.toast-text {
+  flex: 0 1 auto; min-width: 0;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  overflow: hidden;
+  white-space: pre-wrap; word-break: break-word;
+  text-align: center;
+}
+.toast-close {
+  flex: none; margin: 0 -4px 0 0; padding: 0 2px;
+  border: 0; background: transparent; color: currentColor;
+  font-size: 15px; line-height: 1.2; cursor: pointer; opacity: 0.7;
+}
+.toast-close:hover { opacity: 1; }
 
 .hidden { display: none !important; }
 /* 构建期可选模块门控（与 UI 自身的 .hidden 开/关分离） */

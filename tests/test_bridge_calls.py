@@ -282,6 +282,15 @@ def test_remigration_flow(api, tmp_path, monkeypatch):
             time.sleep(0.05)
         return False
 
+    def _start_remigrate(link_path, dest):
+        deadline = time.time() + 20.0
+        while time.time() < deadline:
+            res = call(api, "start_directory_remigration", link_path, dest, "keep")
+            if res.get("started"):
+                return
+            time.sleep(0.05)
+        raise AssertionError("再次迁移没能启动")
+
     link = tmp_path / "remig_src"
     link.mkdir()
     (link / "f.txt").write_text("m", encoding="utf-8")
@@ -299,10 +308,13 @@ def test_remigration_flow(api, tmp_path, monkeypatch):
     checked = call(api, "validate_directory_remigration", str(link), str(second))
     assert checked.get("ok") is True, checked
 
-    call(api, "start_directory_remigration", str(link), str(second), "keep")
+    _start_remigrate(str(link), str(second))
 
     # 登记换成新目标只发生在链接切换之后，等到它就是等到整件事结束
-    assert _wait_until(lambda: (_record() or {}).get("target") == str(second)), "再次迁移没完成"
+    assert _wait_until(
+        lambda: (_record() or {}).get("target") == str(second)
+        and bool((_record() or {}).get("old_target"))
+    ), "再次迁移没完成"
 
     rec = _record()
     assert rec, "登记里没有这条链接"
@@ -337,6 +349,15 @@ def test_delete_old_target_clears_missing_dir(api, tmp_path, monkeypatch):
             time.sleep(0.05)
         return False
 
+    def _start_remigrate(link_path, dest):
+        deadline = time.time() + 20.0
+        while time.time() < deadline:
+            res = call(api, "start_directory_remigration", link_path, dest, "keep")
+            if res.get("started"):
+                return
+            time.sleep(0.05)
+        raise AssertionError("再次迁移没能启动")
+
     link = tmp_path / "clear_src"
     link.mkdir()
     (link / "f.txt").write_text("m", encoding="utf-8")
@@ -350,9 +371,12 @@ def test_delete_old_target_clears_missing_dir(api, tmp_path, monkeypatch):
 
     call(api, "start_directory_migration", str(link), str(first))
     assert _wait_until(lambda: (_record() or {}).get("target") == str(first)), "第一次迁移没完成"
-    call(api, "start_directory_remigration", str(link), str(second), "keep")
+    _start_remigrate(str(link), str(second))
 
-    assert _wait_until(lambda: (_record() or {}).get("target") == str(second)), "再次迁移没完成"
+    assert _wait_until(
+        lambda: (_record() or {}).get("target") == str(second)
+        and bool((_record() or {}).get("old_target"))
+    ), "再次迁移没完成"
     left = (_record() or {}).get("old_target") or ""
     assert left and os.path.isdir(left), left
 

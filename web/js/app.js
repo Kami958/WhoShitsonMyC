@@ -165,6 +165,10 @@ function wireEvents() {
       if (_settingsDraft) _settingsDraft.ui_multiselect_double_esc = !!e.target.checked;
     };
   }
+  const dataFolderChoose = $("#dataFolderChooseBtn");
+  if (dataFolderChoose) dataFolderChoose.onclick = chooseDataFolder;
+  const dataFolderOpen = $("#dataFolderOpenBtn");
+  if (dataFolderOpen) dataFolderOpen.onclick = openDataFolder;
   const snapDirChoose = $("#snapDirChooseBtn");
   if (snapDirChoose) snapDirChoose.onclick = chooseSnapDir;
   const snapDirReset = $("#snapDirResetBtn");
@@ -221,6 +225,31 @@ function wireEvents() {
       if (e.target === confirmOverlay) closeConfirmDialog(false);
     };
   }
+
+  const storageChoose = $("#storageRecoveryChooseBtn");
+  if (storageChoose) storageChoose.onclick = chooseStorageRecoveryFolder;
+  const storageSnap = $("#storageRecoverySnapBtn");
+  if (storageSnap) storageSnap.onclick = chooseStorageRecoverySnapshotFolder;
+  const storageOpen = $("#storageRecoveryOpenBtn");
+  if (storageOpen) storageOpen.onclick = openStorageRecoveryPath;
+  const storageQuit = $("#storageRecoveryQuitBtn");
+  if (storageQuit) storageQuit.onclick = quitFromStorageRecovery;
+
+  const legacyOpen = $("#legacyDataOpenBtn");
+  if (legacyOpen) legacyOpen.onclick = openLegacyDataPath;
+  const legacyLater = $("#legacyDataLaterBtn");
+  if (legacyLater) legacyLater.onclick = hideLegacyData;
+  const legacyImport = $("#legacyDataImportBtn");
+  if (legacyImport) legacyImport.onclick = importLegacyData;
+
+  const legacyKeepCurrent = $("#legacyConflictKeepCurrentBtn");
+  if (legacyKeepCurrent) legacyKeepCurrent.onclick = () => _setAllLegacyChoices("current");
+  const legacyKeepLegacy = $("#legacyConflictKeepLegacyBtn");
+  if (legacyKeepLegacy) legacyKeepLegacy.onclick = () => _setAllLegacyChoices("legacy");
+  const legacyConflictCancel = $("#legacyConflictCancelBtn");
+  if (legacyConflictCancel) legacyConflictCancel.onclick = hideLegacyConflicts;
+  const legacyConflictStart = $("#legacyConflictStartBtn");
+  if (legacyConflictStart) legacyConflictStart.onclick = startLegacyImport;
 
   $("#pickOld").onclick = (e) => openDropdown("old", e.currentTarget);
   $("#pickNew").onclick = (e) => openDropdown("new", e.currentTarget);
@@ -294,7 +323,7 @@ function wireEvents() {
     treeSelectAddPendingBtn.onclick = () => {
       const nodes = typeof selectedTreeNodes === "function" ? selectedTreeNodes() : [];
       if (!nodes.length) {
-        toast(t("treeSelectNeed"), true);
+        toastWarn(t("treeSelectNeed"));
         return;
       }
       if (typeof addCompareNodesToPending === "function") {
@@ -691,7 +720,8 @@ async function boot() {
       await loadAiSettingsDraft();
     } catch (e) {}
   }
-  loadSnapshots();
+  // 启动阶段先安静加载列表；快照目录不可用的提示统一由下面的启动提示给出
+  loadSnapshots({ quiet: true });
   // 旧版 localStorage 侧栏状态先迁进 YAML，loadSettings 才能读到权威值
   if (typeof migrateToolPanelStateLegacy === "function") {
     try {
@@ -699,6 +729,12 @@ async function boot() {
     } catch (e) {}
   }
   await loadSettings();
+  // 数据目录只在当前运行账户不能使用时才进入恢复流程；正常路径不打扰用户。
+  if (typeof checkStorageAtStartup === "function") {
+    try {
+      await checkStorageAtStartup();
+    } catch (e) {}
+  }
   // 按 YAML 渲染侧栏宽度与展开状态（展开不回调后端，启动宽度已算好）
   if (typeof syncToolPanelFromSettings === "function") {
     try {
@@ -707,7 +743,18 @@ async function boot() {
   }
   // 非管理员：启动 toast 推荐提权（MFT / 系统路径完整性）
   if (state._settings && state._settings.is_admin === false) {
-    toast(t("recommendAdminToast"));
+    toastWarn(t("recommendAdminToast"));
+  }
+  // 设置文件恢复与快照目录不可用：用后端给出的完整句子提示一次
+  const startupWarnings = [];
+  if (state._settings && state._settings.settings_warning) {
+    startupWarnings.push(String(state._settings.settings_warning));
+  }
+  if (state._settings && state._settings.snapshot_dir_warning) {
+    startupWarnings.push(String(state._settings.snapshot_dir_warning));
+  }
+  if (startupWarnings.length) {
+    toastWarn(startupWarnings.join(" "));
   }
 }
 

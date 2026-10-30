@@ -34,17 +34,48 @@ def _yaml_quote(val: str) -> str:
 
 
 def _yaml_unquote(val: str) -> str:
-    """去掉一层引号并还原常见转义。"""
+    """去掉一层引号并逐字符还原转义。
+
+    必须逐字符读取：先替换换行再替换反斜杠会把 ``\\n`` 中的第二个反斜杠提前
+    消费掉，让字面反斜杠加 n 的路径变成真实换行。逐字符处理一次只认一对转义，
+    双反斜杠、转义引号与真实换行都能正确区分，未知转义原样保留。
+    """
     s = (val or "").strip()
+    quoted = False
     if len(s) >= 2 and (
         (s[0] == s[-1] == '"') or (s[0] == s[-1] == "'")
     ):
         s = s[1:-1]
-    return (
-        s.replace("\\n", "\n")
-        .replace('\\"', '"')
-        .replace("\\\\", "\\")
-    )
+        quoted = True
+    if not quoted:
+        # 未加引号的 YAML 标量里反斜杠就是字面字符，不应按转义处理。
+        return s
+    out: list[str] = []
+    i = 0
+    while i < len(s):
+        ch = s[i]
+        if ch != "\\":
+            out.append(ch)
+            i += 1
+            continue
+        if i + 1 >= len(s):
+            out.append("\\")
+            break
+        nxt = s[i + 1]
+        if nxt == "\\":
+            out.append("\\")
+        elif nxt == '"':
+            out.append('"')
+        elif nxt == "n":
+            out.append("\n")
+        elif nxt == "r":
+            out.append("\r")
+        else:
+            # 未知转义保持原样，不能让反斜杠消失。
+            out.append("\\")
+            out.append(nxt)
+        i += 2
+    return "".join(out)
 
 
 def _normalize_model_options(raw) -> list[str]:
@@ -201,6 +232,15 @@ def _normalize_ui_hover_group_min(raw) -> int:
     except (TypeError, ValueError):
         return 2
     return max(0, min(50, n))
+
+
+def _normalize_ui_toast_seconds(raw, default: int, lo: int, hi: int) -> int:
+    """提示停留秒数：夹到 lo-hi，非法回落默认值。"""
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(hi, n))
 
 
 def _normalize_ui_tool_panel_width(raw) -> int:

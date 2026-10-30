@@ -93,24 +93,198 @@ async function copyText(text) {
   }
 }
 
-/** 短暂弹出一条 toast 提示。 */
-let toastTimer = null;
-function toast(msg, isErr = false, durationMs) {
-  const el = $("#toast");
+/** 弹出提示。普通提示自动消失，错误提示保持显示，直到用户点击关闭按钮。 */
+// ---- Toast 提示 ----
+// 普通提示：2 秒起，超过 15 字每多 2 字加 1 秒，最多 20 秒。
+// 警告提示：5 秒起，超过 15 字每多 2 字加 1 秒，最多 30 秒。
+// 错误提示：常驻，只能手动关闭。
+// 起始时长和上限可以在设置页「界面」页签调整，字数阈值和步长固定。
+const TOAST_TIMING = {
+  infoBase: 2000,
+  infoMax: 20000,
+  warnBase: 5000,
+  warnMax: 30000,
+  longText: 15,
+  step: 2,
+};
+
+/** 把设置里的秒数写进提示计时配置，非法值回落到默认秒数。 */
+function applyToastTiming(s) {
+  if (!s) return;
+  const sec = (value, fallback) => {
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0 ? n : fallback;
+  };
+  TOAST_TIMING.infoBase = sec(s.ui_toast_info_base, 2) * 1000;
+  TOAST_TIMING.infoMax = sec(s.ui_toast_info_max, 20) * 1000;
+  TOAST_TIMING.warnBase = sec(s.ui_toast_warn_base, 5) * 1000;
+  TOAST_TIMING.warnMax = sec(s.ui_toast_warn_max, 30) * 1000;
+  if (TOAST_TIMING.infoMax < TOAST_TIMING.infoBase) {
+    TOAST_TIMING.infoMax = TOAST_TIMING.infoBase;
+  }
+  if (TOAST_TIMING.warnMax < TOAST_TIMING.warnBase) {
+    TOAST_TIMING.warnMax = TOAST_TIMING.warnBase;
+  }
+}
+
+function _toastKind(type) {
+  if (type === true || type === "error") return "error";
+  if (type === "warn" || type === "warning") return "warn";
+  return "info";
+}
+
+function _toastDuration(text, kind) {
+  const base = kind === "warn" ? TOAST_TIMING.warnBase : TOAST_TIMING.infoBase;
+  const max = kind === "warn" ? TOAST_TIMING.warnMax : TOAST_TIMING.infoMax;
+  const extra = Math.max(0, String(text || "").length - TOAST_TIMING.longText);
+  const add = Math.floor(extra / TOAST_TIMING.step) * 1000;
+  return Math.min(max, base + add);
+}
+
+function _syncToastRing(el) {
+  const svg = el.querySelector(".toast-ring");
+  const rect = svg && svg.querySelector("rect");
+  if (!svg || !rect) return;
+  const w = Math.max(1, el.clientWidth);
+  const h = Math.max(1, el.clientHeight);
+  svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+  svg.setAttribute("preserveAspectRatio", "none");
+  rect.setAttribute("x", "2");
+  rect.setAttribute("y", "2");
+  rect.setAttribute("width", String(Math.max(1, w - 4)));
+  rect.setAttribute("height", String(Math.max(1, h - 4)));
+  rect.setAttribute("rx", "3");
+  rect.setAttribute("ry", "3");
+  rect.setAttribute("pathLength", "100");
+  rect.setAttribute("stroke-dasharray", "100");
+}
+
+function _dismissToast(el) {
+  if (!el || el._toastLeaving) return;
+  el._toastLeaving = true;
+  if (el._toastRaf) cancelAnimationFrame(el._toastRaf);
+  if (el._toastRO) el._toastRO.disconnect();
+  el.classList.add("toast-leaving");
+  setTimeout(() => {
+    const slot = el.parentElement;
+    if (slot && slot.classList.contains("toast-slot")) slot.remove();
+    else el.remove();
+    _syncToastClear();
+  }, 180);
+}
+
+function _startToastTimer(el) {
+  const duration = el._toastDuration;
+  if (!duration) return;
+  const ring = el.querySelector(".toast-ring rect");
+  let remaining = duration;
+  let last = performance.now();
+  let paused = false;
+  const tick = (now) => {
+    if (!el.isConnected || el._toastLeaving) return;
+    const delta = now - last;
+    last = now;
+    if (!paused) remaining = Math.max(0, remaining - delta);
+    if (ring) {
+      ring.style.strokeDashoffset = String(100 * (1 - remaining / duration));
+    }
+    if (remaining <= 0) {
+      _dismissToast(el);
+      return;
+    }
+    el._toastRaf = requestAnimationFrame(tick);
+  };
+  el._toastRaf = requestAnimationFrame(tick);
+  el.addEventListener("mouseenter", () => {
+    paused = true;
+    last = performance.now();
+  });
+  el.addEventListener("mouseleave", () => {
+    paused = false;
+    last = performance.now();
+  });
+  if (typeof ResizeObserver === "function") {
+    const ro = new ResizeObserver(() => _syncToastRing(el));
+    ro.observe(el);
+    el._toastRO = ro;
+  }
+}
+
+/** 清除当前所有提示。 */
+function hideToast() {
+  const stack = $("#toastStack");
+  if (!stack) return;
+  [...stack.querySelectorAll(".toast")].forEach(_dismissToast);
+  _syncToastClear();
+}
+
+/** 同步“清除全部”按钮：提示超过 4 条时显示。 */
+function _syncToastClear() {
+  const stack = $("#toastStack");
+  const btn = $("#toastClearBtn");
+  if (!stack || !btn) return;
+  btn.classList.toggle("hidden", stack.children.length <= 4);
+}
+
+/**
+ * 显示一条提示。
+ * 第二个参数可以是布尔值（兼容旧调用），也可以是 "info"、"warn"、"error"。
+ */
+function toast(msg, type = "info") {
   const text = String(msg == null ? "" : msg).trim();
   if (!text) return;
-  el.textContent = text;
-  el.classList.toggle("err", isErr);
-  el.classList.remove("hidden");
-  clearTimeout(toastTimer);
-  const ms =
-    durationMs != null
-      ? durationMs
-      : isErr || text.length > 48
-        ? 5200
-        : 2600;
-  toastTimer = setTimeout(() => el.classList.add("hidden"), ms);
+  const stack = $("#toastStack");
+  if (!stack) return;
+  const kind = _toastKind(type);
+  const el = document.createElement("div");
+  el.className = `toast toast-${kind}`;
+  el.setAttribute("role", kind === "error" ? "alert" : "status");
+  el.innerHTML = '<svg class="toast-ring" aria-hidden="true"><rect stroke-dasharray="100"></rect></svg>';
+  const textEl = document.createElement("span");
+  textEl.className = "toast-text";
+  textEl.textContent = text;
+  el.appendChild(textEl);
+  if (kind === "error") {
+    const closeBtn = document.createElement("button");
+    closeBtn.className = "toast-close";
+    closeBtn.type = "button";
+    closeBtn.setAttribute("aria-label", t("close"));
+    closeBtn.title = t("close");
+    closeBtn.textContent = "✕";
+    closeBtn.addEventListener("click", () => _dismissToast(el));
+    el.appendChild(closeBtn);
+  }
+  el._toastKind = kind;
+  el._toastDuration = kind === "error" ? 0 : _toastDuration(text, kind);
+  const slot = document.createElement("div");
+  slot.className = "toast-slot";
+  slot.appendChild(el);
+  stack.appendChild(slot);
+  slot._toastHeight = el.getBoundingClientRect().height;
+  slot.addEventListener("mouseenter", () => {
+    slot.style.minHeight = slot._toastHeight + "px";
+  });
+  slot.addEventListener("mouseleave", () => {
+    slot.style.minHeight = "";
+  });
+  void el.offsetWidth;
+  _syncToastRing(el);
+  el.classList.add("toast-enter");
+  if (kind !== "error") _startToastTimer(el);
+  stack.scrollTop = stack.scrollHeight;
+  _syncToastClear();
 }
+
+/** 显示一条警告提示。 */
+function toastWarn(msg) {
+  toast(msg, "warn");
+}
+
+(function bindToastClearButton() {
+  if (typeof document === "undefined") return;
+  const btn = document.getElementById("toastClearBtn");
+  if (btn) btn.addEventListener("click", hideToast);
+})();
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"]/g, (c) =>

@@ -5,30 +5,45 @@ from __future__ import annotations
 import os
 import subprocess
 
-import webview  # pywebview
-
 from core import applog, i18n, store, fs_delete
 from core.compress import CompressError
 from core.snapshot import SnapshotError
 
-from app.bootstrap import _delete_error_message
+from app import dialogs
+from app.bootstrap import _delete_error_message, _snapshot_dir_error_message
 
 
 class SnapshotsMixin:
     """快照文件与归纳文件夹相关方法。"""
 
-    def list_snapshots(self) -> list[dict]:
-        """返回默认目录（含一层归纳文件夹）下所有快照的摘要（新→旧）。"""
-        return [i.to_dict() for i in store.list_snapshots()]
+    def list_snapshots(self) -> list[dict] | dict:
+        """返回默认目录（含一层归纳文件夹）下所有快照的摘要（新→旧）。
 
-    def list_snapshot_folders(self) -> list[str]:
+        快照目录当前不可用时返回 ``{"error": 可读文案}``，不把空列表当成
+        正常结果，也不让内部异常穿过桥接层。
+        """
+        try:
+            return [i.to_dict() for i in store.list_snapshots()]
+        except store.SnapshotDirUnavailable as exc:
+            return {"error": _snapshot_dir_error_message(exc.reason)}
+        except OSError:
+            return {"error": _snapshot_dir_error_message()}
+
+    def list_snapshot_folders(self) -> list[str] | dict:
         """返回快照根下一层归纳文件夹名（按名称排序）。"""
-        return store.list_snapshot_folders()
+        try:
+            return store.list_snapshot_folders()
+        except store.SnapshotDirUnavailable as exc:
+            return {"error": _snapshot_dir_error_message(exc.reason)}
+        except OSError:
+            return {"error": _snapshot_dir_error_message()}
 
     def create_snapshot_folder(self, name: str) -> dict:
         """在快照根下新建一层归纳文件夹。"""
         try:
             folder = store.create_snapshot_folder(str(name or ""))
+        except store.SnapshotDirUnavailable as exc:
+            return {"error": _snapshot_dir_error_message(exc.reason)}
         except ValueError as exc:
             return {"error": i18n.t(
                 f"文件夹名称无效：{exc}",
@@ -48,6 +63,8 @@ class SnapshotsMixin:
             new_path = store.move_snapshot_to_folder(
                 str(path or ""), folder if folder is not None else ""
             )
+        except store.SnapshotDirUnavailable as exc:
+            return {"error": _snapshot_dir_error_message(exc.reason)}
         except ValueError as exc:
             return {"error": str(exc)}
         except store.StoreError as exc:
@@ -71,6 +88,8 @@ class SnapshotsMixin:
             name = store.rename_snapshot_folder(
                 str(old_name or ""), str(new_name or "")
             )
+        except store.SnapshotDirUnavailable as exc:
+            return {"error": _snapshot_dir_error_message(exc.reason)}
         except ValueError as exc:
             return {"error": i18n.t(
                 f"文件夹名称无效：{exc}",
@@ -105,6 +124,8 @@ class SnapshotsMixin:
                 permanent=bool(permanent),
                 move_out=bool(move_out),
             )
+        except store.SnapshotDirUnavailable as exc:
+            return {"error": _snapshot_dir_error_message(exc.reason)}
         except ValueError as exc:
             return {"error": str(exc)}
         except SnapshotError as exc:
@@ -147,63 +168,50 @@ class SnapshotsMixin:
         return {"items": items, "errors": errors}
 
     def choose_folder(self) -> dict:
-        """弹出原生「选择文件夹」对话框，返回 ``{"path": ...}`` 或空。"""
+        """弹出原生文件夹选择对话框，返回 ``{"path": ...}`` 或空。
+
+        对话框统一经 :mod:`app.dialogs` 打开，异常转成可读错误对象。
+        """
         if self._window is None:
             return {"path": ""}
-        # 兼容新旧 pywebview：优先用新的 FileDialog.FOLDER 枚举。
-        folder_dialog = getattr(
-            getattr(webview, "FileDialog", None), "FOLDER", None
-        )
-        if folder_dialog is None:
-            folder_dialog = webview.FOLDER_DIALOG
-        result = self._window.create_file_dialog(folder_dialog)
-        if not result:
+        try:
+            paths = dialogs.create_file_dialog(self._window, "folder")
+        except dialogs.DialogError:
+            return {"error": i18n.t(
+                "无法打开文件夹选择窗口，请稍后重试。",
+                "Cannot open the folder selection window. Try again later.",
+            )}
+        if not paths:
             return {"path": ""}
-        return {"path": result[0]}
+        return {"path": paths[0]}
 
     def choose_snapshot_files(self) -> dict:
         """弹出原生「打开文件」对话框，多选 ``.db`` / ``.dbz``。
 
         Returns:
-            ``{"paths": [...]}``；取消则为空列表。
+            ``{"paths": [...]}``；取消则为空列表，失败为错误对象。
         """
         if self._window is None:
             return {"paths": []}
-        open_dialog = getattr(
-            getattr(webview, "FileDialog", None), "OPEN", None
-        )
-        if open_dialog is None:
-            open_dialog = getattr(webview, "OPEN_DIALOG", None)
-        if open_dialog is None:
-            return {"error": i18n.t(
-                "当前环境不支持文件选择对话框",
-                "File open dialog is not supported in this environment",
-            )}
         file_types = (
             "Snapshot files (*.db;*.dbz)",
             "All files (*.*)",
         )
         try:
-            result = self._window.create_file_dialog(
-                open_dialog,
+            paths = dialogs.create_file_dialog(
+                self._window,
+                "open",
                 allow_multiple=True,
                 file_types=file_types,
             )
-        except TypeError:
-            # 旧版 pywebview 参数名可能不同
-            try:
-                result = self._window.create_file_dialog(
-                    open_dialog, True, None, file_types
-                )
-            except Exception as exc:  # noqa: BLE001
-                return {"error": str(exc)}
-        except Exception as exc:  # noqa: BLE001
-            return {"error": str(exc)}
-        if not result:
+        except dialogs.DialogError:
+            return {"error": i18n.t(
+                "无法打开文件选择窗口，请稍后重试。",
+                "Cannot open the file selection window. Try again later.",
+            )}
+        if not paths:
             return {"paths": []}
-        # result 可能是 tuple/list
-        paths = [str(p) for p in result if p]
-        return {"paths": paths}
+        return {"paths": list(paths)}
 
     def delete_snapshot(self, path: str, permanent: bool = False) -> dict:
         """删除一个快照文件。

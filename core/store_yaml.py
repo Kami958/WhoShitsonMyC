@@ -22,8 +22,81 @@ from .store_values import (
 )
 
 
+# 自动写入的 settings.yaml 首行。文件以这一行开头时，缺少结尾换行视为截断。
+_SETTINGS_SIGNATURE = "# WhoShitsOnMyC settings"
+
+
+def _parse_settings_text(text: str) -> dict:
+    """把 settings.yaml 文本解析成字典；结构无法解析时抛 ValueError。"""
+    out: dict = {}
+    section: str | None = None
+    for raw in text.splitlines():
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        # 仅接受空格缩进（YAML 惯例）
+        indent = len(raw) - len(raw.lstrip(" "))
+        s = raw.strip()
+        if ":" not in s:
+            raise ValueError("missing colon")
+        key, _, rest = s.partition(":")
+        key = key.strip()
+        if not key:
+            raise ValueError("empty key")
+        val = rest.strip()
+        if indent == 0 and not val:
+            section = key.lower()
+            out.setdefault(section, {})
+            if not isinstance(out[section], dict):
+                out[section] = {}
+            continue
+        if indent == 0 and val:
+            # 旧扁平：顶层 key: value
+            section = None
+            _put_raw_pair(out, key, val)
+            continue
+        if indent > 0:
+            if section is None:
+                _put_raw_pair(out, key, val)
+            else:
+                body = out.setdefault(section, {})
+                if not isinstance(body, dict):
+                    body = {}
+                    out[section] = body
+                _put_raw_pair(body, key, val)
+    return out
+
+
+def _read_settings_yaml(path: str) -> tuple[dict, str]:
+    """读取并解析 settings.yaml，返回 ``(数据, 失败原因)``。
+
+    文件不存在按正常空配置处理，失败原因为空串。读取失败包括无法打开、
+    不是 UTF-8、内容结构无法解析，以及自动写入的文件缺少结尾换行（截断）。
+    失败时数据为空字典，绝不把编码异常抛给模块导入阶段。
+    """
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    except FileNotFoundError:
+        return {}, ""
+    except OSError:
+        return {}, "unreadable"
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return {}, "encoding"
+    if "\x00" in text:
+        return {}, "malformed"
+    try:
+        out = _parse_settings_text(text)
+    except ValueError:
+        return {}, "malformed"
+    if text.startswith(_SETTINGS_SIGNATURE) and not text.endswith("\n"):
+        return {}, "truncated"
+    return out, ""
+
+
 def _load_settings_yaml(path: str) -> dict:
-    """读 settings.yaml，尽量原样收下键值。
+    """读 settings.yaml 并尽量原样收下键值；读取失败返回空字典。
 
     支持::
 
@@ -47,46 +120,8 @@ def _load_settings_yaml(path: str) -> dict:
 
     失败或文件不存在返回空 dict。
     """
-    out: dict = {}
-    try:
-        with open(path, encoding="utf-8") as fh:
-            text = fh.read()
-    except OSError:
-        return out
-
-    section: str | None = None
-    for raw in text.splitlines():
-        if not raw.strip() or raw.lstrip().startswith("#"):
-            continue
-        # 仅接受空格缩进（YAML 惯例）
-        indent = len(raw) - len(raw.lstrip(" "))
-        s = raw.strip()
-        if ":" not in s:
-            continue
-        key, _, rest = s.partition(":")
-        key = key.strip()
-        val = rest.strip()
-        if indent == 0 and not val and key:
-            section = key.lower()
-            out.setdefault(section, {})
-            if not isinstance(out[section], dict):
-                out[section] = {}
-            continue
-        if indent == 0 and val:
-            # 旧扁平：顶层 key: value
-            section = None
-            _put_raw_pair(out, key, val)
-            continue
-        if indent > 0:
-            if section is None:
-                _put_raw_pair(out, key, val)
-            else:
-                body = out.setdefault(section, {})
-                if not isinstance(body, dict):
-                    body = {}
-                    out[section] = body
-                _put_raw_pair(body, key, val)
-    return out
+    data, _reason = _read_settings_yaml(path)
+    return data
 
 
 def _write_settings_yaml(path: str, data: dict) -> None:

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-from core import applog, i18n
+from core import applog, i18n, store
+from core.store_paths import probe_writable_dir
 import os
+import tempfile
+from typing import Any
 from .paths import _RES_DIR
 
 
@@ -15,6 +18,12 @@ _WEBVIEW2_GUID = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
 
 
 _WEBVIEW2_URL = "https://developer.microsoft.com/microsoft-edge/webview2/"
+
+
+# WebView2 用户数据目录名。优先放在当前数据文件夹下，退到系统临时文件夹时用这个固定名字，
+# 关闭隐私模式后登录状态与缓存会持续累积在同一处，目录名带随机后缀会每次重建一份。
+_WEBVIEW_STORAGE_DIRNAME = "webview"
+_WEBVIEW_TEMP_STORAGE_DIRNAME = "wsmc-webview2"
 
 
 def _find_fixed_runtime() -> str | None:
@@ -114,3 +123,101 @@ def _wire_bundled_webview2() -> bool:
         os.environ.setdefault("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER", folder)
         return True
     return False
+
+
+def _webview_storage_path() -> str:
+    """WebView2 用户数据目录：优先数据文件夹下的 webview，再退到系统临时文件夹。
+
+    两处都用写临时文件的探测确认可写；都不可用时返回空串，由 pywebview 用自己
+    的默认位置。临时文件夹不可用正是启动没有任何窗口就退出的一个原因，所以不能
+    不探就直接交给 pywebview 默认处理。
+    """
+    candidates: list[str] = []
+    try:
+        data_dir = store.app_data_dir()
+    except Exception as exc:  # noqa: BLE001 - 取不到数据文件夹时退到临时文件夹
+        applog.exception("app data folder for webview storage failed", exc)
+        data_dir = ""
+    if data_dir:
+        candidates.append(os.path.join(data_dir, _WEBVIEW_STORAGE_DIRNAME))
+    temp_root = os.environ.get("TEMP") or os.environ.get("TMP") or tempfile.gettempdir()
+    if temp_root:
+        candidates.append(os.path.join(temp_root, _WEBVIEW_TEMP_STORAGE_DIRNAME))
+
+    for candidate in candidates:
+        if not probe_writable_dir(candidate):
+            return candidate
+        applog.warn(f"webview storage path not writable | path={candidate}")
+    return ""
+
+
+def _webview_start_failed_message() -> str:
+    """窗口起不来时给用户看的完整提示，不含原始异常文本。"""
+    return i18n.t(
+        (
+            "程序窗口无法启动。请确认 Microsoft Edge WebView2 运行时已经安装，"
+            "并检查系统临时文件夹是否可用，然后重新启动程序。"
+        ),
+        (
+            "The app window could not start. Check that the Microsoft Edge WebView2 "
+            "runtime is installed and that the system temporary folder is usable, "
+            "then restart the app."
+        ),
+    )
+
+
+def _warn_webview_start_failed() -> None:
+    """原生警告框告知窗口无法启动；异常细节只进日志。"""
+    msg = _webview_start_failed_message()
+    title = i18n.t("无法启动窗口", "Cannot start the window")
+    try:
+        import ctypes
+
+        if os.name == "nt":
+            # MB_OK | MB_ICONWARNING
+            ctypes.windll.user32.MessageBoxW(0, msg, title, 0x30)
+        else:
+            applog.warn(msg)
+    except Exception:  # noqa: BLE001 - 提示框失败也只能记日志
+        applog.warn(msg)
+
+
+def _start_webview(pywebview: Any, start_kwargs: dict[str, Any]) -> None:
+    """启动 pywebview 消息循环，参数不兼容时逐级降级，启动失败时给出可读提示。
+
+    降级只针对 TypeError：先去 icon/debug，仍不接受再去 storage_path/private_mode。
+    其它异常直接按启动失败处理，不靠降级重试去掩盖。失败后只记日志和弹提示，
+    不把原始异常文本给用户，也不向外抛，由调用方照常收尾退出。
+    """
+    attempts: list[dict[str, Any]] = [dict(start_kwargs)]
+    without_icon = {
+        k: v for k, v in start_kwargs.items() if k not in ("icon", "debug")
+    }
+    if without_icon != attempts[0]:
+        attempts.append(without_icon)
+    without_storage = {
+        k: v
+        for k, v in without_icon.items()
+        if k not in ("storage_path", "private_mode")
+    }
+    if without_storage != without_icon:
+        attempts.append(without_storage)
+
+    rejected: BaseException | None = None
+    for index, kwargs in enumerate(attempts):
+        try:
+            pywebview.start(**kwargs)
+            return
+        except TypeError as exc:
+            rejected = exc
+            applog.warn(
+                "webview.start rejected parameter set"
+                f" | attempt={index + 1}/{len(attempts)} keys={sorted(kwargs)}"
+            )
+        except Exception as exc:  # noqa: BLE001 - 启动失败不能把原始异常抛给用户
+            applog.exception("webview.start failed", exc)
+            _warn_webview_start_failed()
+            return
+
+    applog.exception("webview.start failed with every parameter set", rejected)
+    _warn_webview_start_failed()

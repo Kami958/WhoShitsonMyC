@@ -28,11 +28,13 @@ from app.bootstrap import (
     _detect_lang,
     _prepare_devtools_without_http_spam,
     _start_temp_sweep,
+    _start_webview,
     _sync_log_level_to_applog,
     _sync_log_sanitize_to_applog,
     _warn_already_running,
     _warn_missing_webview2,
     _webview2_installed,
+    _webview_storage_path,
     _window_title,
     _wire_bundled_webview2,
     _wants_devtools,
@@ -41,20 +43,28 @@ from app.bootstrap import (
 
 def main() -> None:
     """创建窗口并启动应用。"""
-    # 语言 / 主题：settings.yaml 显式写入则用它；语言缺省用系统语言。
-    # 标题栏默认跟 store 主题，避免先按 dark 刷再被前端纠正。
-    # 脱敏 / 日志等级须在 note_startup 之前生效，启动日志才反映真实状态。
-    _sync_log_sanitize_to_applog()
-    _sync_log_level_to_applog()
     applog.note_startup(APP_VERSION)
     # 单实例检测须在临时文件清扫之前：第二个实例直接退出，
     # 不去碰第一个实例正在使用的解压临时文件。
     if not _acquire_single_instance():
         applog.warn("another instance is already running; exiting")
         i18n.set_lang(_detect_lang())
-        if not _activate_existing_window():
-            _warn_already_running()
+        # 已有实例：先告知本次启动没有继续，再尝试把旧窗口唤回。
+        # 找到窗口就静默退出会让用管理员方式启动的用户以为旧窗口已经是管理员权限。
+        _warn_already_running()
+        _activate_existing_window()
         return
+    # 先确定当前运行账户的数据目录并验证可以访问，再读取设置。
+    # 验证失败时不创建目录、不写设置，窗口照常建立，由启动恢复界面说明
+    # 路径、原因和下一步；扫描与快照在存储恢复前保持停用。
+    storage = store.initialize_storage()
+    _sync_log_sanitize_to_applog()
+    _sync_log_level_to_applog()
+    if not storage.get("ok"):
+        applog.warn(
+            "app data folder unavailable at startup"
+            f" | reason={storage.get('reason') or 'unknown'}"
+        )
     # 兜底清掉上次异常退出（被强杀 / 崩溃）遗留的解压临时文件；
     # 正常退出由 _shutdown() 自删；设置页「临时文件清理」可整体关闭。
     if store.get_temp_cleanup():
@@ -62,10 +72,15 @@ def main() -> None:
     # 语言在 common.lang（旧扁平顶层 lang 亦经 _common_view 合并），
     # 不能写 ``"lang" in _disk``——分节 YAML 顶层只有 common/ai，会误判成「无语言」
     # 从而用系统 UI 语言覆盖配置文件。
-    _disk = store._load_settings_yaml(store.settings_path())  # noqa: SLF001
+    # 数据文件夹还不可用时读不到设置文件，按空配置继续启动。
+    try:
+        _disk = store.load_settings_document()
+    except OSError as exc:
+        applog.exception("read settings at startup failed", exc)
+        _disk = {}
     _common = store._common_view(_disk) if isinstance(_disk, dict) else {}  # noqa: SLF001
     if "lang" in _common:
-        # import store 时已 apply；此处只同步运行时 i18n
+        # initialize_storage 已把设置读入 store；此处只同步运行时 i18n
         i18n.set_lang(store.get_lang())
     else:
         detected = _detect_lang()
@@ -197,7 +212,16 @@ def main() -> None:
         window.events.loaded += _on_loaded
     except Exception:  # noqa: BLE001
         pass
-    start_kwargs = {}
+    start_kwargs: dict = {
+        # 非隐私模式 + 固定数据目录：默认设置会把 WebView2 数据放进临时目录，
+        # 临时目录不可用或解包失败时进程在没有任何窗口的情况下就退出。
+        "private_mode": False,
+    }
+    storage_path = _webview_storage_path()
+    if storage_path:
+        start_kwargs["storage_path"] = storage_path
+    else:
+        applog.warn("webview storage path unavailable; using pywebview default")
     if os.path.exists(_ICON_PATH):
         start_kwargs["icon"] = _ICON_PATH  # 任务栏/GUI 图标
     # debug=True：WebView2 可 F12 / 右键检查；仅开发排查时开
@@ -206,15 +230,7 @@ def main() -> None:
         start_kwargs["debug"] = True
         applog.info("DevTools enabled (--devtools / WSMC_DEVTOOLS)")
     try:
-        try:
-            webview.start(**start_kwargs)
-        except TypeError:
-            # 个别后端不接受 icon/debug 组合，逐步降级
-            start_kwargs.pop("icon", None)
-            try:
-                webview.start(**start_kwargs)
-            except TypeError:
-                webview.start()
+        _start_webview(webview, start_kwargs)
     finally:
         # 消息循环退出（窗口关闭）后先关 Diff、再删临时解压文件，
         # 必须赶在 atexit 之前：那时 sqlite 句柄已释放，删除才会成功。

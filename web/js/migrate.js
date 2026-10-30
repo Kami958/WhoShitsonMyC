@@ -5,6 +5,7 @@
 const _linkMgr = {
   records: [],
   restoring: "",
+  registryWarned: false,
 };
 let _linkHintTimer = null;
 // 再次迁移弹窗的状态：当前记录、旧迁移的处理方式；输入校验用独立的防抖计时器
@@ -80,6 +81,10 @@ function wireLinkUi() {
   if (srcBrowse) {
     srcBrowse.onclick = async () => {
       const res = await state.api.choose_folder();
+      if (res && res.error) {
+        toast(res.error, true);
+        return;
+      }
       if (res && res.path) {
         const si = $("#migrateSourceInput");
         if (si) si.value = res.path;
@@ -91,6 +96,10 @@ function wireLinkUi() {
   if (dstBrowse) {
     dstBrowse.onclick = async () => {
       const res = await state.api.choose_folder();
+      if (res && res.error) {
+        toast(res.error, true);
+        return;
+      }
       if (res && res.path) {
         // 选的是存放位置的父目录，自动拼上访问路径的目录名作为完整存放位置（可再编辑）
         const si = $("#migrateSourceInput");
@@ -134,6 +143,10 @@ function wireLinkUi() {
   if (rmBrowse) {
     rmBrowse.onclick = async () => {
       const res = await state.api.choose_folder();
+      if (res && res.error) {
+        toast(res.error, true);
+        return;
+      }
       if (!res || !res.path) return;
       // 选的是存放位置的父目录，自动拼上旧迁移的目录名作为完整存放位置（可再编辑）
       const rec = _remigrate.rec;
@@ -526,6 +539,10 @@ async function refreshLinkList(force) {
     return;
   }
   _linkMgr.records = (res && res.links) || [];
+  if (res && res.warning && !_linkMgr.registryWarned) {
+    _linkMgr.registryWarned = true;
+    toastWarn(String(res.warning));
+  }
   renderLinkList();
 }
 
@@ -679,7 +696,7 @@ async function onLinkAction(act, rec) {
     return;
   }
   if (act === "restore") {
-    if (_linkMgr.restoring) { toast(t("linkRestoreBusy"), true); return; }
+    if (_linkMgr.restoring) { toastWarn(t("linkRestoreBusy")); return; }
     // 备份早被删掉的记录没有备份可处理：文案不提备份，也不给彻底删除的勾选
     const hasBackup = !!(rec.backup && rec.backup_exists);
     const ok = await showConfirmDialog({
@@ -856,6 +873,10 @@ function updateLinkImportOk() {
 async function pickLinkImportPath(which) {
   if (!state.api) return;
   const res = await state.api.choose_folder();
+  if (res && res.error) {
+    toast(res.error, true);
+    return;
+  }
   if (!res || !res.path) return;
   const input = $(which === "target" ? "#linkImportTarget" : "#linkImportPath");
   if (input) {
@@ -984,7 +1005,7 @@ async function startRemigrate() {
   if (!rec || !state.api) return;
   const dest = String(($("#remigrateDestInput") || {}).value || "").trim();
   if (!dest) {
-    toast(t("migrateNeedDest"), true);
+    toastWarn(t("migrateNeedDest"));
     return;
   }
   let res;
@@ -1013,7 +1034,7 @@ async function startRemigrate() {
   closeRemigrateDialog();
   // 队列串行执行，同一时间只允许一个目录迁移在跑
   if (_migrateQueue.running || _migrateQueue.activeId) {
-    toast(t("migrateAgainBusy"), true);
+    toastWarn(t("migrateAgainBusy"));
     return;
   }
   _migrateQueue.items.push({
@@ -1330,7 +1351,17 @@ function finishQueueItem(it, payload) {
       it.flashUntil = Date.now() + QUEUE_DONE_FLASH_MS;
       const tail = migrateBackupTail(payload, it);
       const notes = [tail, migrateLinkNote(payload)].filter(Boolean);
-      toast(t("queueTaskDone", it.source, notes.join(" · ")));
+      const linkFailed = payload && payload.link_registered === false;
+      const historyFailed = payload && payload.history_saved === false;
+      if (linkFailed && historyFailed) {
+        toastWarn(t("migrateDoneRegistryAndHistoryFailed"));
+      } else if (linkFailed) {
+        toastWarn(t("migrateDoneLinkRegistryFailed"));
+      } else if (historyFailed) {
+        toastWarn(t("migrateDoneHistoryFailed"));
+      } else {
+        toast(t("queueTaskDone", it.source, notes.join(" · ")));
+      }
       // 结果已经落到右下角提示与迁移历史里，队列里的这一项留一会儿就撤掉
       scheduleQueueItemRemoval(it);
     } else {
@@ -1478,7 +1509,7 @@ async function openMigrateEdit(id) {
 async function enqueueMigrateItem() {
   const v = migrateFormValues();
   if (!v.source || !v.dest) {
-    toast(t("migrateNeedBoth"), true);
+    toastWarn(t("migrateNeedBoth"));
     return;
   }
   let res;
@@ -1523,7 +1554,7 @@ async function saveMigrateEdit() {
   if (!it) return;
   const v = migrateFormValues();
   if (!v.source || !v.dest) {
-    toast(t("migrateNeedBoth"), true);
+    toastWarn(t("migrateNeedBoth"));
     return;
   }
   let res;
@@ -1591,7 +1622,7 @@ async function startMigrateQueue() {
   }
   const waiting = _migrateQueue.items.filter((it) => it.status === "pending");
   if (!waiting.length) {
-    toast(t("queueNothingToRun"), true);
+    toast(t("queueNothingToRun"));
     return;
   }
   const ok = await showConfirmDialog({
@@ -1961,7 +1992,10 @@ function onMigrateDirDone(payload) {
   const left = payload && payload.ok ? String(payload.old_target_left || "") : "";
   // 成功时刷新「已迁移」列表与历史；旧迁移的路径由列表刷新带回来，不用再从事件里补写
   refreshLinkList(true);
-  if (left) toast(t("migrateAgainOldLeft", left));
+  const saveFailed =
+    payload &&
+    (payload.link_registered === false || payload.history_saved === false);
+  if (left && !saveFailed) toastWarn(t("migrateAgainOldLeft", left));
 }
 
 // ---- 目录还原（后台线程，进度经 migrate-dir-restore-* 事件推送）----
@@ -2199,6 +2233,8 @@ function updateHistoryCount(n) {
   if (count) count.textContent = n ? `(${n})` : "";
 }
 
+let _historyRecoveryWarned = false;
+
 async function refreshMigrationHistory() {
   if (!state.api || !state.api.list_migration_history) return;
   let res;
@@ -2207,7 +2243,14 @@ async function refreshMigrationHistory() {
   } catch (e) {
     return;
   }
-  if (res && res.error) return;
+  if (res && res.error) {
+    toast(String(res.error), true);
+    return;
+  }
+  if (res && res.warning && !_historyRecoveryWarned) {
+    _historyRecoveryWarned = true;
+    toastWarn(String(res.warning));
+  }
   _historyItems = (res && res.history) || [];
   renderMigrationHistory();
 }
@@ -2263,7 +2306,7 @@ async function refreshMigrationHistoryCount() {
   } catch (e) {
     return;
   }
-  const items = (res && res.history) || [];
+  const items = res && Array.isArray(res.history) ? res.history : [];
   updateHistoryCount(items.length);
 }
 

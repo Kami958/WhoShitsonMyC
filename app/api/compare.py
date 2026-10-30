@@ -438,13 +438,13 @@ class CompareMixin:
         except OSError as exc:
             applog.exception("delete_path OSError", exc)
             return {
-                "error": i18n.t(f"删除失败：{exc}", f"Delete failed: {exc}"),
+                "error": _delete_error_message("os"),
                 "code": "os",
             }
         except Exception as exc:  # noqa: BLE001
             applog.exception("delete_path failed", exc)
             return {
-                "error": i18n.t(f"删除失败：{exc}", f"Delete failed: {exc}"),
+                "error": _delete_error_message("fail"),
                 "code": "fail",
             }
         applog.info(f"delete_path ok | permanent={bool(permanent)}")

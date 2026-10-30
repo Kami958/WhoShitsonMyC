@@ -754,7 +754,7 @@ async function _aiShowProposeDialog(batches) {
 
   const total = mergedItems.length;
   if (typeof showPendingChecklistDialog !== "function") {
-    toast(t("aiProposeCardResultCancelled"), true);
+    toast(t("aiProposeCardResultCancelled"));
     _aiContinueTools(toolCallIds, {
       status: "cancelled",
       accepted: 0,
@@ -776,7 +776,7 @@ async function _aiShowProposeDialog(batches) {
     return;
   }
   if (!selected.length) {
-    toast(t("aiProposeCardEmpty"), true);
+    toast(t("aiProposeCardEmpty"));
     const msg = t("aiProposeCardResultCancelled");
     _aiContinueTools(toolCallIds, {
       status: "cancelled",
@@ -1092,7 +1092,7 @@ async function _aiStartCleanupWithPaths(opts) {
     return false;
   }
   if (_ai.streaming || _ai.awaitingTools) {
-    toast(t("aiCleanupBusy"), true);
+    toastWarn(t("aiCleanupBusy"));
     return false;
   }
 
@@ -1154,7 +1154,7 @@ async function startCompareCleanupFromNode(node) {
     return;
   }
   if (!state.oldPath || !state.newPath) {
-    toast(t("aiCleanupNeedCompare"), true);
+    toastWarn(t("aiCleanupNeedCompare"));
     return;
   }
 
@@ -1264,7 +1264,7 @@ function openDiskCleanupSnapPicker(snaps, opts) {
   const options = opts || {};
   const list = Array.isArray(snaps) ? snaps : [];
   if (!list.length) {
-    toast(t("diskCleanupNoSnaps"), true);
+    toast(t("diskCleanupNoSnaps"));
     return;
   }
   if (list.length === 1 && !options.forceList) {
@@ -1314,7 +1314,7 @@ async function startDiskCleanupFromSnapshot(snap) {
 async function pickDiskCleanupSnapshotFromList() {
   const snaps = Array.isArray(state.snapshots) ? state.snapshots.slice() : [];
   if (!snaps.length) {
-    toast(t("diskCleanupNoSnaps"), true);
+    toast(t("diskCleanupNoSnaps"));
     return;
   }
   openDiskCleanupSnapPicker(snaps, { forceList: true });
@@ -1332,10 +1332,14 @@ async function pickDiskCleanupFolder() {
     toast(String(e && e.message ? e.message : e) || t("diskCleanupStartFail"), true);
     return;
   }
+  if (res && res.error) {
+    toast(res.error, true);
+    return;
+  }
   if (!res || !res.path) return;
   const matches = _aiSnapshotsMatchingRoot(res.path);
   if (!matches.length) {
-    toast(t("diskCleanupNoSnapForFolder"), true);
+    toast(t("diskCleanupNoSnapForFolder"));
     return;
   }
   if (matches.length === 1) {
@@ -1372,7 +1376,7 @@ async function continueCompareCleanup() {
     return;
   }
   if (_ai.streaming || _ai.awaitingTools) {
-    toast(t("aiCleanupBusy"), true);
+    toastWarn(t("aiCleanupBusy"));
     return;
   }
   const res = await callModule("ai", "next_compare_cleanup", {
@@ -1437,7 +1441,7 @@ async function _aiStartAsk(question, opts) {
       _ai.enabled = !!cfg.enabled;
       refreshAiSideEntry();
       if (!cfg.enabled) {
-        toast(t("aiNeedEnable"), true);
+        toastWarn(t("aiNeedEnable"));
         return;
       }
     }
@@ -1487,8 +1491,8 @@ async function _aiStartAsk(question, opts) {
       const row = _ai.bubbleEl.parentElement;
       if (row) row.classList.remove("ai-msg-pending");
     }
-    if (res.need_enable) toast(t("aiNeedEnable"), true);
-    else if (res.need_consent) toast(t("aiNeedConsent"), true);
+    if (res.need_enable) toastWarn(t("aiNeedEnable"));
+    else if (res.need_consent) toastWarn(t("aiNeedConsent"));
     else toast(res.error, true);
     _ai.requestId = "";
     _ai.bubbleEl = null;
@@ -2257,7 +2261,7 @@ async function fetchAiModels() {
     _ai.modelOptions = models.slice();
     _aiRefreshModelSelects(models, current);
     if (!models.length) {
-      toast(t("aiFetchModelsEmpty"));
+      toastWarn(t("aiFetchModelsEmpty"));
       return;
     }
     toast(t("aiFetchModelsOk", models.length));
@@ -2293,7 +2297,7 @@ async function testAiConnection() {
     }
     const reply = String((res && res.preview) || "").trim();
     if (reply) toast(t("aiTestOkWithReply", reply));
-    else toast(t("aiTestEmptyReply"));
+    else toastWarn(t("aiTestEmptyReply"));
   } catch (e) {
     _aiToastError(String(e && e.message ? e.message : e));
   } finally {

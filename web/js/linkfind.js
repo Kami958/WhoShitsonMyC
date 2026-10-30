@@ -128,6 +128,10 @@ function closeLinkFindDialog() {
 async function pickLinkFindPath() {
   if (!state.api) return;
   const res = await state.api.choose_folder();
+  if (res && res.error) {
+    toast(res.error, true);
+    return;
+  }
   if (!res || !res.path) return;
   const input = document.getElementById("linkFindPath");
   if (input) input.value = res.path;
@@ -442,7 +446,11 @@ async function runLinkFindImportChecked() {
   const imported = (res && res.imported) || [];
   const failed = (res && res.failed) || [];
   if (imported.length) toast(t("linkImportDone", imported.length));
-  if (failed.length) toast(failed[0].error || t("linkImportFail"), true);
+  if (failed.length) {
+    const msg = failed[0].error || t("linkImportFail");
+    if (imported.length) toastWarn(msg);
+    else toast(msg, true);
+  }
   if (!imported.length) return;
   await refreshLinkList();
   if (_linkFind.result) renderLinkFindResult(_linkFind.result);

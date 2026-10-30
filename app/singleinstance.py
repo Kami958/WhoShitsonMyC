@@ -78,16 +78,29 @@ _single_instance_handle = None
 
 
 def _warn_already_running() -> None:
-    """已有实例但找不到其窗口（可能仍在启动中）时弹原生提示。"""
+    """已有实例时弹原生提示：本次启动没有继续，且不改变已有窗口的权限。
+
+    找到旧窗口能唤回也不能静默退出：用户以管理员方式重新启动时，看到的旧窗口
+    仍是非管理员权限，没有提示会让人以为权限已经跟着改变。
+    """
     msg = i18n.t(
-        "WhoShitsOnMyC 已经在运行，请查看任务栏中的已有窗口。",
-        "WhoShitsOnMyC is already running; see the existing window in the taskbar.",
+        (
+            "WhoShitsOnMyC 已经在运行，本次启动没有继续。\n\n"
+            "已有窗口的权限不会因为本次启动而改变。如果需要在管理员权限下使用，"
+            "请先关闭已有窗口，再重新启动程序。"
+        ),
+        (
+            "WhoShitsOnMyC is already running, so this launch did not continue.\n\n"
+            "This launch does not change the permissions of the existing window. "
+            "If you need administrator rights, close the existing window first and "
+            "then start the app again."
+        ),
     )
     title = "WhoShitsOnMyC"
     try:
         import ctypes
 
-        # MB_OK | MB_ICONINFORMATION
-        ctypes.windll.user32.MessageBoxW(0, msg, title, 0x40)
+        # MB_OK | MB_ICONWARNING
+        ctypes.windll.user32.MessageBoxW(0, msg, title, 0x30)
     except Exception:  # noqa: BLE001
         applog.warn(f"already running (MessageBox failed): {msg}")

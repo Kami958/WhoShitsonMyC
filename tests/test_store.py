@@ -745,15 +745,29 @@ def test_apply_settings_migrates_snapshots(tmp_path):
     assert events[-1]["done"] == 2 and events[-1]["moved"] == 2
     assert os.path.isfile(settings_path())
 
-    # 目标已有同名 → 跳过
-    c = src / "c.db"
-    _write(str(c), "D:\\", 50, when=2.0)
-    (dst / "c.db").write_bytes(b"existing")
+    # 目标已有同名且大小一致 → 跳过，源文件保留
+    same = src / "same.db"
+    _write(str(same), "D:\\", 50, when=2.0)
+    (dst / "same.db").write_bytes(same.read_bytes())
     store._snapshot_dir = str(src)
     out2 = apply_settings({"snapshot_dir": str(dst)})
     assert out2["migrate"]["skipped"] >= 1
+    assert (dst / "same.db").read_bytes() == same.read_bytes()
+    assert same.is_file()
+
+    # 目标已有同名但大小不一致 → 改名后并存，目标文件不被覆盖
+    c = src / "c.db"
+    _write(str(c), "D:\\", 50, when=2.0)
+    c_bytes = c.read_bytes()
+    (dst / "c.db").write_bytes(b"existing")
+    store._snapshot_dir = str(src)
+    out3 = apply_settings({"snapshot_dir": str(dst)})
+    assert out3["migrate"]["moved"] >= 1
+    assert out3["migrate"]["failed"] == 0
     assert (dst / "c.db").read_bytes() == b"existing"
-    assert c.is_file()  # 跳过则源文件保留
+    renamed = dst / "c (2).db"
+    assert renamed.read_bytes() == c_bytes
+    assert not c.exists()
 
 
 def test_apply_loaded_empty_keeps_defaults():
@@ -835,6 +849,42 @@ def test_apply_settings_tool_panel_keys():
     assert store.get_tool_panel_width() == 640
 
 
+def test_apply_settings_ui_toast_timing():
+    """提示停留时间写入后返回；越界值收拢，上限不低于起始值。"""
+    res = apply_settings(
+        {
+            "ui_toast_info_base": 3,
+            "ui_toast_info_max": 15,
+            "ui_toast_warn_base": 7,
+            "ui_toast_warn_max": 40,
+        }
+    )
+    assert res["ui_toast_info_base"] == 3
+    assert res["ui_toast_info_max"] == 15
+    assert res["ui_toast_warn_base"] == 7
+    assert res["ui_toast_warn_max"] == 40
+
+    store.reload_settings_from_disk()
+    again = store.settings_dict()
+    assert again["ui_toast_info_base"] == 3
+    assert again["ui_toast_info_max"] == 15
+    assert again["ui_toast_warn_base"] == 7
+    assert again["ui_toast_warn_max"] == 40
+
+    res = apply_settings(
+        {
+            "ui_toast_info_base": 99,
+            "ui_toast_info_max": 1,
+            "ui_toast_warn_base": 0,
+            "ui_toast_warn_max": 999,
+        }
+    )
+    assert res["ui_toast_info_base"] == 20
+    assert res["ui_toast_info_max"] == 20
+    assert res["ui_toast_warn_base"] == 1
+    assert res["ui_toast_warn_max"] == 120
+
+
 def test_migrate_tool_panel_state_folds_width_closed():
     store.set_window_size(1200, 800, persist=False)
     store.migrate_tool_panel_state(False, 340)
@@ -902,3 +952,107 @@ def test_pinned_snapshots_roundtrip(tmp_path):
     assert store.get_pinned_snapshots() == [a]
     reset_settings_to_defaults(lang="en")
     assert store.get_pinned_snapshots() == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        r"D:\new\snaps",
+        r"C:\Users\name\data",
+        r"D:\normal\path",
+        r"D:\notes",
+        "第一行\n第二行\n第三行",
+        '路径里包含 "双引号" 的文本',
+        r"D:\folder" + "\\",
+        r"D:\new\snaps" + "\n真实换行\n" + r"尾段\normal",
+        r"C:\path\qunknown",
+    ],
+)
+def test_yaml_quote_unquote_roundtrip(text):
+    """字面反斜杠、真实换行、双引号与未知转义必须原样往返。"""
+    from core.store_values import _yaml_quote, _yaml_unquote
+
+    encoded = _yaml_quote(text)
+    assert encoded.startswith('"') and encoded.endswith('"')
+    assert _yaml_unquote(encoded) == text
+
+
+def test_yaml_unquote_keeps_unknown_escape():
+    from core.store_values import _yaml_unquote
+
+    assert _yaml_unquote(r'"C:\path\qtest"') == r"C:\path\qtest"
+    assert _yaml_unquote(r'"C:\path\temp"') == r"C:\path\temp"
+    # 未加引号的手写路径也按字面读取，不再把其中的反斜杠按转义消费。
+    assert _yaml_unquote(r"C:\path\normal") == r"C:\path\normal"
+
+
+def test_settings_yaml_snapshot_dir_backslash_roundtrip(tmp_path):
+    """settings.yaml 里的 Windows 路径读回后不能被拆成换行。"""
+    if os.name != "nt":
+        pytest.skip("Windows 路径格式")
+    paths = [
+        r"D:\new\snaps",
+        r"C:\Users\name\data",
+        r"D:\normal\path",
+        r"D:\notes",
+        r"D:\trailing" + "\\",
+    ]
+    for idx, expected in enumerate(paths):
+        conf = tmp_path / f"settings-{idx}.yaml"
+        _write_settings_yaml(
+            str(conf),
+            {"scan_workers": 4, "snapshot_dir": expected},
+        )
+        loaded = _load_settings_yaml(str(conf))
+        assert loaded["common"]["snapshot_dir"] == expected
+        _apply_loaded(loaded)
+        assert get_snapshot_dir_configured() == os.path.abspath(expected)
+
+
+def test_migrate_data_root_counts_unreadable_source(tmp_path, monkeypatch):
+    """旧目录里的文件存在但读不到时计为失败，不能静默当成零个文件。"""
+    from core import store_paths
+
+    src = tmp_path / "old"
+    dst = tmp_path / "new"
+    src.mkdir()
+    dst.mkdir()
+    (src / "settings.yaml").write_text("common: {}\n", encoding="utf-8")
+    real_stat = os.stat
+
+    def fake_stat(path, *args, **kwargs):
+        if os.path.basename(str(path)) == "settings.yaml":
+            raise PermissionError("denied")
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(store_paths.os, "stat", fake_stat)
+    result = store_paths.migrate_data_root(
+        str(src), str(dst), ("settings.yaml",)
+    )
+    assert result["moved"] == 0
+    assert result["failed"] >= 1
+    assert result["errors"]
+    monkeypatch.undo()
+    assert (src / "settings.yaml").is_file()
+    assert not (dst / "settings.yaml").exists()
+
+
+def test_migrate_data_root_counts_unreadable_snapshot_dir(tmp_path, monkeypatch):
+    """旧快照目录 stat 不到时计为失败，不能当成没有快照。"""
+    from core import store_paths
+
+    src = tmp_path / "old"
+    dst = tmp_path / "new"
+    (src / "snapshots").mkdir(parents=True)
+    dst.mkdir()
+    real_stat = os.stat
+
+    def fake_stat(path, *args, **kwargs):
+        if os.path.basename(str(path)) == "snapshots":
+            raise PermissionError("denied")
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(store_paths.os, "stat", fake_stat)
+    result = store_paths.migrate_data_root(str(src), str(dst), ())
+    assert result["failed"] >= 1
+    assert result["errors"]

@@ -8,6 +8,7 @@ import time
 
 from core import applog, i18n, store
 from core.compress import CompressError, compress_db
+from app.bootstrap import _data_dir_unavailable_message, _snapshot_dir_error_message
 from core.scanner import ScanCancelled, scan_to_snapshot
 from core.timing_probe import start_scan_timer
 
@@ -31,6 +32,18 @@ class ScanMixin:
         if not os.path.isdir(root):
             return {"error": i18n.t(
                 f"目录不存在：{root}", f"Folder does not exist: {root}")}
+        status = store.storage_status()
+        if status.get("snapshot_dir_unavailable"):
+            return {
+                "error": _snapshot_dir_error_message(
+                    str(status.get("reason") or "")
+                )
+            }
+        if not status.get("ok"):
+            return {"error": _data_dir_unavailable_message(
+                str(status.get("path") or ""),
+                str(status.get("reason") or ""),
+            )}
 
         self._cancel.clear()
         # 不记录 root 路径（隐私）；只记并发度等元数据。
@@ -53,8 +66,8 @@ class ScanMixin:
 
     def _run_scan(self, root: str, follow_symlinks: bool) -> None:
         """后台线程体：执行扫描、回报进度、发终态事件。"""
-        db_path = store.new_snapshot_path(root)
-        final_path = db_path
+        db_path = ""
+        final_path = ""
         workers = store.get_scan_workers()
         do_compress = store.get_compress_snapshots()
         # 整次扫描墙钟（含可选压缩），用于完成提示「用时」
@@ -63,6 +76,31 @@ class ScanMixin:
         timer = start_scan_timer(
             root=root, workers=workers, compress_enabled=do_compress
         )
+
+        def discard_partial() -> None:
+            """扫描未完成时丢弃半成品；清理失败不能盖住真正的扫描错误。"""
+            if not db_path:
+                return
+            try:
+                store.delete_snapshot(db_path, permanent=True)
+            except Exception as exc:  # noqa: BLE001
+                applog.exception("discard partial snapshot failed", exc)
+
+        # 生成快照路径也必须在 try 内：数据目录不可创建时先发 scan-error，
+        # 让前端关闭扫描遮罩；不能让扫描线程静默死亡。
+        try:
+            db_path = store.new_snapshot_path(root)
+            final_path = db_path
+        except Exception as exc:  # noqa: BLE001
+            applog.exception("create snapshot path failed", exc)
+            timer.finish(status="error")
+            self._emit("scan-error", {
+                "message": i18n.t(
+                    "无法创建快照文件。请确认快照存放目录可用，或在设置中选择其他文件夹后重试。",
+                    "Cannot create the snapshot file. Check that the snapshot storage folder is usable, or choose another folder in Settings and try again.",
+                )
+            })
+            return
 
         # 扫描线程内再兜底节流一层（scanner 已节流；压缩阶段等直接 emit 不受影响）
         _prog_lock = threading.Lock()
@@ -143,12 +181,12 @@ class ScanMixin:
                     )
                     return
         except ScanCancelled:
-            store.delete_snapshot(db_path, permanent=True)  # 丢弃不完整快照
+            discard_partial()  # 丢弃不完整快照
             timer.finish(status="cancelled")
             applog.info("Scan cancelled")
             self._emit("scan-cancelled", {})
         except Exception as exc:  # noqa: BLE001 - 兜底，任何异常都不该让线程静默死掉
-            store.delete_snapshot(db_path, permanent=True)
+            discard_partial()
             # 不写扫描 root / 当前路径，避免隐私与日志膨胀
             applog.exception("Scan failed", exc)
             timer.finish(status="error")
