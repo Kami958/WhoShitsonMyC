@@ -79,7 +79,7 @@ function wireEvents() {
       }
     });
   }
-  $("#settingsCloseBtn").onclick = closeSettings;
+  $("#settingsCloseBtn").onclick = closeSettingsDiscarding;
   // 「完成」才统一提交；✕ / Esc 关闭丢弃草稿（点遮罩不关闭）
   $("#settingsDoneBtn").onclick = () => applySettingsAndClose();
   document.querySelectorAll(".settings-tab").forEach((btn) => {
@@ -94,12 +94,6 @@ function wireEvents() {
     };
   });
   // 控件只改草稿，不写后端
-  const workerSel = $("#workerSel");
-  if (workerSel) {
-    workerSel.onchange = (e) => {
-      if (_settingsDraft) _settingsDraft.scan_workers = Number(e.target.value) || 1;
-    };
-  }
   const compressChk = $("#compressChk");
   if (compressChk) {
     compressChk.onchange = (e) => {
@@ -114,6 +108,9 @@ function wireEvents() {
   }
   const uiThemeSel = $("#uiThemeSel");
   if (uiThemeSel) uiThemeSel.onchange = onUiThemeChange;
+  for (const el of document.querySelectorAll('input[name="sizeSource"]')) {
+    el.onchange = onSizeSourceChange;
+  }
   const uiParentBgChk = $("#uiParentBgChk");
   if (uiParentBgChk) {
     uiParentBgChk.onchange = (e) => {
@@ -489,7 +486,7 @@ function wireEvents() {
       }
       const so = $("#settingsOverlay");
       if (so && !so.classList.contains("hidden")) {
-        closeSettings();
+        closeSettingsDiscarding();
         return;
       }
       // 没有弹窗要关时才轮到多选的连按两下 Esc
@@ -700,6 +697,41 @@ function wireSidebarResizer() {
 
 // ---- 启动 ----
 
+/** 启动时检查上次迁移是否停在切换窗口，给出恢复入口。 */
+async function checkIncompleteMigrations() {
+  if (!state.api || typeof state.api.list_incomplete_migrations !== "function") return;
+  let entries = [];
+  try {
+    const res = await state.api.list_incomplete_migrations();
+    entries = (res && res.entries) || [];
+  } catch (e) {
+    return;
+  }
+  if (!entries.length) return;
+  const entry = entries[0] || {};
+  const src = String(entry.src || "");
+  const aside = String(entry.aside || "");
+  const ok = await showConfirmDialog({
+    title: t("migrationRecoveryTitle"),
+    message: t("migrationRecoveryMessage", src, aside),
+    okText: t("migrationRecoveryRestore"),
+  });
+  if (!ok) return;
+  try {
+    const res = await state.api.recover_incomplete_migration(
+      String(entry.id || ""),
+      "restore"
+    );
+    if (res && res.ok) {
+      toast(t("migrationRecoveryDone"));
+    } else {
+      toast(t("migrationRecoveryFailed"), "warn");
+    }
+  } catch (e) {
+    toast(t("migrationRecoveryFailed"), "warn");
+  }
+}
+
 async function boot() {
   state.api = window.pywebview.api;
   // 首屏仅用 localStorage 占位；权威主题/语言以 settings.yaml（get_settings）为准
@@ -729,6 +761,7 @@ async function boot() {
     } catch (e) {}
   }
   await loadSettings();
+  await checkIncompleteMigrations();
   // 数据目录只在当前运行账户不能使用时才进入恢复流程；正常路径不打扰用户。
   if (typeof checkStorageAtStartup === "function") {
     try {
@@ -755,6 +788,13 @@ async function boot() {
   }
   if (startupWarnings.length) {
     toastWarn(startupWarnings.join(" "));
+  }
+  // 性能参数还没测过时提示去做一次，用户勾过不再提醒就不再弹
+  if (typeof wirePerfPromptUi === "function") wirePerfPromptUi();
+  if (typeof maybeShowPerfPrompt === "function") {
+    try {
+      maybeShowPerfPrompt();
+    } catch (e) {}
   }
 }
 

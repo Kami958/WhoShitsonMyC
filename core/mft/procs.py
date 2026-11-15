@@ -61,5 +61,6 @@ def default_mft_workers(preferred: int | None = None) -> int:
 _RECORDS_PER_PROC = 50_000
 
 
-# 进程数软上限：超线程收益薄，再多 spawn/IPC 易倒贴
-_MAX_PROCS = 16
+# 进程数上限：与逻辑核数一致。进程数超过核数只会增加切换与内存开销，没有速度收益，
+# 因此核数就是可用的天花板，不再另设固定数值。
+_MAX_PROCS = max(2, os.cpu_count() or 8)

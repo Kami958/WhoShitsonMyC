@@ -312,5 +312,5 @@ class SnapshotsMixin:
             return {"ok": True, "message": i18n.t(
                 "该项已不存在，已打开其所在目录",
                 "This item no longer exists; opened its parent folder instead")}
-        return {"error": i18n.t(
+        return {"message": i18n.t(
             f"路径已不存在：{full}", f"Path no longer exists: {full}")}

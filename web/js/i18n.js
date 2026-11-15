@@ -92,15 +92,21 @@ const I18N = {
     toolPanelResizeTitle: "拖动可调整右侧栏宽度，会挤压中间对比区域",
     settingsClose: "关闭",
     settingsDone: "完成",
+    settingsUnsaved: "设置有改动，尚未保存。",
     settingsTabGeneral: "通用",
+    settingsTabPerf: "性能",
     settingsTabUi: "界面",
-    settingsTabLog: "日志",
+    settingsTabLog: "调试",
     settingsTabAi: "AI",
     uiTheme: "主题",
     uiThemeTitle: "跟随系统会在每次启动时读取系统的深浅色设置",
     uiThemeAuto: "跟随系统",
     uiThemeDark: "深色",
     uiThemeLight: "浅色",
+    sizeSource: "文件大小来源",
+    sizeSourceTitle: "逻辑占用是文件内容本身的字节数，实际占用是文件在磁盘上真正占用的空间。由于压缩，实际占用可能会小于逻辑占用。快照版本过低时会自动回落到逻辑占用。",
+    sizeSourceActual: "实际占用",
+    sizeSourceLogical: "逻辑占用",
     uiToastInfo: "普通提示留存时长",
     uiToastWarn: "警告提示留存时长",
     uiToastBase: "基础",
@@ -209,6 +215,8 @@ const I18N = {
     logLevelTitle: "控制写入日志的最低等级。DEBUG 会记录更细的调试信息，仅影响之后的新日志",
     logSanitize: "路径脱敏",
     logSanitizeTitle: "开启后日志里的绝对路径会替换为标记，导出更安全。排查问题时可关闭以查看完整路径，仅影响之后的新日志",
+    devTools: "打开开发者工具",
+    devToolsTitle: "勾选并保存后立即打开开发者工具面板，之后每次启动也会自动打开；可按 F12 收起或展开。该面板用于查看界面报错与网络请求，日常使用保持关闭即可。",
     logRefresh: "刷新",
     logClear: "清空",
     logExport: "导出",
@@ -259,8 +267,6 @@ const I18N = {
       `快照迁移完成，${parts.join("，")}。重新保存设置成功后，快照存放目录会指向 ${path}。`,
     settingsApplyFailed: "应用设置失败",
     settingsApplyTimeout: "应用设置超时，请重试",
-    workers: "扫描线程数",
-    workersTitle: "控制扫描时同时工作的线程数，用来加快扫描。机械硬盘建议设为 1，固态硬盘可适当提高",
     compress: "压缩快照",
     compressTitle: "扫描完成后把快照压小再保存，用来减少占用空间。对比时会自动解压",
     mft: "尝试 MFT 扫描",
@@ -275,11 +281,34 @@ const I18N = {
     tempCleanupTitle: "压缩快照对比时会在系统临时目录 TEMP 解压出快照副本；开启后工具启动和退出时会自动清理；关闭后这些文件留在临时目录，需手动删除",
     autoCheckUpdate: "自动检查更新",
     autoCheckUpdateTitle: "启动时在后台从 GitHub 查询最新版本，有新版本时在窗口标题栏提示",
+    updateBadge: "有新版本时显示提示",
+    updateBadgeTitle: "发现新版本时在窗口标题与侧栏的 GitHub 按钮上给出提示。关闭后仍然可以在本页手动检查更新。",
     browseModeHint: "占用浏览",
+    sizeFallbackNote: "快照版本过低，当前显示为逻辑占用",
+    sizeFallbackGeneric: (why) => `快照${why}，当前显示为逻辑占用`,
+    sizeFallbackOne: (who, why) => `${who}快照${why}，当前显示为逻辑占用`,
+    sizeFallbackBoth: (why) => `两侧快照${why}，当前显示为逻辑占用`,
+    sizeFallbackWhoBase: "基准",
+    sizeFallbackWhoThis: "这份",
+    sizeFallbackWhoCurrent: "当前",
+    sizeFallbackWhyVersion: "版本过低",
+    sizeFallbackWhyUnrecorded: "未记录实际占用",
+    sizePartialUnrecorded: (n) => `其中 ${n} 个文件未采集实际占用`,
     searchPanelResizeTitle: "拖动调整搜索结果高度",
     recommendAdminToast: "当前非管理员，建议以管理员身份启动",
     confirmTitle: "请确认",
     confirmOk: "确定",
+    packEnvTitle: "程序解包环境缺失",
+    packEnvMessage:
+      "可能是由于该目录被清理。重试未通过，请尝试重新打开软件，或选择速度较慢的单进程处理。",
+    packEnvRestart: "立即重启",
+    packEnvSlow: "单进程处理",
+    migrationRecoveryTitle: "上次迁移中断",
+    migrationRecoveryMessage: (src, aside) =>
+      `上次迁移在切换目录时中断。原目录 ${src} 不存在，数据保存在 ${aside}。是否把备份恢复为原目录？`,
+    migrationRecoveryRestore: "恢复原目录",
+    migrationRecoveryDone: "原目录已恢复",
+    migrationRecoveryFailed: "恢复失败，原目录或备份位置已经变化，请在目录迁移页手动处理。",
     resetSettings: "恢复默认",
     resetSettingsBtn: "恢复默认",
     resetSettingsTitle: "删除配置并恢复默认",
@@ -287,6 +316,7 @@ const I18N = {
     resetSettingsDone: "已恢复默认设置",
     resetSettingsFailed: "恢复默认失败",
     settingsApplied: "设置已应用",
+    settingsUnchanged: "设置没有改动",
     snapDir: "快照存放目录",
     snapDirTitle: "扫描得到的快照会保存在这里。更改后点完成，原来保存的快照会迁到新的快照目录",
     snapDirChoose: "更改",
@@ -349,6 +379,7 @@ const I18N = {
     historyRecovered: "迁移历史文件读取失败，原文件已备份为同目录下带时间戳的副本，历史记录已从空列表开始。",
     decompressing: "正在解压快照",
     tagCompressed: "压缩",
+    snapVersionTitle: (v) => `快照版本 ${v}`,
     themeTitle: "切换暗色/浅色",
     langTitle: "切换语言 / Switch language",
     githubStar: "Star",
@@ -701,7 +732,11 @@ const I18N = {
     pendingExecute: "执行删除",
     pendingPermanent: "彻底删除",
     pendingDeleting: "删除中",
-    pendingBatchAt: (cur, total) => `正在删第 ${cur}/${total} 项`,
+    // 列表里可能还留着上批已成功的行，所以要说清是本批第几项
+    pendingOffRoot: "该项不是从当前打开的这份对比加入的，没有删除",
+    pendingOffRootNotice: (n) =>
+      `${n} 项不属于当前打开的这份对比，未执行删除；请先打开它们对应的快照再试`,
+    pendingBatchAt: (cur, total) => `正在删本批第 ${cur}/${total} 项`,
     pendingBatchCounts: (ok, fail) => `成功 ${ok}，失败 ${fail}`,
     pendingDeletedItems: (n) => `已删 ${n} 项`,
     pendingPermanentWarnTitle: "开启彻底删除",
@@ -711,6 +746,21 @@ const I18N = {
     pendingExecutePermanentConfirm: (n) => `彻底删除 ${n} 项？不可从回收站恢复`,
     pendingExecutePermanentAgain: (n) => `再次确认：彻底删除 ${n} 项`,
     pendingPartial: (ok, fail) => `完成 ${ok} 项，失败 ${fail} 项`,
+    pendingPartialNotice: (ok, fail) => `完成 ${ok} 项，失败 ${fail} 项；快照中仍然会显示这些路径`,
+    pendingBatchFreed: (s) => `已腾出 ${s}`,
+    pendingDoneLine: (ok, fail, freed) => {
+      const parts = [`完成 ${ok} 项`];
+      if (freed) parts.push(`腾出 ${freed}`);
+      if (fail > 0) parts.push(`失败 ${fail} 项`);
+      return parts.join("；");
+    },
+    pendingDoneAborted: (ok, fail, freed) => {
+      const parts = [`已完成 ${ok} 项`];
+      if (freed) parts.push(`腾出 ${freed}`);
+      if (fail > 0) parts.push(`失败 ${fail} 项`);
+      parts.push("中途停止");
+      return parts.join("；");
+    },
     pendingStatusOk: "删除成功",
     pendingStatusFail: "删除失败",
     pendingStatusMissing: "不存在",
@@ -735,7 +785,12 @@ const I18N = {
     deletePermanent: "彻底删除",
     deletedRecycle: "已移入回收站",
     deletedPermanent: "已彻底删除",
-    deleteRefreshHint: "重新对比后刷新列表",
+    deletedRecycleNotice: (n) => n > 1
+      ? `已移入回收站 ${n} 项，但快照中仍然会显示这些路径`
+      : "该项已移入回收站，但快照中仍然会显示该路径",
+    deletedPermanentNotice: (n) => n > 1
+      ? `已彻底删除 ${n} 项，但快照中仍然会显示这些路径`
+      : "该项已彻底删除，但快照中仍然会显示该路径",
     deleteFail: "删除失败",
     deleteBlockedRoot: "无法删除扫描根目录",
     deleteBlacklist: "删除白名单",
@@ -760,6 +815,10 @@ const I18N = {
     scanMftModeHint: "正在通过 MFT 构建快照",
     scanMftFallbackNonAdmin: "非管理员，已改用常规扫描",
     cancel: "取消",
+    perfPromptTitle: "建议先做一次性能测试",
+    perfPromptBody: "还没有本机性能数据。测一次即可得出合适的处理进程数与目录遍历线程数，扫描更快、占内存更少，约需两分钟。",
+    perfPromptOff: "以后不再提醒",
+    perfPromptGo: "去设置",
     snapRoleBase: "◀ 基准",
     snapRoleCurrent: "▶ 当前",
     setAsBase: "基准",
@@ -806,6 +865,7 @@ const I18N = {
     copied: (p) => `已复制：${p}`,
     copyFailed: "复制失败",
     loading: "加载中",
+    filterPrepLoading: "正在整理筛选所需的数据，文件夹内容越多时间越长，取决于机器性能",
     loadFailed: (e) => `加载失败：${e}`,
     noMatchChild: "此目录下没有匹配项",
     treeSearchPlaceholder: "搜索名称或路径，回车确认",
@@ -828,6 +888,8 @@ const I18N = {
         ? `[${q}]共 ${total} 项，已显示 ${shown} 项${time}`
         : `[${q}]共 ${shown} 项${time}`;
     },
+    treeSearchTruncated: (shown, total, q) =>
+      `[${q}]关键词命中超过单次搜索上限，结果可能不完整；已显示 ${shown} 项，共 ${total} 项`,
     treeSearchMore: "加载更多",
     treeSearchLocateFailed: (e) => `定位失败：${e}`,
     gotoPathBtnTitle: "跳转到路径",
@@ -852,11 +914,69 @@ const I18N = {
     scanError: (m) => `扫描出错：${m}`,
     themeDark: "🌙 暗色",
     themeLight: "☀️ 浅色",
-    cpuTag: "（CPU）",
     agoJustNow: "刚刚",
     agoMin: (n) => `${n} 分钟前`,
     agoHour: (n) => `${n} 小时前`,
     agoDay: (n) => `${n} 天前`,
+    perfCopyTo: "快速应用",
+    perfCopyTitle: "快速应用",
+    perfCopyBody: "把当前盘的处理进程数、读取线程数与目录遍历线程数应用到选中的盘。测试结果不一起复制，曲线仍只属于测过的那块盘。应用只改本次设置，保存后才生效。",
+    perfCopyCancel: "取消",
+    perfCopyApply: "应用",
+    perfCopyDone: (o) => `已把 ${o.from} 盘的参数应用到 ${o.n} 个盘，保存设置后生效。`,
+    perfDrive: "盘符",
+    perfResetDefault: "恢复默认",
+    perfResetDone: "本盘参数已恢复为跟随默认值，保存设置后生效。",
+    perfDrivesFailed: "未能读取本机磁盘列表，按盘参数暂时无法调整。",
+    perfTestStart: "开始测试",
+    perfReadThreads: "读取线程数",
+    perfDirTag: "目录遍历",
+    perfModeThreads: "目录遍历线程数",
+    perfAxisTime: "时间",
+    perfAxisMem: "内存",
+    perfLegendLine: "实线为实测值，虚线为推算值",
+    perfCurveLowest: "推荐",
+    perfTestingThreadsLead: "正在测试目录遍历，电脑可能会出现卡顿，属于正常现象",
+    perfReadTitle: "读取线程数指同一时刻向磁盘发出的读取请求个数。这一行有两个数字，分别对应两种扫描方式。读取 MFT 时，数据是连续的一整块，一个请求已经占满磁盘带宽，增加线程不会更快。目录遍历时，需要分别读取成千上万个目录，多个请求可以同时进行，增加线程能缩短时间，收益随线程数增加而递减。",
+    perfSwitchTitle: "扫描有两条路径。第一条直接读 NTFS 卷上的 MFT，处理进程数决定这条路径上同时解析表的分段有几个进程。第二条逐个目录遍历，读取线程数决定这条路径上同时读取几个目录。同一次扫描只会走其中一条，两个数值分别保存，供各自那条路径使用。",
+    perfHintProcs: "一次测试会依次量出处理进程数与目录遍历线程数两组结果，不生成快照文件，通常两分钟左右。",
+    perfEnvWarn: "程序未以管理员身份运行，读取 MFT 与处理进程数无法测试；目录遍历线程数的测试不受影响。",
+    perfHintThreads: "一次测试会依次量出处理进程数与目录遍历线程数两组结果，不生成快照文件，通常两分钟左右。",
+    perfAllProcs: (o) =>
+      `处理进程数建议 ${o.n} 个。`,
+    perfAllThreads: (o) =>
+      `目录遍历线程数建议 ${o.n} 个。`,
+    perfAppliedThreads: (n) => `已填入 ${n} 个线程，保存设置后生效`,
+    perfSummaryThreads: (o) =>
+      `当前 ${o.n} 个线程，内存约 ${o.mb} MB。`,
+    perfSummaryThreadsNoMem: (o) =>
+      `当前 ${o.n} 个线程。`,
+    mftProcs: "处理进程数",
+    mftProcsTitle: "处理进程数指按 MFT 方式扫描盘符时，解析 MFT 所用的进程个数。MFT 是 NTFS 卷上的文件清单，直接读它比逐个目录遍历快得多。进程越多，解析越快，占用的内存也越多。超过最合适的个数以后，再加进程只会多占内存，速度不会再提升。",
+    mftProcsBusy: "测试进行中",
+    mftProcsRetest: "重新测试",
+    mftProcsApply: "填入",
+    mftProcsApplied: (n) => `已填入 ${n} 个进程，保存设置后生效`,
+    mftProcsGotIt: "知道了",
+    mftProcsCancel: "取消",
+    mftProcsCancelled: "测试已取消，已经跑完的那一段会保留。",
+    mftProcsTestingLead: "正在进行读取与解析测试，电脑可能会出现卡顿，属于正常现象，测试时间最长两分半，超时自动结束",
+    mftProcsTestingLive: (o) =>
+      `实时 CPU 占用 ${o.cpu}%，内存占用 ${o.mem}，当前测试用时：${o.sec} 秒，已完成 ${o.pct}%`,
+    mftProcsTimeoutTitle: (n) => `测试已到 ${n} 秒上限，自动停止`,
+    mftProcsTimeoutBody: "已测到的部分照实测结果保存，没测完的部分无法给出建议值。",
+    mftProcsTimeoutBodyNoRead: "这一轮没有测到可用的数据，可以稍后重新测试。",
+    mftProcsCurveParse: "解析耗时",
+    mftProcsCurveMem: "内存",
+    perfTagParse: "解析",
+    perfTagWalk: "耗时",
+    perfUnitSec: " 秒",
+    mftProcsCurveBest: "推荐",
+    mftProcsCurveUnfinished: "解析未测完",
+    mftProcsSummary: (o) =>
+      `读表要 ${o.read} 秒，扫描任务耗时约 ${o.total} 秒，内存约 ${o.mb} MB。`,
+    mftProcsSummaryUnfinished: (o) =>
+      `读取约 ${o.read} 秒。解析未测完，无法推算建议进程数。当前 ${o.n} 个进程，内存约 ${o.mb} MB。`,
   },
   en: {
     newScan: "＋ New scan",
@@ -943,15 +1063,21 @@ const I18N = {
     toolPanelResizeTitle: "Drag to resize the right panel (squeezes the compare area)",
     settingsClose: "Close",
     settingsDone: "Done",
+    settingsUnsaved: "Settings changed but not saved.",
     settingsTabGeneral: "General",
+    settingsTabPerf: "Performance",
     settingsTabUi: "UI",
-    settingsTabLog: "Log",
+    settingsTabLog: "Debug",
     settingsTabAi: "AI",
     uiTheme: "Theme",
     uiThemeTitle: "Follow system reads the OS light/dark setting at each startup",
     uiThemeAuto: "Follow system",
     uiThemeDark: "Dark",
     uiThemeLight: "Light",
+    sizeSource: "File size source",
+    sizeSourceTitle: "Logical size is the byte count of the file content itself; actual usage is the space the file really occupies on disk. Compression can make actual usage smaller than logical size. Snapshots in an older format fall back to logical size automatically.",
+    sizeSourceActual: "Actual usage",
+    sizeSourceLogical: "Logical size",
     uiToastInfo: "Normal toast duration",
     uiToastWarn: "Warning toast duration",
     uiToastBase: "Base",
@@ -1061,6 +1187,8 @@ const I18N = {
     logLevelTitle: "Minimum level written to the log. DEBUG records more detail; only affects new entries after the change",
     logSanitize: "Path sanitization",
     logSanitizeTitle: "When on, absolute paths in the log are replaced by markers for safer export. Turn off to see full paths while debugging; only affects new log entries after the change",
+    devTools: "Open DevTools",
+    devToolsTitle: "When on, saving opens the DevTools panel right away, and it opens again on every startup. Press F12 to hide or show it. It is meant for diagnosing problems, so leave it off for everyday use.",
     logRefresh: "Refresh",
     logClear: "Clear",
     logExport: "Export",
@@ -1111,8 +1239,6 @@ const I18N = {
       `The snapshot migration completed: ${parts.join(", ")}. After the settings are saved successfully, the snapshot folder will point to ${path}.`,
     settingsApplyFailed: "Failed to apply settings",
     settingsApplyTimeout: "Applying settings timed out; please try again",
-    workers: "Scan threads",
-    workersTitle: "How many threads run at once during a scan, to speed it up. Use 1 for HDDs; raise the value for SSDs",
     compress: "Compress snapshots",
     compressTitle: "After a scan, compress the snapshot to use less disk space. It is decompressed automatically when you compare",
     mft: "Try MFT scan",
@@ -1127,11 +1253,34 @@ const I18N = {
     tempCleanupTitle: "Comparing compressed snapshots extracts copies into the system TEMP folder; when on, they are cleaned up on launch and exit; when off, they stay in the temp folder until removed manually",
     autoCheckUpdate: "Auto check for updates",
     autoCheckUpdateTitle: "Check GitHub for the latest release in the background on startup, and show a hint in the title bar when a newer version exists",
+    updateBadge: "Show a hint when a newer version exists",
+    updateBadgeTitle: "When a newer version is found, show a hint in the window title and on the GitHub button in the sidebar. When off, you can still check for updates on this page.",
     browseModeHint: "Size browse",
+    sizeFallbackNote: "Snapshot format is too old; showing logical size",
+    sizeFallbackGeneric: (why) => `Snapshot ${why}; showing logical size.`,
+    sizeFallbackOne: (who, why) => `${who} snapshot: ${why}. Showing logical size.`,
+    sizeFallbackBoth: (why) => `Both snapshots: ${why}. Showing logical size.`,
+    sizeFallbackWhoBase: "Base",
+    sizeFallbackWhoThis: "This",
+    sizeFallbackWhoCurrent: "Current",
+    sizeFallbackWhyVersion: "old format",
+    sizeFallbackWhyUnrecorded: "no recorded actual usage",
+    sizePartialUnrecorded: (n) => `${n} files have no actual usage recorded`,
     searchPanelResizeTitle: "Drag to resize search results height",
     recommendAdminToast: "Not running as administrator; prefer Run as administrator",
     confirmTitle: "Confirm",
     confirmOk: "OK",
+    packEnvTitle: "Program environment missing",
+    packEnvMessage:
+      "The folder may have been cleaned up. The retry did not succeed; reopen the app, or continue with the slower single-threaded scan.",
+    packEnvRestart: "Restart now",
+    packEnvSlow: "Single-threaded scan",
+    migrationRecoveryTitle: "Migration interrupted",
+    migrationRecoveryMessage: (src, aside) =>
+      `The last migration was interrupted while switching folders. The original folder ${src} is missing and the data is in ${aside}. Restore the backup to the original folder?`,
+    migrationRecoveryRestore: "Restore original folder",
+    migrationRecoveryDone: "The original folder has been restored",
+    migrationRecoveryFailed: "Restore failed because the original folder or the backup has changed. Handle it on the directory migration page.",
     resetSettings: "Restore defaults",
     resetSettingsBtn: "Restore defaults",
     resetSettingsTitle: "Delete config and restore defaults",
@@ -1139,6 +1288,7 @@ const I18N = {
     resetSettingsDone: "Defaults restored",
     resetSettingsFailed: "Failed to restore defaults",
     settingsApplied: "Settings applied",
+    settingsUnchanged: "No settings changed",
     snapDir: "Snapshot folder",
     snapDirTitle: "Snapshots from scans are saved here. After you change it and click Done, existing snapshots are moved to the new folder",
     snapDirChoose: "Change",
@@ -1201,6 +1351,7 @@ const I18N = {
     historyRecovered: "The migration history could not be read. The original was backed up as a timestamped copy in the same folder, and the history started empty.",
     decompressing: "Decompressing snapshot",
     tagCompressed: "zip",
+    snapVersionTitle: (v) => `Snapshot version ${v}`,
     themeTitle: "Toggle dark / light",
     langTitle: "切换语言 / Switch language",
     githubStar: "Star",
@@ -1557,7 +1708,10 @@ const I18N = {
     pendingExecute: "Delete now",
     pendingPermanent: "Delete permanently",
     pendingDeleting: "Deleting",
-    pendingBatchAt: (cur, total) => `Deleting item ${cur}/${total}`,
+    pendingOffRoot: "This item was not added from the compare that is open, so it was not deleted",
+    pendingOffRootNotice: (n) =>
+      `${n} items do not belong to the compare that is open and were not deleted; open the matching snapshot and try again`,
+    pendingBatchAt: (cur, total) => `Deleting item ${cur}/${total} of this batch`,
     pendingBatchCounts: (ok, fail) => `${ok} done, ${fail} failed`,
     pendingDeletedItems: (n) => `${n} item(s) deleted`,
     pendingPermanentWarnTitle: "Enable permanent delete",
@@ -1567,6 +1721,21 @@ const I18N = {
     pendingExecutePermanentConfirm: (n) => `Permanently delete ${n} item(s)? This cannot be undone from the Recycle Bin`,
     pendingExecutePermanentAgain: (n) => `Confirm again: permanently delete ${n} item(s)`,
     pendingPartial: (ok, fail) => `${ok} done, ${fail} failed`,
+    pendingPartialNotice: (ok, fail) => `${ok} done, ${fail} failed; the snapshot still shows these paths`,
+    pendingBatchFreed: (s) => `${s} cleared`,
+    pendingDoneLine: (ok, fail, freed) => {
+      const parts = [`${ok} done`];
+      if (freed) parts.push(`${freed} cleared`);
+      if (fail > 0) parts.push(`${fail} failed`);
+      return parts.join(", ");
+    },
+    pendingDoneAborted: (ok, fail, freed) => {
+      const parts = [`${ok} done`];
+      if (freed) parts.push(`${freed} cleared`);
+      if (fail > 0) parts.push(`${fail} failed`);
+      parts.push("stopped early");
+      return parts.join(", ");
+    },
     pendingStatusOk: "Deleted",
     pendingStatusFail: "Failed",
     pendingStatusMissing: "Not found",
@@ -1592,7 +1761,12 @@ const I18N = {
     deletePermanent: "Delete permanently",
     deletedRecycle: "Moved to Recycle Bin",
     deletedPermanent: "Permanently deleted",
-    deleteRefreshHint: "Re-compare to refresh the list",
+    deletedRecycleNotice: (n) => n > 1
+      ? `${n} items moved to Recycle Bin, but the snapshot still shows these paths`
+      : "Item moved to Recycle Bin, but the snapshot still shows this path",
+    deletedPermanentNotice: (n) => n > 1
+      ? `${n} items permanently deleted, but the snapshot still shows these paths`
+      : "Item permanently deleted, but the snapshot still shows this path",
     deleteFail: "Delete failed",
     deleteBlockedRoot: "Cannot delete the scan root",
     deleteBlacklist: "Delete whitelist",
@@ -1617,6 +1791,10 @@ const I18N = {
     scanMftModeHint: "Building snapshot via MFT",
     scanMftFallbackNonAdmin: "Not an administrator; using a normal scan",
     cancel: "Cancel",
+    perfPromptTitle: "Run a performance test first",
+    perfPromptBody: "There is no performance data for this machine yet. One test measures the right process count and directory-walk thread count, making scans faster and lighter on memory. It takes about two minutes.",
+    perfPromptOff: "Don't remind me again",
+    perfPromptGo: "Open settings",
     snapRoleBase: "◀ Base",
     snapRoleCurrent: "▶ Current",
     setAsBase: "Base",
@@ -1663,6 +1841,7 @@ const I18N = {
     copied: (p) => `Copied: ${p}`,
     copyFailed: "Copy failed",
     loading: "Loading",
+    filterPrepLoading: "Preparing the data this filter needs; the more items there are, the longer it takes, depending on system performance",
     loadFailed: (e) => `Load failed: ${e}`,
     noMatchChild: "No matches in this folder",
     treeSearchPlaceholder: "Search name or path, press Enter",
@@ -1685,6 +1864,8 @@ const I18N = {
         ? `“${q}”: ${total} hits, showing ${shown}${time}`
         : `“${q}”: ${shown} hit(s)${time}`;
     },
+    treeSearchTruncated: (shown, total, q) =>
+      `“${q}”: more hits than one search can return, so the result may be incomplete; showing ${shown} of ${total} hits`,
     treeSearchMore: "Load more",
     treeSearchLocateFailed: (e) => `Locate failed: ${e}`,
     gotoPathBtnTitle: "Go to path",
@@ -1709,11 +1890,69 @@ const I18N = {
     scanError: (m) => `Scan error: ${m}`,
     themeDark: "🌙 Dark",
     themeLight: "☀️ Light",
-    cpuTag: " (CPU)",
     agoJustNow: "just now",
     agoMin: (n) => `${n} min ago`,
     agoHour: (n) => `${n} h ago`,
     agoDay: (n) => `${n} d ago`,
+    perfCopyTo: "Quick apply",
+    perfCopyTitle: "Quick apply",
+    perfCopyBody: "Applies this drive's process count, read threads and walk threads to the selected drives. Test results are not copied, so the chart still belongs to the drive that was measured. Only the pending settings change; save to apply.",
+    perfCopyCancel: "Cancel",
+    perfCopyApply: "Apply",
+    perfCopyDone: (o) => `${o.from} settings applied to ${o.n} drives; save settings to apply.`,
+    perfDrive: "Drive",
+    perfResetDefault: "Restore defaults",
+    perfResetDone: "This drive now follows the global defaults. Save settings to apply.",
+    perfDrivesFailed: "Could not read the list of local disks, so per-drive settings cannot be changed right now.",
+    perfTestStart: "Start test",
+    perfReadThreads: "Read threads",
+    perfDirTag: "Walk",
+    perfModeThreads: "Walk threads",
+    perfAxisTime: "Time",
+    perfAxisMem: "Memory",
+    perfLegendLine: "Solid = measured, dashed = estimated",
+    perfCurveLowest: "Suggested",
+    perfTestingThreadsLead: "Testing the directory walk. The computer may feel slow; this is normal.",
+    perfReadTitle: "Read threads are how many read requests are issued to the disk at the same time. The two numbers on this row apply to the two scan methods. Reading the MFT reads one continuous block, so a single request already uses the disk bandwidth and more threads will not help. Walking directories reads thousands of small directories, so several requests can run at once and more threads shorten the time, with diminishing returns.",
+    perfSwitchTitle: "There are two scan paths. The first reads the MFT on the NTFS volume directly, and the process count sets how many processes parse segments of that table at once. The second walks directories one by one, and the read thread count sets how many directories are read at once. A scan only takes one of the two paths, and the two numbers are stored separately for their own path.",
+    perfHintProcs: "One test measures both the process count and the directory-walk threads. It writes no snapshot and usually takes about two minutes.",
+    perfEnvWarn: "The program is not running as administrator, so reading the MFT and the process count cannot be measured; testing the directory-walk threads still works.",
+    perfHintThreads: "One test measures both the process count and the directory-walk threads. It writes no snapshot and usually takes about two minutes.",
+    perfAllProcs: (o) =>
+      `Use about ${o.n} processes.`,
+    perfAllThreads: (o) =>
+      `Use about ${o.n} threads for the directory walk.`,
+    perfAppliedThreads: (n) => `${n} threads filled in; save settings to apply`,
+    perfSummaryThreads: (o) =>
+      `${o.n} threads, memory about ${o.mb} MB.`,
+    perfSummaryThreadsNoMem: (o) =>
+      `${o.n} threads.`,
+    mftProcs: "Parse processes",
+    mftProcsTitle: "The process count is how many processes parse the MFT when a drive is scanned the MFT way. The MFT is the file list of an NTFS volume, and reading it directly is far faster than walking every directory. More processes parse faster and use more memory. Past the right number, extra processes only take memory and add no speed.",
+    mftProcsBusy: "Testing",
+    mftProcsRetest: "Test again",
+    mftProcsApply: "Use",
+    mftProcsApplied: (n) => `${n} processes filled in; save settings to apply`,
+    mftProcsGotIt: "Got it",
+    mftProcsCancel: "Cancel",
+    mftProcsCancelled: "Test cancelled; the part that already finished is kept.",
+    mftProcsTestingLead: "Testing reading and parsing. The computer may feel slow; this is normal. The test stops itself after two and a half minutes.",
+    mftProcsTestingLive: (o) =>
+      `CPU ${o.cpu}%, memory ${o.mem}, elapsed ${o.sec} s, ${o.pct}% done`,
+    mftProcsTimeoutTitle: (n) => `Stopped at the ${n} s limit`,
+    mftProcsTimeoutBody: "Whatever was measured is saved as measured. The rest is too little to give a recommendation.",
+    mftProcsTimeoutBodyNoRead: "This run produced no usable data. You can test again later.",
+    mftProcsCurveParse: "parse time",
+    mftProcsCurveMem: "Memory",
+    perfTagParse: "parse",
+    perfTagWalk: "walk",
+    perfUnitSec: " s",
+    mftProcsCurveBest: "Suggested",
+    mftProcsCurveUnfinished: "Parse not measured",
+    mftProcsSummary: (o) =>
+      `Reading the table takes ${o.read} s, the scan task takes about ${o.total} s, with about ${o.mb} MB of memory.`,
+    mftProcsSummaryUnfinished: (o) =>
+      `Read about ${o.read} s. Parsing was not measured, so no process count is recommended. Currently ${o.n} processes, memory about ${o.mb} MB.`,
   },
 };
 
@@ -1775,6 +2014,13 @@ function setLang(lang) {
   }
   if (state._settings) updateSnapDirLine(state._settings);
   renderVisibleMigrateView();
+  // 性能参数区的摘要、曲线上的文字都是脚本临时生成的，静态文案那一轮扫不到
+  if (typeof _perfRefreshLanguage === "function") _perfRefreshLanguage();
+  // 待删除列表的状态标签与底部汇总同样是脚本拼的，也得跟着换
+  if (typeof renderPendingList === "function") {
+    renderPendingList();
+    renderPendingProgress();
+  }
   syncBackendLang();
 }
 

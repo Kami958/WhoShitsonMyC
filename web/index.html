@@ -29,7 +29,7 @@
       try { localStorage.setItem("theme", theme); } catch (e) {}
     })();
   </script>
-  <link rel="stylesheet" href="style.css?v=1.1.8.2" />
+  <link rel="stylesheet" href="style.css?v=1.2.0.1" />
 </head>
 <body>
   <div class="layout">
@@ -132,6 +132,7 @@
       <div id="summaryBar" class="summary-bar hidden">
         <span class="summary-caption" data-i18n="totalChange">总变化</span>
         <span id="summaryDelta" class="summary-delta"></span>
+        <span id="sizeSourceHint" class="size-source-hint hidden"></span>
         <span id="browseModeHint" class="browse-mode-hint hidden" data-i18n="browseModeHint">占用浏览</span>
         <span class="spacer"></span>
         <div class="summary-icon-tools">
@@ -181,6 +182,11 @@
             </svg>
           </button>
         </div>
+      </div>
+
+      <!-- 回落说明独立一行：不与总数和口径标签挤在同一行 -->
+      <div id="sizeFallbackRow" class="size-fallback-row hidden">
+        <span id="sizeFallbackNote" class="size-fallback-note"></span>
       </div>
 
       <!-- 排序 / 筛选：图标触发的选项菜单 -->
@@ -767,6 +773,7 @@
       </div>
       <div class="settings-tabs" role="tablist" aria-label="Settings tabs">
         <button type="button" class="settings-tab active" role="tab" aria-selected="true" data-settings-tab="general" data-i18n="settingsTabGeneral">通用</button>
+        <button type="button" class="settings-tab" role="tab" aria-selected="false" data-settings-tab="perf" data-i18n="settingsTabPerf">性能</button>
         <button type="button" class="settings-tab" role="tab" aria-selected="false" data-settings-tab="ui" data-i18n="settingsTabUi">界面</button>
         <button type="button" class="settings-tab" role="tab" aria-selected="false" data-settings-tab="log" data-i18n="settingsTabLog">日志</button>
         <button type="button" class="settings-tab module-off" role="tab" aria-selected="false" data-settings-tab="ai" data-module="ai" data-i18n="settingsTabAi">AI</button>
@@ -774,16 +781,6 @@
       <div class="settings-body">
         <div class="settings-pane active" data-settings-pane="general" role="tabpanel">
           <p id="settingsFileWarnLine" class="settings-hint hidden"></p>
-          <div class="settings-field">
-            <div class="settings-row">
-              <span class="settings-label">
-                <label for="workerSel" data-i18n="workers">扫描线程数</label>
-                <button type="button" class="settings-q" data-help="workers" data-i18n-title="workersTitle" title="控制扫描时同时工作的线程数，用来加快扫描。机械硬盘建议设为 1，固态硬盘可适当提高" aria-label="?">?</button>
-              </span>
-              <select id="workerSel" class="sort-sel worker-sel"></select>
-            </div>
-            <p class="settings-help-panel hidden" data-help-panel="workers" data-i18n="workersTitle">控制扫描时同时工作的线程数，用来加快扫描。机械硬盘建议设为 1，固态硬盘可适当提高</p>
-          </div>
           <div class="settings-field">
             <div class="settings-row">
               <span class="settings-label">
@@ -797,12 +794,25 @@
           <div class="settings-field">
             <div class="settings-row">
               <span class="settings-label">
+                <label data-i18n="sizeSource">文件大小来源</label>
+                <button type="button" class="settings-q" data-help="sizeSource" data-i18n-title="sizeSourceTitle" title="逻辑占用是文件内容本身的字节数，实际占用是文件在磁盘上真正占用的空间。由于压缩，实际占用可能会小于逻辑占用。快照版本过低时会自动回落到逻辑占用。" aria-label="?">?</button>
+              </span>
+              <div class="migrate-radio-group is-row">
+                <label class="migrate-radio"><input type="radio" name="sizeSource" value="actual" checked /><span data-i18n="sizeSourceActual">实际占用</span></label>
+                <label class="migrate-radio"><input type="radio" name="sizeSource" value="logical" /><span data-i18n="sizeSourceLogical">逻辑占用</span></label>
+              </div>
+            </div>
+            <p class="settings-help-panel hidden" data-help-panel="sizeSource" data-i18n="sizeSourceTitle">逻辑占用是文件内容本身的字节数，实际占用是文件在磁盘上真正占用的空间。由于压缩，实际占用可能会小于逻辑占用。快照版本过低时会自动回落到逻辑占用。</p>
+          </div>
+          <div class="settings-field">
+            <div class="settings-row">
+              <span class="settings-label">
                 <label for="mftChk" data-i18n="mft">尝试 MFT 扫描</label>
-                <button type="button" class="settings-q" data-help="mft" data-i18n-title="mftTitle" title="扫描整个盘符时，优先读取系统文件表来加快速度。需要管理员权限，且仅适用于 NTFS；失败时会自动改用常规扫描" aria-label="?">?</button>
+                <button type="button" class="settings-q" data-help="mft" data-i18n-title="mftTitle" title="扫描整个盘符时，优先读取 MFT 来加快速度。需要管理员权限，且仅适用于 NTFS；失败时会自动改用常规扫描" aria-label="?">?</button>
               </span>
               <input id="mftChk" type="checkbox" />
             </div>
-            <p class="settings-help-panel hidden" data-help-panel="mft" data-i18n="mftHint">扫描整个盘符时，优先读取系统文件表来加快速度。需要管理员权限，且仅适用于 NTFS；失败时会自动改用常规扫描</p>
+            <p class="settings-help-panel hidden" data-help-panel="mft" data-i18n="mftHint">扫描整个盘符时，优先读取 MFT 来加快速度。需要管理员权限，且仅适用于 NTFS；失败时会自动改用常规扫描</p>
           </div>
           <div class="settings-field">
             <div class="settings-row">
@@ -908,6 +918,14 @@
             </div>
             <p id="checkUpdateStatus" class="settings-hint check-update-status" aria-live="polite"></p>
             <p class="settings-help-panel hidden" data-help-panel="autoCheckUpdate" data-i18n="autoCheckUpdateTitle">启动时在后台从 GitHub 查询最新版本，有新版本时在窗口标题栏提示</p>
+            <div class="settings-row">
+              <span class="settings-label">
+                <label for="updateBadgeChk" data-i18n="updateBadge">有新版本时显示提示</label>
+                <button type="button" class="settings-q" data-help="updateBadge" data-i18n-title="updateBadgeTitle" aria-label="?">?</button>
+              </span>
+              <input id="updateBadgeChk" type="checkbox" />
+            </div>
+            <p class="settings-help-panel hidden" data-help-panel="updateBadge" data-i18n="updateBadgeTitle">发现新版本时在窗口标题与侧栏的 GitHub 按钮上给出提示。关闭后仍然可以在本页手动检查更新。</p>
           </div>
           <div class="settings-field">
             <div class="settings-row">
@@ -920,6 +938,93 @@
             <p class="settings-help-panel hidden" data-help-panel="uninstall" data-i18n="uninstallTitle">不再使用本软件时，可清理它在本机留下的配置和默认位置的快照。您自行指定的快照目录不会被删除</p>
           </div>
         </div>
+        <div class="settings-pane hidden" data-settings-pane="perf" role="tabpanel">
+          <div class="perf-body">
+            <p id="perfEnvWarn" class="perf-env-warn hidden" data-i18n="perfEnvWarn">程序未以管理员身份运行，读取 MFT 与处理进程数无法测试；目录遍历线程数的测试不受影响。</p>
+            <div class="perf-row perf-drive-row">
+              <span class="settings-label perf-label"><span data-i18n="perfDrive">盘符</span></span>
+              <span class="perf-inline">
+                <span class="perf-drive" id="perfDrive"></span>
+                <button id="perfTest" class="mft-proc-test" type="button" data-i18n="perfTestStart">开始测试</button>
+                <button id="perfCopyTo" class="mft-proc-test" type="button" data-i18n="perfCopyTo">快速应用</button>
+                <button id="perfResetDefault" class="mft-proc-test" type="button" data-i18n="perfResetDefault">恢复默认</button>
+              </span>
+            </div>
+
+            <div id="perfCopyPanel" class="mft-proc-panel hidden">
+              <p class="mft-proc-panel-title" data-i18n="perfCopyTitle">快速应用</p>
+              <p class="mft-proc-panel-body" data-i18n="perfCopyBody">把当前盘的处理进程数、读取线程数与目录遍历线程数应用到选中的盘。测试结果不一起复制，曲线仍只属于测过的那块盘。应用只改本次设置，保存后才生效。</p>
+              <div id="perfCopyList" class="perf-copy-list"></div>
+              <div class="mft-proc-panel-foot">
+                <button id="perfCopyCancel" class="btn-plain" type="button" data-i18n="perfCopyCancel">取消</button>
+                <button id="perfCopyApply" class="btn-primary compact" type="button" data-i18n="perfCopyApply">应用</button>
+              </div>
+            </div>
+
+            <div class="perf-row">
+              <span class="settings-label perf-label">
+                <span data-i18n="perfReadThreads">读取线程数</span>
+                <button type="button" class="settings-q" data-help="perfRead" data-i18n-title="perfReadTitle" aria-label="?">?</button>
+              </span>
+              <span class="perf-inline">
+                <span class="perf-tag">MFT</span>
+                <input id="perfMft" class="perf-input" type="number" min="1" max="8" step="1" value="1" />
+                <span class="perf-tag" data-i18n="perfDirTag">目录遍历</span>
+                <input id="perfDir" class="perf-input" type="number" min="1" max="128" step="1" value="4" />
+              </span>
+            </div>
+            <p class="settings-help-panel hidden" data-help-panel="perfRead" data-i18n="perfReadTitle">读取线程数指同一时刻向磁盘发出的读取请求个数。这一行有两个数字，分别对应两种扫描方式。读取 MFT 时，数据是连续的一整块，一个请求已经占满磁盘带宽，增加线程不会更快。目录遍历时，需要分别读取成千上万个目录，多个请求可以同时进行，增加线程能缩短时间，收益随线程数增加而递减。</p>
+
+            <div class="perf-row">
+              <span class="settings-label perf-label">
+                <span data-i18n="mftProcs">处理进程数</span>
+                <button type="button" class="settings-q" data-help="perfProcs" data-i18n-title="mftProcsTitle" aria-label="?">?</button>
+              </span>
+              <span class="perf-inline">
+                <input id="perfProcs" class="perf-input" type="number" min="1" max="12" step="1" value="11" />
+              </span>
+            </div>
+            <p class="settings-help-panel hidden" data-help-panel="perfProcs" data-i18n="mftProcsTitle">处理进程数指按 MFT 方式扫描盘符时，解析 MFT 所用的进程个数。MFT 是 NTFS 卷上的文件清单，直接读它比逐个目录遍历快得多。进程越多，解析越快，占用的内存也越多。超过最合适的个数以后，再加进程只会多占内存，速度不会再提升。</p>
+
+            <div class="perf-switch-row">
+              <div class="perf-switch" id="perfSwitch">
+                <button class="perf-switch-btn is-active" data-target="procs" type="button" data-i18n="mftProcs">处理进程数</button>
+                <button class="perf-switch-btn" data-target="threads" type="button" data-i18n="perfModeThreads">目录遍历线程数</button>
+              </div>
+              <button type="button" class="settings-q" data-help="perfSwitch" data-i18n-title="perfSwitchTitle" aria-label="?">?</button>
+            </div>
+            <p class="settings-help-panel hidden" data-help-panel="perfSwitch" data-i18n="perfSwitchTitle">扫描有两条路径。第一条直接读 NTFS 卷上的 MFT，处理进程数决定这条路径上同时解析表的分段有几个进程。第二条逐个目录遍历，读取线程数决定这条路径上同时读取几个目录。同一次扫描只会走其中一条，两个数值分别保存，供各自那条路径使用。</p>
+            <p id="perfHint" class="settings-hint perf-hint"></p>
+
+            <div id="perfChartBox" class="mft-proc-chart-box">
+              <canvas id="perfChart" class="mft-proc-chart" height="172"></canvas>
+              <div class="mft-proc-overlay">
+                <input id="perfRange" class="mft-proc-range" type="range" min="1" max="12" step="1" value="11" />
+                <div id="perfScale" class="mft-proc-scale"></div>
+              </div>
+            </div>
+
+            <div id="perfProgress" class="mft-proc-panel hidden">
+              <p id="perfLead" class="mft-proc-panel-body" data-i18n="mftProcsTestingLead">正在进行读取与解析测试，电脑可能会出现卡顿，属于正常现象，测试时间最长两分半，超时自动结束</p>
+              <p id="perfLive" class="mft-proc-live"></p>
+              <div class="mft-proc-bar"><div id="perfFill" class="mft-proc-bar-fill" style="width:0%"></div></div>
+              <div class="mft-proc-panel-foot">
+                <button id="perfCancel" class="btn-plain" type="button" data-i18n="mftProcsCancel">取消</button>
+              </div>
+            </div>
+
+            <div id="perfResult" class="mft-proc-panel hidden">
+              <p id="perfResultTitle" class="mft-proc-panel-title hidden"></p>
+              <p id="perfResultBody" class="mft-proc-panel-body"></p>
+              <p id="perfSummary" class="settings-hint perf-summary"></p>
+              <div class="mft-proc-panel-foot">
+                <button id="perfIgnore" class="btn-plain" type="button" data-i18n="mftProcsGotIt">知道了</button>
+                <button id="perfApply" class="btn-primary compact" type="button" data-i18n="mftProcsApply">填入</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <div class="settings-pane hidden" data-settings-pane="ui" role="tabpanel">
           <div class="settings-field">
             <div class="settings-row">
@@ -1071,6 +1176,16 @@
               <input id="logSanitizeChk" type="checkbox" checked />
             </div>
             <p class="settings-help-panel hidden" data-help-panel="logSanitize" data-i18n="logSanitizeTitle">开启后日志里的绝对路径会替换为标记，导出更安全。排查问题时可关闭以查看完整路径，仅影响之后的新日志</p>
+          </div>
+          <div class="settings-field">
+            <div class="settings-row">
+              <span class="settings-label">
+                <label for="devToolsChk" data-i18n="devTools">打开开发者工具</label>
+                <button type="button" class="settings-q" data-help="devTools" data-i18n-title="devToolsTitle" aria-label="?">?</button>
+              </span>
+              <input id="devToolsChk" type="checkbox" />
+            </div>
+            <p class="settings-help-panel hidden" data-help-panel="devTools" data-i18n="devToolsTitle">勾选并保存后立即打开开发者工具面板，之后每次启动也会自动打开；可按 F12 收起或展开。该面板用于查看界面报错与网络请求，日常使用保持关闭即可。</p>
           </div>
           <div class="log-toolbar">
             <span id="logCountLabel" class="settings-hint log-count">0</span>
@@ -1354,6 +1469,26 @@
   </div>
 
   <!-- 卸载确认：点「卸载」后弹出，再勾选是否删数据并确认 -->
+  <!-- 启动时的性能测试提示：性能参数还没有本机数据时出现 -->
+  <div id="perfPromptOverlay" class="overlay hidden">
+    <div class="note-card perf-prompt-card" role="dialog" aria-modal="true" aria-labelledby="perfPromptTitle">
+      <div class="note-head">
+        <h2 id="perfPromptTitle" class="note-title" data-i18n="perfPromptTitle">建议先做一次性能测试</h2>
+        <button id="perfPromptCloseBtn" class="btn-plain settings-close" type="button" data-i18n-title="settingsClose" title="关闭">✕</button>
+      </div>
+      <p class="perf-prompt-body" data-i18n="perfPromptBody">还没有本机性能数据。测一次即可得出合适的处理进程数与目录遍历线程数，扫描更快、占内存更少，约需两分钟。</p>
+      <div class="note-foot perf-prompt-foot">
+        <label class="perf-prompt-check" for="perfPromptOffChk">
+          <input id="perfPromptOffChk" type="checkbox" />
+          <span data-i18n="perfPromptOff">以后不再提醒</span>
+        </label>
+        <span class="note-foot-spacer"></span>
+        <button id="perfPromptCancelBtn" class="btn-plain" type="button" data-i18n="cancel">取消</button>
+        <button id="perfPromptGoBtn" class="btn-primary compact" type="button" data-i18n="perfPromptGo">去设置</button>
+      </div>
+    </div>
+  </div>
+
   <div id="uninstallOverlay" class="overlay hidden">
     <div class="uninstall-card" role="dialog" aria-modal="true" aria-labelledby="uninstallDialogTitle">
       <div class="note-head">
@@ -1411,20 +1546,20 @@
 
   <!-- Toast 提示已移入对比树区域 -->
 
-  <script src="js/state.js?v=1.1.8.2"></script>
-  <script src="js/i18n.js?v=1.1.8.2"></script>
-  <script src="js/util.js?v=1.1.8.2"></script>
-  <script src="js/theme.js?v=1.1.8.2"></script>
-  <script src="js/snapshots.js?v=1.1.8.2"></script>
-  <script src="js/pick.js?v=1.1.8.2"></script>
-  <script src="js/compare.js?v=1.1.8.2"></script>
-  <script src="js/scan.js?v=1.1.8.2"></script>
-  <script src="js/settings.js?v=1.1.8.2"></script>
-  <script src="js/modules.js?v=1.1.8.2"></script>
-  <script src="js/pending.js?v=1.1.8.2"></script>
-  <script src="js/migrate.js?v=1.1.8.2"></script>
-  <script src="js/linkfind.js?v=1.1.8.2"></script>
-  <script src="js/ai.js?v=1.1.8.2"></script>
-  <script src="js/app.js?v=1.1.8.2"></script>
+  <script src="js/state.js?v=1.2.0"></script>
+  <script src="js/i18n.js?v=1.2.0.1"></script>
+  <script src="js/util.js?v=1.2.0"></script>
+  <script src="js/theme.js?v=1.2.0"></script>
+  <script src="js/snapshots.js?v=1.2.0"></script>
+  <script src="js/pick.js?v=1.2.0"></script>
+  <script src="js/compare.js?v=1.2.0"></script>
+  <script src="js/scan.js?v=1.2.0"></script>
+  <script src="js/settings.js?v=1.2.0.1"></script>
+  <script src="js/modules.js?v=1.2.0"></script>
+  <script src="js/pending.js?v=1.2.0"></script>
+  <script src="js/migrate.js?v=1.2.0"></script>
+  <script src="js/linkfind.js?v=1.2.0"></script>
+  <script src="js/ai.js?v=1.2.0"></script>
+  <script src="js/app.js?v=1.2.0.1"></script>
 </body>
 </html>

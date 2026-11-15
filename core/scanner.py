@@ -32,6 +32,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from .i18n import t
+from . import applog, packenv
 from .models import SnapshotMeta, clean_link_target
 from .snapshot import EntryRow, NullWriter, SnapshotWriter
 
@@ -459,8 +460,11 @@ def scan_to_snapshot(
     cancel: CancelCheck | None = None,
     now: float | None = None,
     workers: int | None = None,
+    mft_procs: int | None = None,
+    mft_read: int | None = None,
     timer: object | None = None,
     on_link: LinkCallback | None = None,
+    no_mft: bool = False,
 ) -> SnapshotMeta:
     """并行扫描 ``root``；给了 ``db_path`` 就写快照文件，没给就只扫描。
 
@@ -482,6 +486,9 @@ def scan_to_snapshot(
         on_link: 每遇到一个被记成链接的项就调一次
             ``on_link(相对扫描根的路径, 重解析点标签, 原始目标)``。
             在 worker 线程里调用，可能并发。
+        no_mft: 为 True 时完全不尝试快速解析，直接走目录遍历。
+            用于打包环境下展开目录已不可读时主动降级，避免新启动的
+            解析进程读不到标准库。
 
     Returns:
         本次扫描的 :class:`SnapshotMeta`。
@@ -510,13 +517,22 @@ def scan_to_snapshot(
 
     # 盘符根 + NTFS + use_mft（默认开）：尝试 MFT，失败回退目录遍历。
     # 解析进程数由 mft.parallel 按核数/记录量自推导，不传扫描线程数。
-    if not follow_symlinks:
+    if not follow_symlinks and not no_mft:
         try:
             from .mft import MftUnavailable, is_mft_eligible, scan_mft_to_snapshot
         except ImportError:
             is_mft_eligible = None  # type: ignore[assignment]
         else:
-            if is_mft_eligible(root):
+            # 打包运行时，展开目录若已读不出来，新启动的解析进程会读不到
+            # 标准库而启动失败（表现为若干个错误对话框）。这里先确认它可读，
+            # 读不到就直接走目录遍历，不冒这个险。源码运行时恒为可读。
+            pack_ok, pack_detail = packenv.check_pack_env()
+            if not pack_ok:
+                applog.warn(
+                    "pack env unreadable; skipping multiprocess parse"
+                    f" | detail={pack_detail}"
+                )
+            if pack_ok and is_mft_eligible(root):
                 try:
                     if _mark:
                         _mark("mft_try")
@@ -529,10 +545,17 @@ def scan_to_snapshot(
                         now=now,
                         timer=timer,
                         on_link=on_link,
+                        workers=mft_procs,
+                        read_threads=mft_read,
                     )
-                except MftUnavailable:
+                except MftUnavailable as exc:
                     if _mark:
                         _mark("mft_fallback")
+                    applog.info(
+                        "MFT scan unavailable; falling back to directory walk"
+                        f" | reason={type(exc).__name__}"
+                        f" | detail={exc}"
+                    )
                 # ScanCancelled 等向上抛
     meta = SnapshotMeta(root=os.path.abspath(root), scanned_at=now or time.time())
     meta.free_size = query_free_size(root)

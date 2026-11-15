@@ -99,13 +99,10 @@ def parse_from_shared_memory(
     if _span_start:
         _span_start("mft_parse_unpack")
     try:
-        # names 已是全局 record index；_unpack_chunk 期望相对 chunk
-        # 按单 chunk start=0 处理：把 names 的 index 当 rel
-        names_rel = [
-            (idx, p, a, r, f, n, ns)
-            for idx, p, a, r, f, n, ns in table.names
-        ]
-        return _unpack_chunk(0, table.meta, names_rel, table.link_targets)
+        # names 已是全局 record index；直接交给解包，无需再转七元组
+        return _unpack_chunk(
+            0, table.meta, table.names, table.link_targets, table.reparse_tags
+        )
     finally:
         if _span_end:
             _span_end("mft_parse_unpack")

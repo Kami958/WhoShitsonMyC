@@ -77,6 +77,24 @@ def _activate_existing_window() -> bool:
 _single_instance_handle = None
 
 
+def _release_single_instance() -> None:
+    """放弃单实例锁。
+
+    仅用于「立即重启」：必须先把锁放掉再拉起新进程，否则新进程会被
+    判定为重复启动而直接退出，用户看到的是窗口消失、什么都没恢复。
+    """
+    global _single_instance_handle
+    if os.name != "nt" or not _single_instance_handle:
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(_single_instance_handle))
+    except Exception as exc:  # noqa: BLE001 - 放锁失败不影响后续启动新进程
+        applog.warn(f"release single instance failed: {exc}")
+    _single_instance_handle = None
+
+
 def _warn_already_running() -> None:
     """已有实例时弹原生提示：本次启动没有继续，且不改变已有窗口的权限。
 

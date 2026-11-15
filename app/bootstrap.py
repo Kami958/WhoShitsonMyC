@@ -53,12 +53,15 @@ from .webview2 import (
     _WEBVIEW2_GUID,
     _WEBVIEW2_URL,
     _find_fixed_runtime,
+    _pick_ui_port,
     _start_webview,
     _warn_missing_webview2,
     _warn_webview_start_failed,
+    _watch_ui_server,
     _webview2_installed,
     _webview_storage_path,
     _wire_bundled_webview2,
+    clear_webview_storage,
 )
 
 from .logsync import (
@@ -72,6 +75,7 @@ from .singleinstance import (
     _SINGLE_INSTANCE_MUTEX,
     _acquire_single_instance,
     _activate_existing_window,
+    _release_single_instance,
     _single_instance_handle,
     _warn_already_running,
 )
@@ -96,22 +100,21 @@ def _is_admin() -> bool:
 
 
 def _window_title() -> str:
-    """窗口标题：程序名 + 管理员状态 + 版本号（状态文案随界面语言）。
+    """窗口标题：程序名后面用括号跟当前权限状态（状态文案随界面语言）。
 
-    非管理员时在状态后附加「推荐以管理员启动」提示，方便一眼看见。
-    运行中发现新版本时追加「有新版本更新」提示。
+    非管理员时在括号里同时给出提权建议，方便一眼看见；运行中发现新版本时
+    也在括号里再添一句。
     """
     if _is_admin():
-        mode = i18n.t("管理员", "Administrator")
+        mode = i18n.t("管理员模式", "Administrator mode")
     else:
         mode = i18n.t(
-            "非管理员（推荐以管理员启动）",
-            "Not Administrator (run as Administrator recommended)",
+            "非管理员模式，建议以管理员身份启动",
+            "Not administrator, run as administrator recommended",
         )
-    title = f"WhoShitsOnMyC — {mode}"
     if _update_available:
-        title += " — " + i18n.t("有新版本更新", "New version available")
-    return title
+        mode += "，" + i18n.t("有新版本更新", "new version available")
+    return f"WhoShitsOnMyC({mode})"
 
 
 # WebView2 常青运行时（Evergreen Runtime）的固定注册表 GUID。

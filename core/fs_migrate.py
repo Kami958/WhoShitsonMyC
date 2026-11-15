@@ -25,6 +25,7 @@ from collections.abc import Callable, Iterator
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 
 from . import fs_delete
+from . import migrate_journal
 from .fs_delete import is_drive_root, normalize_abs
 
 # 下面这些名字的实现已拆到 migrate_fs / migrate_links / migrate_history,
@@ -56,7 +57,6 @@ from .migrate_fs import (
 )
 
 from .migrate_links import (
-    _REGISTRY_LOCK,
     _registry_path,
     delete_junction,
     get_link_record,
@@ -1179,10 +1179,13 @@ def migrate_directory(
             watch_failed=not watch_ok,
         )
 
+        entry_id = migrate_journal.begin_switch(src, aside, dst)
+
         _emit("setaside", current="")
         try:
             os.rename(src, aside)
         except OSError as exc:
+            migrate_journal.finish_switch(entry_id)
             _rmtree(dst)
             raise MigrateError(f"rename:{exc}") from exc
 
@@ -1190,13 +1193,20 @@ def migrate_directory(
             _emit("junction", current="")
             _create_junction(dst, src)
         except MigrateError:
-            # 建 junction 失败：把让位目录改回原名，再清掉复制产物
+            # 建 junction 失败：把让位目录改回原名，再清掉复制产物。
+            # 改回失败时保留日志，启动时会提示原路径和备份路径。
+            restored = False
             try:
                 os.rename(aside, src)
+                restored = True
             except OSError:
                 pass
+            if restored:
+                migrate_journal.finish_switch(entry_id)
             _rmtree(dst)
             raise
+
+        migrate_journal.finish_switch(entry_id)
 
         # 切换后收尾：切换那一瞬通过已经打开的句柄写进旧目录的内容，新位置里
         # 没有。这里只补不删，也不再受理取消：迁移已经切完了，回滚反而是错的。
@@ -1264,9 +1274,13 @@ def migrate_directory(
     if action != "keep":
         try:
             if action == "recycle":
-                fs_delete.delete_to_recycle(aside)
+                fs_delete.delete_guarded(
+                    aside, permanent=False, channel=fs_delete.CHANNEL_MIGRATE
+                )
             else:
-                fs_delete.delete_path(aside, permanent=True)
+                fs_delete.delete_guarded(
+                    aside, permanent=True, channel=fs_delete.CHANNEL_MIGRATE
+                )
             backup_cleaned = True
         except fs_delete.DeleteError:
             backup_cleaned = False
@@ -1483,14 +1497,17 @@ def remigrate_link(
         # 删除可能拖很久，进破坏性步骤前再查一次取消；真开始删之后不再受理取消，
         # 免得删到一半停下，剩下那半是什么状态谁也说不清。
         action = "keep"
-    if action == "purge":
+    if action != "keep":
         # 校验完之后又有人往原路径里写过东西（那部分落在旧目标上，新目标里没有），
-        # 这时不能彻底删，改成改名保留，删除旧迁移的入口留在面板上。
-        # 这趟遍历不再看取消位：取消位刚在上面查过，途中新来的取消等下次再说。
+        # 这时不能删，改成改名保留，删除旧迁移的入口留在面板上。回收站只是可恢复，
+        # 同样不能让刚写进去的内容直接从访问路径上消失。
         if not settle.get("quiet"):
-            # 收尾时目录还在被写：进去的东西未必都到了新目标，不能彻底删
+            # 收尾时目录还在被写：进去的东西未必都到了新目标
             action = "keep"
-        elif _newest_mtime(old_target, cancel=lambda: False) > verify_at:
+        elif (
+            action == "purge"
+            and _newest_mtime(old_target, cancel=lambda: False) > verify_at
+        ):
             action = "keep"
 
     left = ""
@@ -1506,15 +1523,22 @@ def remigrate_link(
     else:
         try:
             if action == "recycle":
-                fs_delete.delete_to_recycle(old_target)
+                fs_delete.delete_guarded(
+                    old_target, permanent=False, channel=fs_delete.CHANNEL_MIGRATE
+                )
             else:
-                fs_delete.delete_path(old_target, permanent=True)
+                fs_delete.delete_guarded(
+                    old_target, permanent=True, channel=fs_delete.CHANNEL_MIGRATE
+                )
             removed = True
         except fs_delete.DeleteError:
             removed = False
-        # 删掉了才清登记：删失败时路径留着，面板上的[删除]入口还在
+        # 删掉了才清登记；删失败时把原路径写回登记里，面板上的删除入口还在，
+        # 否则这份旧数据会变成没有入口的残留。
         if removed:
             set_link_old_target(link_path, "")
+        else:
+            set_link_old_target(link_path, old_target)
 
     return {
         "ok": True,
@@ -1607,7 +1631,9 @@ def restore_link(
     recycled_backup = ""
     if backup and os.path.isdir(backup) and not _is_reparse(backup):
         try:
-            fs_delete.delete_path(backup, permanent=permanent)
+            fs_delete.delete_guarded(
+                backup, permanent=permanent, channel=fs_delete.CHANNEL_MIGRATE
+            )
             recycled_backup = backup
         except fs_delete.DeleteError:
             pass
@@ -1616,7 +1642,9 @@ def restore_link(
     recycled_target = ""
     if target and os.path.isdir(target) and not _is_reparse(target):
         try:
-            fs_delete.delete_to_recycle(target)
+            fs_delete.delete_guarded(
+                target, permanent=False, channel=fs_delete.CHANNEL_MIGRATE
+            )
             recycled_target = target
         except fs_delete.DeleteError:
             pass

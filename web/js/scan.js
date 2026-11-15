@@ -24,10 +24,100 @@ async function newScan() {
     toastWarn(t("scanMftFallbackNonAdmin"));
   }
   const started = await state.api.start_scan(res.path);
+  if (started && started.pack_env_error) {
+    hideScanOverlay();
+    const choice = await showPackEnvDialog(started.pack_env_error);
+    if (choice === "slow") {
+      showScanOverlay(res.path);
+      const retry = await state.api.start_scan(res.path, false, true);
+      if (retry && retry.error) {
+        hideScanOverlay();
+        toast(retry.error, true);
+      }
+    } else if (choice === "restart") {
+      const res2 = await state.api.restart_app();
+      if (res2 && res2.error) toast(res2.error, true);
+    }
+    return;
+  }
   if (started.error) {
     hideScanOverlay();
     toast(started.error, true);
   }
+}
+
+/**
+ * 解包环境缺失时的选择框：立即重启，或改用不启动子进程的慢速扫描。
+ *
+ * 单独做而不复用通用确认框，是因为这里需要两个明确的动作按钮，
+ * 而通用确认框只有「确定/取消」两个位置。
+ *
+ * @returns {Promise<"restart"|"slow"|"close">}
+ */
+function showPackEnvDialog(detail) {
+  return new Promise((resolve) => {
+    const ov = document.createElement("div");
+    ov.className = "overlay";
+    // 压在通用确认框之上（后者为 125），避免被残留层遮住。
+    ov.style.zIndex = "130";
+
+    const card = document.createElement("div");
+    card.className = "confirm-card";
+    card.setAttribute("role", "dialog");
+    card.setAttribute("aria-modal", "true");
+
+    const head = document.createElement("div");
+    head.className = "note-head";
+    const title = document.createElement("h2");
+    title.className = "note-title";
+    title.textContent = t("packEnvTitle");
+    const closeBtn = document.createElement("button");
+    closeBtn.className = "btn-plain settings-close";
+    closeBtn.type = "button";
+    closeBtn.textContent = "✕";
+    closeBtn.setAttribute("aria-label", t("close"));
+    head.append(title, closeBtn);
+
+    const content = document.createElement("div");
+    content.className = "confirm-content";
+    const body = document.createElement("p");
+    body.className = "confirm-body";
+    body.textContent = t("packEnvMessage");
+    content.append(body);
+    if (detail) {
+      const err = document.createElement("p");
+      err.className = "error-detail";
+      err.textContent = "Error: " + detail;
+      content.append(err);
+    }
+
+    const foot = document.createElement("div");
+    foot.className = "note-foot confirm-foot";
+    const spacer = document.createElement("span");
+    spacer.className = "note-foot-spacer";
+    const slowBtn = document.createElement("button");
+    slowBtn.className = "btn-ghost";
+    slowBtn.type = "button";
+    slowBtn.textContent = t("packEnvSlow");
+    const restartBtn = document.createElement("button");
+    restartBtn.className = "btn-primary";
+    restartBtn.type = "button";
+    restartBtn.textContent = t("packEnvRestart");
+    foot.append(spacer, slowBtn, restartBtn);
+
+    card.append(head, content, foot);
+    ov.append(card);
+    document.body.append(ov);
+
+    const done = (value) => {
+      ov.remove();
+      resolve(value);
+    };
+    closeBtn.addEventListener("click", () => done("close"));
+    slowBtn.addEventListener("click", () => done("slow"));
+    restartBtn.addEventListener("click", () => done("restart"));
+    restartBtn.focus();
+  });
 }
 
 /** 扫描墙钟：仅 UI 用，非开发分段计时。 */
@@ -222,6 +312,9 @@ function hideScanOverlay() {
 /** 处理来自 Python 的事件推送。 */
 function onPyEvent(event, payload) {
   switch (event) {
+    case "update-available":
+      markUpdateAvailable();
+      break;
     case "scan-progress":
       // 只入队；DOM 在 rAF 合并刷新，避免 evaluate_js 风暴卡 UI
       queueScanProgress(payload.files, payload.current);

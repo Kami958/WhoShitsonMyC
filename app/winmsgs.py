@@ -164,6 +164,26 @@ def _delete_error_message(code: str, *, root: str = "", rel_path: str = "") -> s
             "该位置无法使用回收站，删除没有执行。需要彻底删除时，请勾选彻底删除后重试。",
             "The Recycle Bin cannot be used for this location, so nothing was deleted. To delete it permanently, select permanent delete and try again.",
         )
+    if c == "invalid_root":
+        return i18n.t(
+            "当前没有可用的对比范围，无法删除",
+            "No compare root is available, so nothing was deleted",
+        )
+    if c == "root_mismatch":
+        return i18n.t(
+            "该项不是从当前打开的这份对比加入的（扫描根不同），删除没有执行。请先打开它对应的快照再试。",
+            "This item was added from a different scan root than the compare that is open, so nothing was deleted. Open the matching snapshot and try again.",
+        )
+    if c == "no_session":
+        return i18n.t(
+            "对比会话已关闭，无法删除",
+            "The compare session is closed, so nothing was deleted",
+        )
+    if c == "invalid_channel":
+        return i18n.t(
+            "删除请求来源无效",
+            "The delete request was rejected",
+        )
     if c == "invalid":
         return i18n.t("无效路径", "Invalid path")
     if c.startswith("recycle:"):

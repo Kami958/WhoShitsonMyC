@@ -319,8 +319,15 @@ def test_old_format_rejected(make_tree, tmp_path):
     """v2 及更早的快照缺少邻接表结构，对比时应报友好错误。"""
     old, new = _pair(make_tree, tmp_path, {"a.txt": 1}, {"a.txt": 2})
 
-    # 把其中一份的版本号改回 2，模拟旧程序生成的快照。
+    # 版本判断以表结构为准，所以旧快照要真的建成旧结构：第二版按完整路径
+    # 存，没有父子编号列。只改 meta 里的数字不再能模拟。
     conn = sqlite3.connect(old)
+    conn.execute("DROP TABLE entries")
+    conn.execute(
+        "CREATE TABLE entries (id INTEGER PRIMARY KEY, path TEXT,"
+        " size INTEGER, is_dir INTEGER)"
+    )
+    conn.execute("INSERT INTO entries VALUES (2, 'a.txt', 1, 0)")
     conn.execute("UPDATE meta SET value = '2' WHERE key = 'format_version'")
     conn.commit()
     conn.close()
@@ -644,6 +651,44 @@ def _links_entries(dirs, links):
     return entries
 
 
+def _write_v4_snapshot(db, root, entries, version):
+    """真的按第 4 版建表写一份旧快照（没有 link_target）。
+
+    读取侧现在以 entries 表的实际列为准，所以想模拟旧快照必须真的少建列，
+    只在 meta 里写一个旧版本号是不够的。
+    """
+    import sqlite3
+
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(
+            "CREATE TABLE entries (id INTEGER PRIMARY KEY, parent_id INTEGER,"
+            " name TEXT NOT NULL, size INTEGER NOT NULL, is_dir INTEGER NOT NULL,"
+            " mtime INTEGER NOT NULL, reparse_tag INTEGER NOT NULL DEFAULT 0)"
+        )
+        conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+        conn.executemany(
+            "INSERT INTO entries (id, parent_id, name, size, is_dir, mtime,"
+            " reparse_tag) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                (e.id, e.parent_id, e.name, e.size, 1 if e.is_dir else 0,
+                 e.mtime, e.reparse_tag)
+                for e in entries
+            ],
+        )
+        meta = {
+            "root": root, "scanned_at": "1.0", "total_size": "0",
+            "file_count": "0", "dir_count": "0", "skipped": "[]",
+            "format_version": str(version), "note": "", "free_size": "0",
+        }
+        conn.executemany(
+            "INSERT INTO meta (key, value) VALUES (?, ?)", meta.items()
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _links_to(tmp_path, dirs, links, path, *, new_version=SNAPSHOT_FORMAT_VERSION,
               root=_LINKS_ROOT):
     """把 entries 写成一对新旧快照（同根），对当前侧反查 path 这个目录。"""
@@ -654,10 +699,13 @@ def _links_to(tmp_path, dirs, links, path, *, new_version=SNAPSHOT_FORMAT_VERSIO
         old_db, root, entries,
         SnapshotMeta(root=root, scanned_at=0.0, format_version=3),
     )
-    write_snapshot(
-        new_db, root, entries,
-        SnapshotMeta(root=root, scanned_at=1.0, format_version=new_version),
-    )
+    if new_version < 5:
+        _write_v4_snapshot(new_db, root, entries, new_version)
+    else:
+        write_snapshot(
+            new_db, root, entries,
+            SnapshotMeta(root=root, scanned_at=1.0, format_version=new_version),
+        )
     with Diff(old_db, new_db) as diff:
         return diff.links_to_abs(abs_under_root(root, path or ""))
 
@@ -858,3 +906,318 @@ def test_links_query_uses_link_index(tmp_path):
         conn.close()
     detail = " ".join(str(row[3]) for row in plan)
     assert "idx_entries_link" in detail
+
+
+def test_fill_side_writes_full_row_shape(make_tree, tmp_path):
+    """补查写入的行必须和正常命中一样是七项，缺少最后一项会让读取方崩。"""
+    old, new = _pair(
+        make_tree,
+        tmp_path,
+        {"app": {"a.txt": 10}},
+        {"app": {"a.txt": 20}},
+    )
+    with Diff(old, new) as diff:
+        hits: dict = {}
+        diff._fill_side(
+            diff._new, 1, hits, {os.path.join("app", "a.txt")}
+        )
+        assert hits
+        row = next(iter(hits.values()))
+        assert len(row) == 7
+        assert row[5] == ""
+        assert row[6] is None
+
+
+def test_dir_shrinking_still_flags_contained_growth(make_tree, tmp_path):
+    """目录整体变小、内部却有文件变大时，仍要带 has_grew 标记。
+
+    回归用例：筛「变大」时目录曾被整条滤掉，导致用户永远打不开去看里面
+    变大的文件。目录大小是递归汇总的，整体变小与内部有变大的文件可以同时
+    成立，判定必须看标记而不是目录自身的净变化量。
+    """
+    old, new = _pair(
+        make_tree,
+        tmp_path,
+        {"a": {"big.txt": 100, "small.txt": 10}},
+        {"a": {"big.txt": 20, "small.txt": 60}},
+    )
+    # a 合计 110 → 80，整体变小；但 small.txt 从 10 涨到 60 是变大
+
+    with Diff(old, new) as diff:
+        diff.ensure_marks()
+        nodes = {n.path: n for n in diff.compare_children("")}
+        a = nodes["a"]
+        assert a.kind is ChangeKind.SHRANK
+        assert a.delta == -30
+        assert a.has_grew is True, "目录内部有变大文件，必须保留作下钻入口"
+        assert a.has_shrank is True
+
+
+def test_dir_growing_still_flags_contained_shrink(make_tree, tmp_path):
+    """目录整体变大、内部却有文件变小时，仍要带 has_shrank 标记。"""
+    old, new = _pair(
+        make_tree,
+        tmp_path,
+        {"a": {"big.txt": 10, "small.txt": 100}},
+        {"a": {"big.txt": 160, "small.txt": 20}},
+    )
+    # a 合计 110 → 180，整体变大；但 small.txt 从 100 降到 20 是变小
+
+    with Diff(old, new) as diff:
+        diff.ensure_marks()
+        nodes = {n.path: n for n in diff.compare_children("")}
+        a = nodes["a"]
+        assert a.kind is ChangeKind.GREW
+        assert a.delta == 70
+        assert a.has_shrank is True, "目录内部有变小文件，必须保留作下钻入口"
+        assert a.has_grew is True
+
+
+def test_dir_mark_absent_when_no_contained_change(make_tree, tmp_path):
+    """内部只有同向变化时，反向标记保持关闭，避免筛出毫无内容的目录。"""
+    old, new = _pair(
+        make_tree,
+        tmp_path,
+        {"a": {"x.txt": 10}, "b": {"y.txt": 100}},
+        {"a": {"x.txt": 50}, "b": {"y.txt": 20}},
+    )
+
+    with Diff(old, new) as diff:
+        diff.ensure_marks()
+        nodes = {n.path: n for n in diff.compare_children("")}
+        assert nodes["a"].has_grew is True
+        assert nodes["a"].has_shrank is False
+        assert nodes["b"].has_shrank is True
+        assert nodes["b"].has_grew is False
+
+
+def test_file_nodes_never_carry_subtree_marks(make_tree, tmp_path):
+    """文件节点没有子树，变大变小标记恒为关闭。"""
+    old, new = _pair(
+        make_tree,
+        tmp_path,
+        {"a": {"x.txt": 10, "y.txt": 40}},
+        {"a": {"x.txt": 50, "y.txt": 20}},
+    )
+
+    with Diff(old, new) as diff:
+        diff.ensure_marks()
+        children = {n.path: n for n in diff.compare_children("a")}
+        assert children[os.path.join("a", "x.txt")].has_grew is False
+        assert children[os.path.join("a", "x.txt")].has_shrank is False
+        assert children[os.path.join("a", "y.txt")].has_grew is False
+        assert children[os.path.join("a", "y.txt")].has_shrank is False
+
+
+def test_nested_dir_carries_grew_mark(make_tree, tmp_path):
+    """标记要传达到下层目录，不仅是顶层。
+
+    用户是在任意一层展开的，若只有顶层带标记，点进去下一层的目录又会被
+    滤掉，漏选问题只解决一半。
+    """
+    old, new = _pair(
+        make_tree,
+        tmp_path,
+        {"a": {"b": {"x.txt": 100}, "pad.txt": 10}},
+        {"a": {"b": {"x.txt": 400}, "pad.txt": 10}},
+    )
+    # a 整体 110 → 410 变大；b 也是变大；两层都要带 has_grew
+
+    with Diff(old, new) as diff:
+        diff.ensure_marks()
+        top = {n.path: n for n in diff.compare_children("")}
+        assert top["a"].has_grew is True
+        inner = {n.path: n for n in diff.compare_children("a")}
+        assert inner[os.path.join("a", "b")].has_grew is True
+
+
+def _write_size_pair(tmp_path, old_actual, new_actual, size=100, recorded=None):
+    """造一对只有单个文件的最小快照，可指定两侧的实际占用（None = 未记录）。
+
+    ``recorded`` 控制快照整体「是否采集了实际占用」：默认按该侧是否给了
+    数值推断，也可显式指定，用于构造「采集过但这一条仍缺失」的情形。
+    """
+    import os as _os
+
+    from core.models import Entry, SnapshotMeta
+    from core.snapshot import write_snapshot
+
+    root = "C:\\size"
+    out = []
+    for tag, actual in (("o", old_actual), ("n", new_actual)):
+        db = _os.path.join(tmp_path, f"{tag}.db")
+        entries = [
+            Entry(id=1, parent_id=None, name="", size=0, is_dir=True, mtime=0),
+            Entry(
+                id=2, parent_id=1, name="a.bin", size=size,
+                is_dir=False, mtime=0, actual_size=actual,
+            ),
+        ]
+        flag = (actual is not None) if recorded is None else recorded
+        meta = SnapshotMeta(
+            root=root, scanned_at=0.0, total_size=size,
+            file_count=1, dir_count=1,
+            actual_size_total=int(actual or 0), actual_size_recorded=flag,
+        )
+        write_snapshot(db, root, entries, meta)
+        out.append(db)
+    return out[0], out[1]
+
+
+def test_size_source_actual_uses_occupancy(tmp_path):
+    """两侧都记录了实际占用时，选实际占用就取实际占用。"""
+    from core.differ import Diff
+
+    old, new = _write_size_pair(tmp_path, 100, 40)
+
+    with Diff(old, new, size_source="actual") as diff:
+        nodes = {n.path: n for n in diff.compare_children("")}
+        assert nodes["a.bin"].new_size == 40
+        assert nodes["a.bin"].old_size == 100
+        assert diff.total_delta == 40 - 100
+
+    with Diff(old, new, size_source="logical") as diff:
+        nodes = {n.path: n for n in diff.compare_children("")}
+        assert nodes["a.bin"].new_size == 100
+
+
+def test_size_source_downgrades_when_one_side_unrecorded(tmp_path):
+    """一侧没记录实际占用时，整场对比统一降为逻辑占用，不能两种单位相减。"""
+    from core.differ import Diff
+
+    old, new = _write_size_pair(tmp_path, None, 40, recorded=False)
+
+    with Diff(old, new, size_source="actual") as diff:
+        assert diff._size_source == "logical"
+        assert diff._size_fallback is True
+        nodes = {n.path: n for n in diff.compare_children("")}
+        assert nodes["a.bin"].new_size == 100
+        assert diff.total_delta == 0
+
+
+def test_size_source_falls_back_when_unrecorded(tmp_path):
+    """来源那一格没记录时回落到逻辑占用，不能当成 0。"""
+    from core.differ import Diff
+
+    old, new = _write_size_pair(tmp_path, None, None)
+
+    with Diff(old, new, size_source="actual") as diff:
+        nodes = {n.path: n for n in diff.compare_children("")}
+        assert nodes["a.bin"].new_size == 100
+
+
+def _write_legacy_db(db, root, version):
+    """手工建一份真正的旧版快照（v3 无重解析点列，v4 有但没有链接目标）。"""
+    import sqlite3
+
+    cols = {
+        3: "id INTEGER PRIMARY KEY, parent_id INTEGER, name TEXT NOT NULL,"
+           " size INTEGER NOT NULL, is_dir INTEGER NOT NULL, mtime INTEGER NOT NULL",
+        4: "id INTEGER PRIMARY KEY, parent_id INTEGER, name TEXT NOT NULL,"
+           " size INTEGER NOT NULL, is_dir INTEGER NOT NULL, mtime INTEGER NOT NULL,"
+           " reparse_tag INTEGER NOT NULL DEFAULT 0",
+    }[version]
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("CREATE TABLE entries (" + cols + ")")
+        conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+        rows = [(1, None, "", 0, 1, 0), (2, 1, "a.bin", 100, 0, 0)]
+        sql = (
+            "INSERT INTO entries (id, parent_id, name, size, is_dir, mtime"
+            + (", reparse_tag" if version >= 4 else "")
+            + ") VALUES (?, ?, ?, ?, ?, ?"
+            + (", ?" if version >= 4 else "")
+            + ")"
+        )
+        for eid, pid, name, size, is_dir, mtime in rows:
+            vals = [eid, pid, name, size, is_dir, mtime]
+            if version >= 4:
+                vals.append(0)
+            conn.execute(sql, vals)
+        for k, v in {
+            "root": root, "scanned_at": "0.0", "total_size": "100",
+            "file_count": "1", "dir_count": "1", "skipped": "[]",
+            "format_version": str(version), "note": "", "free_size": "0",
+        }.items():
+            conn.execute("INSERT INTO meta VALUES (?, ?)", (k, v))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_side_index_builds_for_legacy_versions(tmp_path):
+    """旧版快照也要能建搜索索引：缺的列归一成默认值，不能把空值当数字。
+
+    列清单统一后旧版本靠查询补空值，索引构建若原样往整数数组里塞，
+    整列空值会直接抛错，第 3 版快照的搜索预热就必然失败。
+    """
+    import threading
+
+    from core.differ_pkg.sideindex import _SideIndex
+    from core.snapshot import open_readonly
+
+    for version in (3, 4):
+        db = os.path.join(tmp_path, f"legacy{version}.db")
+        _write_legacy_db(db, r"C:\legacy", version)
+        conn = open_readonly(db)
+        try:
+            assert conn._wmc_version == version
+            idx = _SideIndex.build(conn, threading.Event())
+            assert len(idx) == 2
+            row = idx.row_at(1)
+            assert row[1] == 100          # 逻辑大小
+            assert row[4] == 0            # 重解析点标记归零
+            assert row[5] == ""           # 链接目标归一成空串
+            assert row[6] is None         # 实际占用未记录，不能是 0
+        finally:
+            conn.close()
+
+
+def test_summary_reports_fallback_reason_per_side(tmp_path):
+    """一侧没记录实际占用时，概览要说出是哪一侧、以及为什么缺。
+
+    只说一句合并文案的话，用户无法判断该重扫哪一份快照。
+    """
+    from core.differ import Diff
+
+    from app.api.compare import CompareMixin
+
+    old, new = _write_size_pair(tmp_path, None, 40, recorded=None)
+
+    with Diff(old, new, size_source="actual") as diff:
+        assert diff._size_fallback is True
+        # 降级之后，实例上的取值已经改成逻辑占用；界面却仍要说出是哪一侧
+        # 缺数据。所以直接断言界面真正拿到的那个结果，而不是只验总量。
+        summary = CompareMixin._summary(diff)
+        assert summary["size_fallback"] is True
+        assert summary["old"]["size_fallback"] is True
+        assert summary["new"]["size_fallback"] is False
+        assert summary["old"]["fallback_reason"] == "unrecorded"
+        assert summary["new"]["fallback_reason"] == ""
+        assert diff.side_total(diff.old_meta) == 100
+        assert diff.side_total(diff.new_meta) == 100
+        assert diff.total_delta == 0
+
+
+def test_size_source_switch_resets_session(tmp_path):
+    """切换口径后同一个快照对必须是新会话，否则界面继续按旧口径显示。"""
+    from core.differ import Diff
+
+    old, new = _write_size_pair(tmp_path, 100, 40)
+
+    with Diff(old, new, size_source="actual") as diff:
+        assert diff._size_source == "actual"
+    with Diff(old, new, size_source="logical") as diff:
+        assert diff._size_source == "logical"
+        node = next(n for n in diff.compare_children("") if n.name == "a.bin")
+        assert node.new_size == 100
+
+
+def test_partial_unrecorded_still_uses_actual(tmp_path):
+    """大部分条目录到了实际占用时仍按实际口径，缺的少量条目单独计数。"""
+    from core.differ import Diff
+
+    old, new = _write_size_pair(tmp_path, 100, 40)
+    with Diff(old, new, size_source="actual") as diff:
+        assert diff._size_source == "actual"
+        assert diff._size_fallback is False

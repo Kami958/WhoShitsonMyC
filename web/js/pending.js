@@ -11,8 +11,10 @@ const _tool = {
   items: [],
   permanent: false,
   executing: false,
-  // 批量执行中：{total, done, ok, fail, currentId, currentRoot, currentRel, items}
+  // 批量执行中：{total, done, ok, fail, released, currentId, currentRoot, currentRel, items}
   batch: null,
+  // 上一次批量执行的结果行：{text}，执行完留在底部，直到下一次执行
+  lastResult: null,
   // 待删除列表排序：added-desc|added-asc|name-asc|name-desc|size-desc|path-asc
   sort: "added-desc",
 };
@@ -503,6 +505,15 @@ function pendingItemKey(root, rel) {
   return `${String(root || "").toLowerCase()}\0${String(rel || "").toLowerCase()}`;
 }
 
+/** child 是否在 parent 之下（路径前缀比较，不看大小写，末尾斜杠先去掉）。 */
+function pendingPathUnder(child, parent) {
+  const norm = (s) => String(s || "").toLowerCase().replace(/\\+$/, "");
+  const c = norm(child);
+  const p = norm(parent);
+  if (!c || !p || c === p) return false;
+  return c.startsWith(`${p}\\`);
+}
+
 /**
  * 右键「加入待删除」：入队并打开待删除页签。
  */
@@ -845,12 +856,17 @@ async function proposePendingItems(items, opts) {
 
 function removePendingItem(id) {
   _tool.items = _tool.items.filter((it) => it.id !== id);
+  if (!_tool.items.length) _tool.lastResult = null;
+  renderPendingProgress();
   renderPendingList();
 }
 
 function clearPendingList() {
   if (!_tool.items.length) return;
   _tool.items = [];
+  // 列表已经空了，上一次执行留下的汇总行不能再桦在那里
+  _tool.lastResult = null;
+  renderPendingProgress();
   renderPendingList();
 }
 
@@ -877,6 +893,8 @@ function classifyPendingResult(res, errText) {
     code === "drive_root" ||
     code === "outside" ||
     code === "invalid" ||
+    code === "invalid_root" ||
+    code === "root_mismatch" ||
     code === "recycle_unsupported" ||
     code === "recycle_unavailable"
   ) {
@@ -1055,6 +1073,8 @@ function openPendingSortMenu(anchor) {
   const menu = $("#pendingSortMenu");
   const btn = $("#pendingSortBtn");
   if (!menu || !anchor) return;
+  // 执行中改排序会让「第几项」与可见行错位，本批顺序在开始时已定
+  if (_tool.executing) return;
   if (!menu.classList.contains("hidden")) {
     closePendingSortMenu();
     return;
@@ -1124,6 +1144,82 @@ function pendingMetaLine(it) {
   return parts.join(" · ");
 }
 
+/** 一行的 HTML：整表渲染与执行中的单行刷新共用同一份模板。 */
+function pendingRowHtml(it) {
+  const icon = it.isDir ? "📁" : "📄";
+  const st = it.result && it.result.status;
+  const stClass = st ? ` is-${escapeHtml(st)}` : "";
+  const stLabel = st ? pendingStatusLabel(st) : "";
+  const stTitle = (it.result && it.result.message) || stLabel;
+  const badge = stLabel
+    ? `<span class="pending-item-status" title="${escapeHtml(stTitle)}">${escapeHtml(stLabel)}</span>`
+    : "";
+  const detail = pendingDetailMessage(it);
+  const running = !!(_tool.batch && _tool.batch.currentId === it.id);
+  // 正在删的项：第二行换成进度，不再显示体积与增减
+  const metaText = running ? pendingRunningText() : pendingMetaLine(it);
+  return (
+    `<div class="pending-item${stClass}${running ? " is-running" : ""}" data-id="${escapeHtml(it.id)}">` +
+    `<div class="pending-item-head">` +
+    `<div class="pending-item-main">` +
+    `<span class="pending-item-icon" aria-hidden="true">${icon}</span>` +
+    `<div class="pending-item-text">` +
+    `<div class="pending-item-name" title="${escapeHtml(it.full)}">${escapeHtml(it.name)}</div>` +
+    `<div class="pending-item-meta" title="${escapeHtml(it.full)}">${escapeHtml(metaText)}</div>` +
+    `</div></div>` +
+    badge +
+    `<button type="button" class="btn-plain compact pending-item-locate" data-locate-id="${escapeHtml(it.id)}" data-i18n-title="pendingLocate" title="${escapeHtml(t("pendingLocate"))}">${escapeHtml(t("pendingLocate"))}</button>` +
+    `<button type="button" class="btn-plain compact pending-item-remove" data-remove-id="${escapeHtml(it.id)}" data-i18n-title="pendingRemove" title="${escapeHtml(t("pendingRemove"))}">✕</button>` +
+    `</div>` +
+    (detail ? `<div class="pending-item-error">${escapeHtml(detail)}</div>` : "") +
+    `</div>`
+  );
+}
+
+/** 给一行里的两个按钮接线；整表渲染后批量调，单行刷新后单独调。 */
+function bindPendingRowButtons(root) {
+  if (!root) return;
+  root.querySelectorAll("[data-remove-id]").forEach((btn) => {
+    btn.onclick = () => {
+      if (_tool.executing) return;
+      removePendingItem(btn.getAttribute("data-remove-id"));
+    };
+  });
+  root.querySelectorAll("[data-locate-id]").forEach((btn) => {
+    btn.onclick = () => {
+      const id = btn.getAttribute("data-locate-id");
+      const item = _tool.items.find((x) => x.id === id);
+      if (item) locatePendingItem(item);
+    };
+  });
+}
+
+/** 按编号找到已经画出来的那一行。 */
+function pendingRowElement(id) {
+  const list = $("#pendingList");
+  if (!list) return null;
+  for (const row of list.querySelectorAll(".pending-item")) {
+    if (row.getAttribute("data-id") === id) return row;
+  }
+  return null;
+}
+
+/**
+ * 只重画一行。批量删除每完成一项就用到它：
+ * 整表重建是平方级开销，还会丢焦点、让读屏器反复播报。
+ */
+function refreshPendingRow(it) {
+  const row = it ? pendingRowElement(String(it.id)) : null;
+  if (!row) return false;
+  const holder = document.createElement("div");
+  holder.innerHTML = pendingRowHtml(it);
+  const next = holder.firstElementChild;
+  if (!next) return false;
+  row.replaceWith(next);
+  bindPendingRowButtons(next);
+  return true;
+}
+
 function renderPendingList() {
   const list = $("#pendingList");
   const empty = $("#pendingEmpty");
@@ -1131,51 +1227,8 @@ function renderPendingList() {
   syncPendingSortChrome();
   const items = sortedPendingItems(_tool.items);
   if (empty) empty.classList.toggle("hidden", (_tool.items || []).length > 0);
-  list.innerHTML = items
-    .map((it) => {
-      const icon = it.isDir ? "📁" : "📄";
-      const st = it.result && it.result.status;
-      const stClass = st ? ` is-${escapeHtml(st)}` : "";
-      const stLabel = st ? pendingStatusLabel(st) : "";
-      const stTitle = (it.result && it.result.message) || stLabel;
-      const badge = stLabel
-        ? `<span class="pending-item-status" title="${escapeHtml(stTitle)}">${escapeHtml(stLabel)}</span>`
-        : "";
-      const detail = pendingDetailMessage(it);
-      const running = !!(_tool.batch && _tool.batch.currentId === it.id);
-      // 正在删的项：第二行换成进度，不再显示体积与增减
-      const metaText = running ? pendingRunningText() : pendingMetaLine(it);
-      return (
-        `<div class="pending-item${stClass}${running ? " is-running" : ""}" data-id="${escapeHtml(it.id)}">` +
-        `<div class="pending-item-head">` +
-        `<div class="pending-item-main">` +
-        `<span class="pending-item-icon" aria-hidden="true">${icon}</span>` +
-        `<div class="pending-item-text">` +
-        `<div class="pending-item-name" title="${escapeHtml(it.full)}">${escapeHtml(it.name)}</div>` +
-        `<div class="pending-item-meta" title="${escapeHtml(it.full)}">${escapeHtml(metaText)}</div>` +
-        `</div></div>` +
-        badge +
-        `<button type="button" class="btn-plain compact pending-item-locate" data-locate-id="${escapeHtml(it.id)}" data-i18n-title="pendingLocate" title="${escapeHtml(t("pendingLocate"))}">${escapeHtml(t("pendingLocate"))}</button>` +
-        `<button type="button" class="btn-plain compact pending-item-remove" data-remove-id="${escapeHtml(it.id)}" data-i18n-title="pendingRemove" title="${escapeHtml(t("pendingRemove"))}">✕</button>` +
-        `</div>` +
-        (detail ? `<div class="pending-item-error">${escapeHtml(detail)}</div>` : "") +
-        `</div>`
-      );
-    })
-    .join("");
-  list.querySelectorAll("[data-remove-id]").forEach((btn) => {
-    btn.onclick = () => {
-      if (_tool.executing) return;
-      removePendingItem(btn.getAttribute("data-remove-id"));
-    };
-  });
-  list.querySelectorAll("[data-locate-id]").forEach((btn) => {
-    btn.onclick = () => {
-      const id = btn.getAttribute("data-locate-id");
-      const it = _tool.items.find((x) => x.id === id);
-      if (it) locatePendingItem(it);
-    };
-  });
+  list.innerHTML = items.map(pendingRowHtml).join("");
+  bindPendingRowButtons(list);
   updatePendingBadge();
   const chk = $("#pendingPermanentChk");
   if (chk) chk.checked = !!_tool.permanent;
@@ -1209,11 +1262,14 @@ function pendingBatchText() {
   const b = _tool.batch;
   if (!b) return "";
   const cur = Math.min(b.total, b.done + 1);
-  return (
+  let text =
     t("pendingBatchAt", cur, b.total) +
     " | " +
-    t("pendingBatchCounts", b.ok, b.fail)
-  );
+    t("pendingBatchCounts", b.ok, b.fail);
+  if (Number(b.released) > 0) {
+    text += " | " + t("pendingBatchFreed", fmtBytes(b.released));
+  }
+  return text;
 }
 
 /** 正在删的那一项自己的进度文案：只报它已经删掉多少项；第几项由底部那行负责。 */
@@ -1231,8 +1287,26 @@ function renderPendingProgress() {
   const box = $("#pendingProgress");
   if (!box) return;
   const b = _tool.batch;
-  box.classList.toggle("hidden", !b);
-  if (!b) return;
+  if (!b) {
+    // 执行完保留一行汇总（含这次腾出的空间），下一次执行或清空列表时退场
+    const last = _tool.lastResult;
+    box.classList.toggle("hidden", !last);
+    if (!last) return;
+    const fillDone = $("#pendingProgressFill");
+    if (fillDone) fillDone.style.width = "100%";
+    const textDone = $("#pendingProgressText");
+    if (textDone) {
+      const freed = last.bytes > 0 ? fmtBytes(last.bytes) : "";
+      textDone.textContent = t(
+        last.finished ? "pendingDoneLine" : "pendingDoneAborted",
+        last.ok,
+        last.fail,
+        freed
+      );
+    }
+    return;
+  }
+  box.classList.toggle("hidden", false);
   const fill = $("#pendingProgressFill");
   if (fill) {
     const pct = b.total > 0 ? Math.round((b.done / b.total) * 100) : 0;
@@ -1271,8 +1345,11 @@ async function executePendingDeletes() {
     toast(t("deleteFail"), true);
     return;
   }
-  // 已成功的不再重试；失败/缺失等可再执行
-  const items = _tool.items.filter((it) => !it.result || it.result.status !== "ok");
+  // 已成功的不再重试；失败/缺失等可再执行。
+  // 按当前列表的显示顺序执行，让正在删的那一行与进度看上去对得上
+  const items = sortedPendingItems(
+    _tool.items.filter((it) => !it.result || it.result.status !== "ok")
+  );
   if (!items.length) {
     toast(t("pendingEmpty"));
     return;
@@ -1305,11 +1382,13 @@ async function executePendingDeletes() {
   }
 
   _tool.executing = true;
+  _tool.lastResult = null;
   _tool.batch = {
     total: n,
     done: 0,
     ok: 0,
     fail: 0,
+    released: 0,
     currentId: "",
     currentRoot: "",
     currentRel: "",
@@ -1319,21 +1398,59 @@ async function executePendingDeletes() {
   renderPendingProgress();
   let okCount = 0;
   let failCount = 0;
+  let released = 0;  // 成功项按列表显示的大小汇总，即这次腾出的空间
+  // 父项的大小是子树合计，父子同时入队时不能再把子项算一遍，否则腾出量偏大
+  const countedIds = new Set(
+    items.filter((it) => !items.some((o) => pendingPathUnder(it.full, o.full))).map((it) => it.id)
+  );
+  // 待删列表能跨多次对比累积；与当前对比根不同的项，后端一定拒绝，
+  // 提前一次标记掉，不再逐项发起注定失败的调用。
+  // 这里只做跳过，真正允不允许删仍然后端说了算。
+  const curRoot = String((state && state.compareRoot) || "");
+  const sameRoot = (a, b) =>
+    !a || !b ||
+    _treePathKey(String(a).replace(/[\\/]+$/, "")) ===
+      _treePathKey(String(b).replace(/[\\/]+$/, ""));
+  const offRoot = curRoot
+    ? items.filter((it) => it.root && !sameRoot(it.root, curRoot))
+    : [];
+  const runnable = offRoot.length ? items.filter((it) => !offRoot.includes(it)) : items;
+  let completed = false;
   try {
-    for (const it of items) {
+    if (offRoot.length) {
+      // 先集中标记，不发起调用
+      for (const it of offRoot) {
+        failCount += 1;
+        _tool.batch.done += 1;
+        it.result = { status: "blocked", message: t("pendingOffRoot") };
+      }
+      _tool.batch.fail = failCount;
+      for (const it of offRoot) refreshPendingRow(it);
+      renderPendingProgress();
+      toastWarn(t("pendingOffRootNotice", offRoot.length));
+    }
+    for (const it of runnable) {
       _tool.batch.currentId = it.id;
       _tool.batch.currentRoot = it.root;
       _tool.batch.currentRel = it.rel;
       _tool.batch.items = 0;
-      // 先标出在删哪一项，删大目录时这一行会一直停着
-      renderPendingList();
+      // 只重画当前行，不滚动跟随：小文件几十毫秒就过、大目录要几秒，
+      // 跟着跳会让人看不出删到哪儿了
+      refreshPendingRow(it);
       try {
         const res = await state.api.delete_path(it.root, it.rel, permanent);
         if (res && res.error) {
           failCount += 1;
           it.result = classifyPendingResult(res);
+        } else if (!res || res.ok !== true) {
+          // 桥接没给出明确结果时不能当成删成功，否则腾出量会虚高
+          failCount += 1;
+          it.result = classifyPendingResult(null, t("deleteFail"));
         } else {
           okCount += 1;
+          if (countedIds.has(it.id)) {
+            released += Math.max(0, Number(it.size) || 0);
+          }
           it.result = {
             status: "ok",
             message: permanent ? t("deletedPermanent") : t("deletedRecycle"),
@@ -1346,24 +1463,35 @@ async function executePendingDeletes() {
       _tool.batch.done += 1;
       _tool.batch.ok = okCount;
       _tool.batch.fail = failCount;
+      _tool.batch.released = released;
       renderPendingProgress();
-      renderPendingList();
+      // 先摘掉「正在删」再重画这一行，让它立刻显示结果与原因
+      _tool.batch.currentId = "";
+      refreshPendingRow(it);
     }
+    completed = true;
   } finally {
     _tool.executing = false;
     _tool.batch = null;
+    // 存原始数字而不是已翻译的句子，切语言时能重新生成
+    _tool.lastResult =
+      okCount > 0 || failCount > 0
+        ? { ok: okCount, fail: failCount, bytes: released, finished: completed }
+        : null;
     renderPendingProgress();
     renderPendingList();
   }
+  // 立即提示只讲做了什么，腾出多少由底部那行常驻汇总负责，避免两处说同一件事
   if (okCount > 0 && failCount === 0) {
-    toast(
-      permanent
-        ? `${t("deletedPermanent")} · ${t("deleteRefreshHint")}`
-        : `${t("deletedRecycle")} · ${t("deleteRefreshHint")}`
-    );
+    toast(t(permanent ? "deletedPermanentNotice" : "deletedRecycleNotice", okCount));
   } else if (okCount > 0 || failCount > 0) {
     const severe = okCount === 0 && failCount > 0;
-    toast(t("pendingPartial", okCount, failCount), severe ? "error" : "warn");
+    toast(
+      severe
+        ? t("pendingPartial", okCount, failCount)
+        : t("pendingPartialNotice", okCount, failCount),
+      severe ? "error" : "warn"
+    );
   }
 }
 

@@ -13,6 +13,12 @@ from typing import Any
 
 from . import applog
 
+# 删除通道：调用方必须声明自己属于哪一种，统一入口据此决定检查项。
+CHANNEL_USER = "user"
+CHANNEL_MIGRATE = "migrate"
+CHANNEL_PROGRAM = "program"
+_CHANNELS = frozenset({CHANNEL_USER, CHANNEL_MIGRATE, CHANNEL_PROGRAM})
+
 # 黑名单条数 / 单条 path 长度上限
 _MAX_BLACKLIST = 200
 _MAX_PATH_LEN = 512
@@ -303,9 +309,15 @@ def evaluate_pending_candidate(
         base["code"] = "outside"
         return base
 
-    if path_matches_blacklist(full, blacklist or []):
-        base["code"] = "blacklist"
-        return base
+    # 黑名单同样看真实路径，与 delete_guarded 保持一致：目录联接的
+    # 别名路径不能绕过被保护目录。
+    if blacklist:
+        real = os.path.realpath(full)
+        if path_matches_blacklist(full, blacklist) or path_matches_blacklist(
+            real, blacklist
+        ):
+            base["code"] = "blacklist"
+            return base
 
     exists = os.path.lexists(full) if hasattr(os.path, "lexists") else os.path.exists(full)
     if require_exists and not exists:
@@ -353,13 +365,44 @@ def _recycle_is_unc(abs_path: str) -> bool:
     return p.startswith("\\\\")
 
 
-def _recycle_drive_type(abs_path: str) -> int:
-    """GetDriveTypeW 探测盘类型；探测本身失败时抛出。"""
+def _recycle_volume_root(abs_path: str) -> str:
+    """返回路径实际所在卷的挂载点。
+
+    先用 realpath 解析目录联接，再用 GetVolumePathNameW 取挂载点，
+    这样联接指向可移动盘时不会按字面盘符误判。探测失败时抛出。
+    """
+    real = os.path.realpath(abs_path)
+    if _recycle_is_unc(real):
+        raise OSError("unc")
+    drive, _ = os.path.splitdrive(real)
+    if not drive:
+        raise OSError("no drive")
+    root = drive + "\\"
+    if os.name != "nt":
+        return root
     import ctypes
 
-    drive, _ = os.path.splitdrive(abs_path)
-    root = drive + "\\" if drive else abs_path
-    return int(ctypes.windll.kernel32.GetDriveTypeW(root))
+    buf = ctypes.create_unicode_buffer(32768)
+    kernel32 = ctypes.windll.kernel32
+    get_mount = kernel32.GetVolumePathNameW
+    get_mount.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32]
+    get_mount.restype = ctypes.c_bool
+    if not get_mount(real, buf, len(buf)):
+        return root
+    return buf.value or root
+
+
+def _is_drive_mount(volume_root: str) -> bool:
+    """挂载点是否就是盘符根。"""
+    drive, tail = os.path.splitdrive(volume_root)
+    return bool(drive) and not tail.strip("\\/")
+
+
+def _recycle_drive_type(volume_root: str) -> int:
+    """GetDriveTypeW 探测卷类型；探测本身失败时抛出。"""
+    import ctypes
+
+    return int(ctypes.windll.kernel32.GetDriveTypeW(volume_root))
 
 
 def _recycle_policy_blocks() -> bool:
@@ -381,7 +424,7 @@ def _recycle_policy_blocks() -> bool:
     return False
 
 
-def _recycle_volume_nukes(abs_path: str) -> bool:
+def _recycle_volume_nukes(volume_root: str) -> bool:
     """该卷是否设置了删除时不进回收站而直接永久删除。
 
     读取当前用户在每个卷上的回收站属性 ``NukeOnDelete``。查询不到卷名、
@@ -390,14 +433,12 @@ def _recycle_volume_nukes(abs_path: str) -> bool:
     import ctypes
     import winreg
 
-    drive, _ = os.path.splitdrive(abs_path)
-    root = drive + "\\" if drive else abs_path
     buf = ctypes.create_unicode_buffer(1024)
     kernel32 = ctypes.windll.kernel32
     get_volume = kernel32.GetVolumeNameForVolumeMountPointW
     get_volume.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32]
     get_volume.restype = ctypes.c_bool
-    if not get_volume(root, buf, len(buf)):
+    if not get_volume(volume_root, buf, len(buf)):
         raise OSError("volume name unavailable")
     volume = (buf.value or "").rstrip("\\")
     marker = "Volume"
@@ -425,17 +466,28 @@ def _recycle_unavailable_reason(abs_path: str) -> str:
     返回。探测本身出错时同样按不可用处理，无法确认就不执行删除。
     """
     try:
-        if _recycle_is_unc(abs_path):
+        try:
+            real = os.path.realpath(abs_path)
+        except OSError:
+            return "path"
+        if _recycle_is_unc(real):
             return "unc"
         try:
-            drive_type = _recycle_drive_type(abs_path)
+            volume_root = _recycle_volume_root(real)
+        except (OSError, AttributeError, ValueError, TypeError):
+            return "volume"
+        if not _is_drive_mount(volume_root):
+            # 卷挂在目录下时无法可靠确认回收站归属，按不可用处理
+            return "mount_point"
+        try:
+            drive_type = _recycle_drive_type(volume_root)
         except (OSError, AttributeError, ValueError, TypeError):
             return "drive_type"
         if drive_type in _RECYCLE_BLOCKED_DRIVE_TYPES:
             return f"drive_type:{drive_type}"
         if _recycle_policy_blocks():
             return "policy"
-        if _recycle_volume_nukes(abs_path):
+        if _recycle_volume_nukes(volume_root):
             return "nuke_on_delete"
     except Exception:  # noqa: BLE001 - 探测失败时不能假定回收站可用
         return "unknown"
@@ -668,6 +720,57 @@ def delete_path(abs_path: str, *, permanent: bool = False, on_progress: Any = No
         delete_permanent(abs_path, on_progress=on_progress)
     else:
         delete_to_recycle(abs_path)
+
+
+def delete_guarded(
+    abs_path: str,
+    *,
+    permanent: bool = False,
+    channel: str,
+    root: str | None = None,
+    blacklist: list[dict[str, str]] | None = None,
+    on_progress: Any = None,
+) -> str:
+    """统一删除入口：所有删除都必须经过这里。
+
+    ``channel`` 决定检查项：``user`` 必须有扫描根并套黑名单；``migrate``
+    由迁移流程核对业务前置条件后调用；``program`` 由程序自身清理时使用。
+
+    失败抛 :class:`DeleteError`，message 为机器键。
+    """
+    path = normalize_abs(abs_path)
+    if not path:
+        raise DeleteError("invalid")
+    if channel not in _CHANNELS:
+        raise DeleteError("invalid_channel")
+    # 盘符根按真实路径再做一遍：路径中间可以是目录联接，字面量看起来正常
+    # 的路径实际指向盘符根。
+    check = os.path.realpath(path)
+    if is_drive_root(path) or is_drive_root(check):
+        raise DeleteError("drive_root")
+    if channel == CHANNEL_USER:
+        root_abs = normalize_abs(root)
+        if not root_abs:
+            raise DeleteError("invalid_root")
+        if path_for_match(path) == path_for_match(root_abs):
+            raise DeleteError("root")
+        root_real = os.path.realpath(root_abs)
+        if not is_under_root(root_abs, path) or not is_under_root(root_real, check):
+            raise DeleteError("outside")
+    # 黑名单同时比对字面路径与真实路径：扫描根里可以有目录联接，
+    # 用联接路径发起的删除否则会绕过黑名单。
+    if blacklist and (
+        path_matches_blacklist(path, blacklist)
+        or path_matches_blacklist(check, blacklist)
+    ):
+        raise DeleteError("blacklist")
+    if not os.path.lexists(path):
+        raise DeleteError("missing")
+    if permanent:
+        delete_permanent(path, on_progress=on_progress)
+    else:
+        delete_to_recycle(path)
+    return path
 
 
 def _shfile_delete(path: str, *, allow_undo: bool) -> None:

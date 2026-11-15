@@ -68,6 +68,9 @@ def _meta_to_json(meta: SnapshotMeta) -> str:
             "format_version": meta.format_version,
             "note": (meta.note or "").strip(),
             "free_size": meta.free_size,
+            "actual_size_total": meta.actual_size_total,
+            "actual_size_recorded": bool(meta.actual_size_recorded),
+            "actual_size_unrecorded": meta.actual_size_unrecorded,
         },
         ensure_ascii=False,
         separators=(",", ":"),
@@ -93,6 +96,9 @@ def _meta_from_json(text: str) -> SnapshotMeta:
             format_version=int(data.get("format_version", 0)),
             note=str(data.get("note") or "").strip(),
             free_size=int(data.get("free_size", 0)),
+            actual_size_total=int(data.get("actual_size_total", 0)),
+            actual_size_recorded=bool(data.get("actual_size_recorded", False)),
+            actual_size_unrecorded=int(data.get("actual_size_unrecorded", 0)),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise SnapshotError(

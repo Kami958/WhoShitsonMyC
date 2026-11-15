@@ -450,6 +450,11 @@ function buildSnapEl(s, pins) {
   const zipTag = s.compressed
     ? `<span class="snap-zip" title="${escapeHtml(fmtBytes(s.file_size || 0))}">${t("tagCompressed")}</span>`
     : "";
+  // 快照格式版本：做成与压缩标签同款的小徽章，结束右对齐、悬停只说明版本。
+  const verNum = Number(s.format_version) || 0;
+  const verTag = verNum > 0
+    ? `<span class="snap-ver" title="${escapeHtml(t("snapVersionTitle", verNum))}">v${verNum}</span>`
+    : "";
   const noteText = (s.note || "").trim();
   const noteLine = noteText
     ? `<div class="snap-note" data-act="note" title="${escapeHtml(t("noteTitle"))}">${escapeHtml(noteText)}</div>`
@@ -464,10 +469,10 @@ function buildSnapEl(s, pins) {
     ` title="${escapeHtml(pinTitle)}" aria-label="${escapeHtml(pinTitle)}"` +
     ` aria-pressed="${isPinned ? "true" : "false"}">${_PIN_ICON}</button>`;
   el.innerHTML = `
-    <div class="snap-root"><span class="snap-root-main">${escapeHtml(s.root)}${role}${zipTag}</span>${pinBtn}</div>
+    <div class="snap-root"><span class="snap-root-main">${escapeHtml(s.root)}${role}${zipTag}</span>${verTag}${pinBtn}</div>
     ${noteLine}
     <div class="snap-time"><span class="snap-ago">${fmtAgo(s.scanned_at)}</span> <span class="snap-free">${freeText}</span></div>
-    <div class="snap-meta">${fmtTime(s.scanned_at)} · ${t("filesN", (s.file_count || 0).toLocaleString())}占 ${fmtBytes(s.total_size)}</div>
+    <div class="snap-meta">${fmtTime(s.scanned_at)} · ${t("filesN", (s.file_count || 0).toLocaleString())}占 ${fmtBytes(snapshotDisplaySize(s))}</div>
     <div class="snap-acts">
       <button class="snap-act old" data-act="old">${t("setAsBase")}</button>
       <button class="snap-act new" data-act="new">${t("setAsCurrent")}</button>

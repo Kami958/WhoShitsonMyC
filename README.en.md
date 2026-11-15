@@ -39,6 +39,10 @@ Instead of hunting junk by gut feeling every time, scan once while space still l
 
 - **Clean uninstall**: clear local data from Settings; then delete the exe yourself
 
+- **Pending list**: right-click in the compare tree to add items, then delete them in a batch; when it finishes, you get the total space freed
+
+- **Two size figures**: actual size is what a file really takes on disk, logical size is the byte count of its content; switch in Settings
+
 - ~~**Optional AI (experimental)**: **we totally get the neat-freak instinct — not every tool should mindlessly bolt on AI, and we fully understand if all you want is a plain little utility.** The default build and the AI build used to be separate.~~
 > AI’s role and behavior here are still unclear or hard to control, so we are not planning to ship AI with this tool for now. We will not actively publish AI-enabled builds.
 
@@ -48,12 +52,13 @@ Instead of hunting junk by gut feeling every time, scan once while space still l
 2. Click **＋ New scan**, pick a folder such as `C:\`. When the scan finishes, you get a snapshot
 3. When free space is eaten again, scan the **same** folder once more
 4. Set the older snapshot as **Base**, the newer one as **Current**, then click **Compare**
-5. Results show up below: red means growth, green means shrink
+5. Results show up below: red means growth, green means shrink. To clean up, right-click an item to add it to the pending list, then delete in a batch
 
 At the bottom of the sidebar you can also:
 
 - **Open / refresh / import snapshots**: open the current snapshot folder, refresh the list, or import snapshots from elsewhere
-- **Settings**: adjust scan threads, snapshot compression, MFT attempt, snapshot folder, and more
+- **Pending**: the right-hand tab holds items marked for deletion; delete them in a batch to the Recycle Bin or permanently, and see how much space was freed
+- **Settings**: per-drive directory-walk threads and parse processes on the Performance tab, snapshot compression, MFT attempt, snapshot folder, and more
 - **Language / theme**: switch between Chinese and English, dark and light
 
 ## Download
@@ -76,9 +81,9 @@ Grab a build from [Releases](https://github.com/Kami958/WhoShitsonMyC/releases)
 
 > Ballpark from the author’s laptop: volume-root scan of ~1M files on an M.2 SSD with MFT on is often around the low-teens of seconds (machine and cold/warm cache vary)
 
-- If the scan path is on a hard disk drive, set the scan thread count to **1** in Settings
+- If the scan path is on a hard disk drive, open the Performance tab in Settings and set that drive's directory-walk threads to **1**
 
-- **When scanning a drive root** (e.g. `C:\`, `D:\`), turning **Try MFT scan** on or off in Settings may help (administrator required)
+- **On a drive root** (e.g. `C:\`, `D:\`), try **Try MFT scan** both on and off in Settings and keep whichever suits your machine (administrator required)
 - Still stuck? Open an issue
 
 **Q: Why do two scans in a row show a large size difference?**
@@ -90,6 +95,9 @@ Grab a build from [Releases](https://github.com/Kami958/WhoShitsonMyC/releases)
 
 **Q: Why does the compare tree show “Incomparable”?**  
 **A:** Some paths may not have been scanned fully — often because of permissions — so they cannot take part in the compare
+
+**Q: Why do "actual size" and "logical size" differ so much for the same folder?**  
+**A:** Logical size is the byte count of the content; actual size is what it really takes on disk. Files the system has compressed, or files whose content compresses well, will show a wide gap. Snapshots from older versions can only show logical size
 
 **Q: The app says WebView2 is missing**  
 **A:** Install the [WebView2 Evergreen runtime](https://developer.microsoft.com/microsoft-edge/webview2/), then start the app again

@@ -132,7 +132,10 @@ def test_diff_via_ensure_db_path(tmp_path):
         assert nodes["c.txt"].kind.value == "added"
 
 
-def test_delete_snapshot_removes_dbz(tmp_path):
+def test_delete_snapshot_removes_dbz(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "core.snapshots_store.default_snapshot_dir", lambda: str(tmp_path)
+    )
     db = os.path.join(tmp_path, "x.db")
     meta = _write_sample(db)
     dbz = compress_db(db, meta)
@@ -194,3 +197,43 @@ def test_compress_setting_roundtrip():
     assert set_compress_snapshots(True) is True
     assert get_compress_snapshots() is True
     assert set_compress_snapshots(False) is False
+
+
+def test_actual_size_meta_roundtrip(tmp_path):
+    """实际占用的三项在 .db 与 .dbz 两条路径上都要原样往返。
+
+    这三项分别走三套读写代码（写 meta 表、读 meta 表、压缩包里的 json），
+    任意一处漏写都会静默变成 0 或丢失。
+    """
+    from core.compress import read_meta_any
+    from core.models import Entry, SnapshotMeta
+    from core.snapshot import read_meta, write_snapshot
+
+    db = str(tmp_path / "actual.db")
+    meta = SnapshotMeta(
+        root="C:\t", scanned_at=1.0, total_size=100,
+        file_count=2, dir_count=1,
+        actual_size_total=8192, actual_size_recorded=True,
+        actual_size_unrecorded=1,
+    )
+    entries = [
+        Entry(id=1, parent_id=None, name="", size=0, is_dir=True, mtime=0),
+        Entry(id=2, parent_id=1, name="a.bin", size=100, is_dir=False,
+              mtime=0, actual_size=8192),
+        Entry(id=3, parent_id=1, name="b.bin", size=0, is_dir=False,
+              mtime=0, actual_size=None),
+    ]
+    write_snapshot(db, "C:\t", entries, meta)
+
+    fresh = read_meta(db)
+    assert (
+        fresh.actual_size_total, fresh.actual_size_recorded,
+        fresh.actual_size_unrecorded,
+    ) == (8192, True, 1)
+
+    dbz = compress_db(db)
+    packed = read_meta_any(dbz)
+    assert (
+        packed.actual_size_total, packed.actual_size_recorded,
+        packed.actual_size_unrecorded,
+    ) == (8192, True, 1)

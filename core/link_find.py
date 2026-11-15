@@ -207,6 +207,9 @@ class LinkFind:
                         # 「谁指向它」先写一份整盘快照再回头查一遍，白占磁盘
                         # 与内存，磁盘写满时还会直接失败。
                         self._set_phase("scan")
+                        # 局部导入：设置层会反向依赖扫描层，放在模块顶部成环
+                        from .store import get_mft_procs
+
                         matcher = _ScanMatcher(src["root"], self.target)
                         scan_to_snapshot(
                             src["root"],
@@ -214,6 +217,7 @@ class LinkFind:
                             progress=self._on_scan_progress,
                             cancel=self._cancel.is_set,
                             on_link=matcher.on_link,
+                            mft_procs=get_mft_procs() or None,
                         )
                         if self._cancel.is_set():
                             state = "cancelled"
@@ -294,7 +298,7 @@ class LinkFind:
             for it in hits:
                 self._hits.append(
                     {
-                        "link": it.get("path") or "",
+                        "link": it.get("abs") or it.get("path") or "",
                         "target": it.get("target") or "",
                         "kind": it.get("kind") or "",
                         "source": src["label"],
@@ -303,7 +307,7 @@ class LinkFind:
             for it in unresolved:
                 self._unresolved.append(
                     {
-                        "link": it.get("path") or "",
+                        "link": it.get("abs") or it.get("path") or "",
                         "target": it.get("target") or "",
                         "kind": it.get("kind") or "",
                         "reason": it.get("reason") or "",

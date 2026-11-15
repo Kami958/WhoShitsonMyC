@@ -92,6 +92,14 @@ class SnapshotInfo:
     folder: str = ""
     # 扫描时该盘剩余空间（字节）；旧快照无此字段，为 0
     free_size: int = 0
+    # 快照格式版本号；侧栏卡片用它显示徽标
+    format_version: int = 0
+    # 根聚合的实际占用总量（字节）；本份快照没采集时为 0
+    actual_size_total: int = 0
+    # 本份快照是否采集了实际占用；False 时界面回落到逻辑占用
+    actual_size_recorded: bool = False
+    # 采集过但仍没拿到实际占用的条目数；界面据此披露覆盖缺口
+    actual_size_unrecorded: int = 0
 
     @property
     def content_key(self) -> str:
@@ -117,6 +125,10 @@ class SnapshotInfo:
             "note": self.note or "",
             "folder": self.folder or "",
             "free_size": self.free_size,
+            "format_version": self.format_version,
+            "actual_size_total": self.actual_size_total,
+            "actual_size_recorded": self.actual_size_recorded,
+            "actual_size_unrecorded": self.actual_size_unrecorded,
         }
 
 
@@ -262,6 +274,10 @@ def snapshot_info(path: str, *, base_dir: str | None = None) -> SnapshotInfo:
         note=(meta.note or "").strip()[:_NOTE_MAX_LEN],
         folder=folder,
         free_size=meta.free_size,
+        format_version=meta.format_version,
+        actual_size_total=meta.actual_size_total,
+        actual_size_recorded=meta.actual_size_recorded,
+        actual_size_unrecorded=int(meta.actual_size_unrecorded or 0),
     )
 
 
@@ -436,7 +452,7 @@ def delete_snapshot_folder(
     Returns:
         ``{"processed": int, "renamed": [{"from": str, "to": str}, ...]}``。
     """
-    from .fs_delete import delete_path
+    from .fs_delete import CHANNEL_PROGRAM, delete_guarded
 
     safe = sanitize_folder_name(name)
     if not safe:
@@ -500,7 +516,11 @@ def delete_snapshot_folder(
             drop_cache_for(path)
         except Exception:  # noqa: BLE001
             pass
-        delete_path(path, permanent=bool(permanent))
+        delete_guarded(
+            path,
+            permanent=bool(permanent),
+            channel=CHANNEL_PROGRAM,
+        )
         return {"processed": len(snap_names), "renamed": []}
 
     os.rmdir(path)
@@ -582,7 +602,7 @@ def delete_snapshot(path: str, *, permanent: bool = False) -> None:
 
     若文件位于快照根下一层归纳文件夹且删后该夹已空，尝试删除空文件夹。
     """
-    from .fs_delete import DeleteError, delete_path, normalize_abs
+    from .fs_delete import CHANNEL_PROGRAM, DeleteError, delete_guarded, normalize_abs
 
     try:
         drop_cache_for(path)
@@ -591,8 +611,23 @@ def delete_snapshot(path: str, *, permanent: bool = False) -> None:
     abs_path = normalize_abs(path) if path else ""
     parent = os.path.dirname(abs_path) if abs_path else ""
     if abs_path:
+        # 只删快照根下最多一层归纳文件夹里的文件；其余路径一律拒绝，
+        # 避免一次拼接错误把数据目录或其他文件当快照删掉。
+        base = normalize_abs(default_snapshot_dir())
+        rel = ""
+        if base:
+            try:
+                rel = os.path.relpath(abs_path, base)
+            except ValueError:
+                rel = ""
+        if not base or rel.startswith("..") or rel.count(os.sep) > 1:
+            raise DeleteError("outside")
         try:
-            delete_path(abs_path, permanent=bool(permanent))
+            delete_guarded(
+                abs_path,
+                permanent=bool(permanent),
+                channel=CHANNEL_PROGRAM,
+            )
         except DeleteError as exc:
             code = str(exc.message or exc)
             # 与旧行为一致：目标已不存在时不报错

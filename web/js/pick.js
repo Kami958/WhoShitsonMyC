@@ -126,7 +126,7 @@ function openDropdown(which, anchor, opts) {
         ? `${t("freeLabel")} ${fmtBytes(s.free_size)}`
         : `${t("freeLabel")} ${t("freeUnknown")}`;
       item.innerHTML = `<div class="t">${fmtTime(s.scanned_at)}（${fmtAgo(s.scanned_at)}）</div>
-        <div class="m">${escapeHtml(s.root)} · <span class="dd-free">${freeText}</span> · ${fmtBytes(s.total_size)}</div>
+        <div class="m">${escapeHtml(s.root)} · <span class="dd-free">${freeText}</span> · ${fmtBytes(snapshotDisplaySize(s))}</div>
         ${noteHtml}`;
       item.onclick = () => {
         if (o.onPick) o.onPick(s);

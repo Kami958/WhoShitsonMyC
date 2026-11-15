@@ -307,6 +307,9 @@ class ChangeWatcher:
                         self._mark_overflow()
                         continue
                     else:
+                        # 句柄失效、目录被删、权限变化等错误：线程退出前必须标记
+                        # 溢出，否则调用方会把「没记录到事件」当成「期间无人写入」。
+                        self._mark_overflow()
                         break
                 # 等完成。超时只是回到循环看停止位，挂起的那次请求不动。
                 aborted = False
@@ -331,6 +334,7 @@ class ChangeWatcher:
                     if code == _ERROR_NOTIFY_ENUM_DIR:
                         self._mark_overflow()
                         continue
+                    self._mark_overflow()
                     break
                 if got.value == 0:
                     # 缓冲区溢出：只说「变了」，不说是哪个

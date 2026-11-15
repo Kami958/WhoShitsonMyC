@@ -174,6 +174,8 @@ def test_old_v4_snapshot_reads_link_target_empty(tmp_path):
     try:
         root = next(iter(children_of(conn, None)))
         assert root.link_target == ""
+        # 旧快照没有实际占用这一列，读出来必须是"未记录"，不能是 0
+        assert root.actual_size is None
     finally:
         conn.close()
 
@@ -191,5 +193,121 @@ def test_old_v3_snapshot_reads_defaults(tmp_path):
         root = next(iter(children_of(conn, None)))
         assert root.reparse_tag == 0
         assert root.link_target == ""
+        assert root.actual_size is None
     finally:
         conn.close()
+
+
+def test_snapshot_without_version_meta_probes_columns(tmp_path):
+    """meta 里没有版本号时，按表里实际有的列推断，不能当成最新版。"""
+    import sqlite3
+
+    from core.snapshot import children_of, open_readonly
+
+    db = os.path.join(tmp_path, "nometa.db")
+    conn = sqlite3.connect(db)
+    # 建一个 v5 形状的表：有 link_target，没有 actual_size
+    conn.execute(
+        "CREATE TABLE entries (id INTEGER PRIMARY KEY, parent_id INTEGER, "
+        "name TEXT, size INTEGER, is_dir INTEGER, mtime INTEGER, "
+        "reparse_tag INTEGER, link_target TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO entries VALUES (1, NULL, '', 0, 1, 0, 0, '')"
+    )
+    conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+    conn.commit()
+    conn.close()
+
+    conn = open_readonly(db)
+    try:
+        assert conn._wmc_version == 5
+        root = next(iter(children_of(conn, None)))
+        assert root.actual_size is None
+    finally:
+        conn.close()
+
+
+def test_read_meta_and_open_readonly_agree_on_version(tmp_path):
+    """读元信息与打开连接取到同一个版本号，否则徽章和读列会互相矛盾。"""
+    import sqlite3
+
+    from core.snapshot import open_readonly, read_meta
+
+    db = os.path.join(tmp_path, "v6.db")
+    write_snapshot(db, r"C:	", _sample_entries(),
+                   SnapshotMeta(root=r"C:	", scanned_at=0.0))
+    # 把 meta 里的版本号写成偏低的 5：表结构仍是六版，两处都应报 6
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE meta SET value = '5' WHERE key = 'format_version'")
+    conn.commit()
+    conn.close()
+
+    meta = read_meta(db)
+    ro = open_readonly(db)
+    try:
+        assert meta.format_version == 6
+        assert ro._wmc_version == 6
+    finally:
+        ro.close()
+
+
+def test_read_meta_rejects_newer_format(tmp_path):
+    """声明比程序还新的快照必须拒绝：新列认不出来，硬读会得到错误数据。"""
+    from core.snapshot import read_meta
+
+    db = os.path.join(tmp_path, "future.db")
+    meta = SnapshotMeta(root=r"C:	", scanned_at=0.0)
+    meta.format_version = SNAPSHOT_FORMAT_VERSION + 1
+    write_snapshot(db, r"C:	", _sample_entries(), meta)
+
+    with pytest.raises(SnapshotError):
+        read_meta(db)
+
+
+def test_probe_rejects_pre_v3_structure(tmp_path):
+    """按完整路径存的老结构不能判成第三版，否则会以「缺少某列」的技术错误收场。"""
+    import sqlite3
+
+    from core.snapshot import _probe_version
+
+    db = os.path.join(tmp_path, "v2.db")
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE entries (id INTEGER PRIMARY KEY, path TEXT,"
+        " size INTEGER, is_dir INTEGER)"
+    )
+    conn.commit()
+    try:
+        assert _probe_version(conn) == 0
+    finally:
+        conn.close()
+
+
+def test_both_version_entry_points_agree_when_structure_unknown(tmp_path):
+    """表结构认不出来时，读元信息与打开连接要给出同一个版本号。
+
+    否则同一份文件会在徽标上显示一个版本、在选列时按另一个版本处理。
+    """
+    import sqlite3
+
+    from core.snapshot import open_readonly, read_meta
+
+    db = os.path.join(tmp_path, "odd.db")
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE entries (id INTEGER PRIMARY KEY, path TEXT,"
+        " size INTEGER, is_dir INTEGER)"
+    )
+    conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+    conn.execute("INSERT INTO meta VALUES ('root', 'C:\\t')")
+    conn.execute("INSERT INTO meta VALUES ('scanned_at', '0')")
+    conn.execute("INSERT INTO meta VALUES ('format_version', '4')")
+    conn.commit()
+    conn.close()
+
+    ro = open_readonly(db)
+    try:
+        assert ro._wmc_version == read_meta(db).format_version
+    finally:
+        ro.close()

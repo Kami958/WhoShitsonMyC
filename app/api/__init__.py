@@ -7,6 +7,7 @@ pywebview 自动暴露实例的全部公开方法，Mixin 拆分不影响方法�
 from app.api.base import ApiBase
 from app.api.compare import CompareMixin
 from app.api.linkfind import LinkFindMixin
+from app.api.mftprocs import MftProcsMixin
 from app.api.migrate import MigrateMixin
 from app.api.misc import MiscMixin
 from app.api.scan import ScanMixin
@@ -18,6 +19,7 @@ from app.api.window import WindowMixin
 class Api(
     SnapshotsMixin,
     ScanMixin,
+    MftProcsMixin,
     CompareMixin,
     LinkFindMixin,
     MigrateMixin,

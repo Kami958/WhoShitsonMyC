@@ -16,10 +16,15 @@ from dataclasses import dataclass, field
 #     体积缩到约 1/5；mtime 改为整数秒。
 # v4：entries 表新增 reparse_tag 列。
 # v5：entries 表新增 link_target 列（链接指向的真实路径）。
-# v3/v4 快照仍可读取、对比（缺的字段按默认值补），由读取侧按
+# v6：entries 表新增 actual_size 列（文件在磁盘上实际占用的字节数）。
+#     该列可空，NULL 表示这一条没采到，与「占用 0 字节」是两回事：
+#     驻留小文件的数据直接写在记录里，确实占 0 个簇，记 0；
+#     旧快照没有这一列、非 MFT 路径不采集时记 NULL。
+#     汇总总量与「是否采集」记在 meta，见 SnapshotMeta。
+# v3/v4/v5 快照仍可读取、对比（缺的字段按默认值补），由读取侧按
 # format_version 分派列清单（见 snapshot.entry_columns）。
 # v1/v2 快照仍可列举，但不可对比。
-SNAPSHOT_FORMAT_VERSION = 5
+SNAPSHOT_FORMAT_VERSION = 6
 
 # Windows 重解析点标签（st_reparse_tag）——区分链接类型。
 # 目录联接（mklink /J）与符号链接（mklink /D）是两种最常见的重解析点；
@@ -73,6 +78,10 @@ class Entry:
             非 0=链接（junction / 符号链接 / 其它重解析点）。v3 旧快照无此列，恒为 0。
         link_target: 链接指向的真实路径；非链接或取不到时为空串。
             v4 及更早的快照无此列，恒为空。
+        actual_size: 文件在磁盘上实际占用的字节数（按簇分配 + 压缩后的大小）。
+            ``None`` 表示这一条没采到（旧快照、或本次扫描没走 MFT 路径），
+            与「占用 0 字节」不同：数据直接写在记录里的驻留小文件确实占 0。
+            目录行的这一项是子项累加值。v5 及更早的快照恒为 ``None``。
     """
 
     id: int
@@ -83,6 +92,7 @@ class Entry:
     mtime: int = 0
     reparse_tag: int = 0
     link_target: str = ""
+    actual_size: int | None = None
 
 
 @dataclass(slots=True)
@@ -100,6 +110,13 @@ class SnapshotMeta:
         format_version: 快照格式版本号。
         note: 用户备注（写在快照文件内，随文件移动/复制）。
         free_size: 扫描时该盘的剩余空间（字节）。旧快照无此字段，默认 0。
+        actual_size_total: 根目录聚合的实际占用总量（字节）。
+            这份快照完全没采集实际占用时恒为 0，看下一项区分。
+        actual_size_recorded: 本次扫描是否采集了实际占用。
+            走 MFT 且采集成功为 True；普通遍历路径、旧快照为 False。
+            为 False 时界面必须回落到逻辑占用并说明原因，不能把 0 当真实占用展示。
+        actual_size_unrecorded: 已采集的扫描里仍没采到的文件条数。
+            采集方式本身有覆盖面限制时用它诚实披露，旧快照为 0。
     """
 
     root: str
@@ -111,6 +128,9 @@ class SnapshotMeta:
     format_version: int = SNAPSHOT_FORMAT_VERSION
     note: str = ""
     free_size: int = 0
+    actual_size_total: int = 0
+    actual_size_recorded: bool = False
+    actual_size_unrecorded: int = 0
 
 
 class ChangeKind(enum.Enum):
@@ -145,6 +165,10 @@ class DiffNode:
         reparse_tag: Windows 重解析点标签；0=普通项，非 0=链接。
         link_target: 链接指向的真实路径；非链接或快照版本过旧时为空串。
         has_link: 递归范围内是否存在链接节点（目录作「链接」筛选下钻入口）。
+        has_grew: 递归范围内是否存在变大的条目。目录的大小是递归汇总的，
+            一个目录整体变小并不代表下面没有变大的文件，筛「变大」时靠这个
+            标记保留目录作下钻入口，否则内部有变大项的目录会被整条滤掉。
+        has_shrank: 递归范围内是否存在变小的条目，与 ``has_grew`` 对称。
     """
 
     path: str
@@ -160,6 +184,9 @@ class DiffNode:
     # 靠这两个标记保留目录作为下钻入口。
     has_added: bool = False
     has_removed: bool = False
+    # 递归范围内是否存在「变大/变小」条目，同样作下钻入口用。
+    has_grew: bool = False
+    has_shrank: bool = False
     mtime: float = 0.0
     reparse_tag: int = 0
     has_link: bool = False
@@ -179,6 +206,8 @@ class DiffNode:
             "has_children": self.has_children,
             "has_added": self.has_added,
             "has_removed": self.has_removed,
+            "has_grew": self.has_grew,
+            "has_shrank": self.has_shrank,
             "mtime": self.mtime,
             "reparse_tag": self.reparse_tag,
             "link_kind": reparse_kind(self.reparse_tag),

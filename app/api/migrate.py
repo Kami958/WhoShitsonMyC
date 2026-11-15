@@ -6,7 +6,7 @@ import os
 import threading
 import time
 
-from core import applog, i18n, fs_delete, fs_migrate
+from core import applog, i18n, fs_delete, fs_migrate, migrate_journal
 from core.scanner import query_free_size
 
 from app.bootstrap import (
@@ -753,6 +753,36 @@ class MigrateMixin:
         })
         self._emit_link_job_done(job_token, "migrate-dir-restore-done", result)
 
+    def list_incomplete_migrations(self) -> dict:
+        """启动时检查切换日志；有未完成记录时前端弹恢复提示。"""
+        try:
+            entries = migrate_journal.pending_entries()
+        except OSError:
+            entries = []
+        return {"ok": True, "entries": entries}
+
+    def recover_incomplete_migration(
+        self, entry_id: str = "", action: str = "restore"
+    ) -> dict:
+        """处理一条未完成的切换：恢复原目录，或保留备份并清掉记录。"""
+        busy = self._link_job_busy_error()
+        if busy:
+            return busy
+        try:
+            result = migrate_journal.recover(
+                entry_id or "", action=action or "restore"
+            )
+        except OSError:
+            return {"ok": False, "code": "os", "error": _migrate_error_message("os")}
+        if not result.get("ok"):
+            code = str(result.get("code") or "os")
+            return {
+                "ok": False,
+                "code": code,
+                "error": _migrate_error_message(code),
+            }
+        return result
+
     def delete_old_target(self, link: str = "", permanent: bool = False) -> dict:
         """删除再次迁移留下的旧迁移目录。默认移到回收站；``permanent=True`` 彻底删除。
 
@@ -788,8 +818,11 @@ class MigrateMixin:
             })
 
         try:
-            fs_delete.delete_path(
-                old_target, permanent=bool(permanent), on_progress=on_progress
+            fs_delete.delete_guarded(
+                old_target,
+                permanent=bool(permanent),
+                channel=fs_delete.CHANNEL_MIGRATE,
+                on_progress=on_progress,
             )
         except fs_delete.DeleteError as exc:
             code = str(exc.message or exc)
@@ -853,7 +886,12 @@ class MigrateMixin:
             })
 
         try:
-            fs_delete.delete_path(backup, permanent=bool(permanent), on_progress=on_progress)
+            fs_delete.delete_guarded(
+                backup,
+                permanent=bool(permanent),
+                channel=fs_delete.CHANNEL_MIGRATE,
+                on_progress=on_progress,
+            )
         except fs_delete.DeleteError as exc:
             code = str(exc.message or exc)
             return {"error": _delete_error_message(code), "code": code}

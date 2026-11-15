@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import threading
+import time
 import uuid
 from collections.abc import Callable
 
@@ -40,12 +41,19 @@ from .store_values import (
     _AI_CLEANUP_DEPTH_MAX,
     _AI_CLEANUP_DEPTH_MIN,
     _AI_DEFAULTS,
+    _MFT_PROCS_MAX,
     _WORKERS_MAX,
     _WORKERS_MIN,
     _as_bool,
     _as_int,
     _as_str,
+    _clamp_mft_procs,
+    _clamp_mft_read,
     _clamp_workers,
+    _drive_perf_from_yaml,
+    _drive_perf_to_yaml,
+    _perf_tests_from_yaml,
+    _perf_tests_to_yaml,
     _default_enabled_tools,
     _delete_blacklist_to_yaml,
     _enabled_tools_to_yaml,
@@ -58,6 +66,7 @@ from .store_values import (
     _normalize_model_options,
     _normalize_pinned_snapshots,
     _normalize_snapshot_dir,
+    _normalize_size_source,
     _normalize_theme,
     _normalize_ui_hover_group_min,
     _normalize_ui_toast_seconds,
@@ -308,6 +317,11 @@ def _app_base_dir_path() -> str:
             str(state.get("reason") or "unknown"),
         )
     return _app_data_root
+
+
+def app_base_dir_path() -> str:
+    """应用数据根路径（不创建目录）；供统一删除口识别受保护目录。"""
+    return _app_base_dir_path()
 
 
 def _safe_app_base_path() -> str:
@@ -871,11 +885,20 @@ def _delete_settings_yaml() -> None:
 
 # 当前会话值。import 时先落默认，再若默认路径存在 settings.yaml 则按键覆盖。
 _scan_workers = default_scan_workers()
+_mft_procs = 0  # 0 = 按核数自动，其余为固定进程数
+# 按盘参数：盘符 -> {mft_read, dir_threads, mft_procs}，0 表示跟随默认
+_drive_perf: dict = {}
+# 各盘上一次性能测试的实测结果：盘符 -> 测试数据（含模式、耗时、内存与测的时间）
+_perf_tests: dict = {}
+# 取设置快照与写盘整体串行，避免两路后台写互相用过时的快照覆盖新值
+_SETTINGS_PERSIST_LOCK = threading.Lock()
 _compress_snapshots = True
 _use_mft = True  # 默认开：盘符根 + NTFS 优先 MFT，失败回退 scandir
 _search_memory_index = True  # 默认开：打开搜索时预热内存索引
 _temp_cleanup = True  # 默认开：退出删除+启动清扫解压临时文件
 _auto_check_updates = True  # 默认开：启动后台检查更新，有新版在标题栏提示
+_update_badge = True  # 默认开：发现新版本时在窗口标题与侧栏红点提示
+_perf_prompt = True  # 默认开：启动时发现性能参数没有本机数据，提示去做一次测试
 _remember_window_size = True  # 默认开：记住窗口大小
 _window_width = 0
 _window_height = 0
@@ -886,8 +909,13 @@ _log_sanitize_explicit: bool | None = None
 _log_level = "INFO"
 # None = YAML 未写明（可用 WSMC_LOG_LEVEL / WSMC_DEBUG 兜底）
 _log_level_explicit: bool | None = None
+# 启动时打开开发者工具（WebView2 可按 F12）；默认关
+_dev_tools = False
 _lang = "en"  # 启动时 app 会按系统语言再设；YAML 优先覆盖
 _theme = "light"
+# 文件大小来源：actual = 实际占用（默认），logical = 逻辑占用。
+# 只管界面与对比拿哪一列数字，不改变已存快照的内容。
+_size_source = "actual"
 # 自定义快照目录；空串 = 使用 builtin_snapshot_dir()
 _snapshot_dir = ""
 # UI 设置（settings.yaml 的 ui: 节，设置页「界面」页签）
@@ -1000,17 +1028,20 @@ def _apply_loaded(data: dict) -> None:
     - 只消费程序认识的键；未知键/节保留在解析结果里但不使用。
     - 旧文件中的 ``persist`` 键忽略（已不再使用手动持久化开关）。
     """
-    global _scan_workers, _compress_snapshots, _use_mft, _search_memory_index
+    global _scan_workers, _mft_procs, _compress_snapshots, _use_mft
+    global _search_memory_index
     global _remember_window_size, _window_width, _window_height
     global _log_sanitize, _log_sanitize_explicit
     global _log_level, _log_level_explicit
+    global _dev_tools
     global _lang, _theme, _snapshot_dir, _delete_blacklist, _pinned_snapshots
+    global _size_source
     global _ui_parent_row_bg, _ui_parent_row_dim
     global _ui_hover_group_outline, _ui_hover_group_min, _ui_tree_guide, _ui_parent_sep
     global _ui_tool_panel_open, _ui_tool_panel_open_explicit, _ui_tool_panel_width
     global _ui_multiselect_exit_after_add, _ui_multiselect_double_esc
     global _ui_toast_info_base, _ui_toast_info_max, _ui_toast_warn_base, _ui_toast_warn_max
-    global _temp_cleanup, _auto_check_updates
+    global _temp_cleanup, _auto_check_updates, _update_badge, _perf_prompt
     if not data:
         return
     common = _common_view(data)
@@ -1019,6 +1050,16 @@ def _apply_loaded(data: dict) -> None:
         n = _as_int(common.get("scan_workers"))
         if n is not None:
             _scan_workers = _clamp_workers(n)
+    if "mft_procs" in common:
+        n = _as_int(common.get("mft_procs"))
+        if n is not None:
+            _mft_procs = _clamp_mft_procs(n)
+    if "drives" in common:
+        _drive_perf.clear()
+        _drive_perf.update(_drive_perf_from_yaml(common.get("drives")))
+    if "perf_tests" in common:
+        _perf_tests.clear()
+        _perf_tests.update(_perf_tests_from_yaml(common.get("perf_tests")))
     if "compress_snapshots" in common:
         b = _as_bool(common.get("compress_snapshots"))
         if b is not None:
@@ -1039,6 +1080,14 @@ def _apply_loaded(data: dict) -> None:
         b = _as_bool(common.get("auto_check_updates"))
         if b is not None:
             _auto_check_updates = b
+    if "update_badge" in common:
+        b = _as_bool(common.get("update_badge"))
+        if b is not None:
+            _update_badge = b
+    if "perf_prompt" in common:
+        b = _as_bool(common.get("perf_prompt"))
+        if b is not None:
+            _perf_prompt = b
     if "remember_window_size" in common:
         b = _as_bool(common.get("remember_window_size"))
         if b is not None:
@@ -1056,10 +1105,18 @@ def _apply_loaded(data: dict) -> None:
     if "log_level" in common:
         _log_level = _normalize_log_level(common.get("log_level"))
         _log_level_explicit = True
+    if "dev_tools" in common:
+        b = _as_bool(common.get("dev_tools"))
+        if b is not None:
+            _dev_tools = b
     if "lang" in common:
         _lang = _normalize_lang(_as_str(common.get("lang"), "en"))
     if "theme" in common:
         _theme = _normalize_theme(_as_str(common.get("theme"), "light"))
+    if "size_source" in common:
+        _size_source = _normalize_size_source(
+            _as_str(common.get("size_source"), "actual")
+        )
     if "snapshot_dir" in common:
         _snapshot_dir = _normalize_snapshot_dir(_as_str(common.get("snapshot_dir"), ""))
     if "ui_parent_row_bg" in ui:
@@ -1132,22 +1189,29 @@ def _apply_loaded(data: dict) -> None:
 def _settings_payload() -> dict:
     """当前内存设置（写 YAML / API 共用）。"""
     return {
+        "mft_procs": _mft_procs,
+        "drives": _drive_perf_to_yaml(_drive_perf),
+        "perf_tests": _perf_tests_to_yaml(_perf_tests),
         "scan_workers": _scan_workers,
         "compress_snapshots": _compress_snapshots,
         "use_mft": _use_mft,
         "search_memory_index": _search_memory_index,
         "temp_cleanup": _temp_cleanup,
         "auto_check_updates": bool(_auto_check_updates),
+        "update_badge": bool(_update_badge),
+        "perf_prompt": bool(_perf_prompt),
         "remember_window_size": bool(_remember_window_size),
         "window_width": int(_window_width),
         "window_height": int(_window_height),
         "log_sanitize": _log_sanitize,
         "log_level": _normalize_log_level(_log_level),
+        "dev_tools": bool(_dev_tools),
         "lang": _lang,
         "theme": _theme,
         "snapshot_dir": _snapshot_dir,
         "delete_blacklist": list(_delete_blacklist or []),
         "pinned_snapshots": list(_pinned_snapshots or []),
+        "size_source": _size_source,
         "ui_parent_row_bg": _ui_parent_row_bg,
         "ui_parent_row_dim": _ui_parent_row_dim,
         "ui_hover_group_outline": _ui_hover_group_outline,
@@ -1171,9 +1235,16 @@ def _persist() -> None:
 
     若本次会话曾从损坏的 settings.yaml 恢复，写之前先确认损坏副本仍在；
     做不出副本时抛出 OSError，宁可写入失败也不覆盖唯一原件。
+    清空应用数据后不再写盘，否则窗口尺寸延迟保存之类的后台动作会把刚删掉
+    的数据目录和设置文件重新建出来。
     """
+    if _data_wiped:
+        return
     _ensure_corrupt_settings_backup()
-    _write_settings_yaml(settings_path(), _settings_payload())
+    # 取快照与写盘要作为一个整体：否则测试结果落盘与设置保存两路各自取快照时，
+    # 后写的那份可能带着旧值，把先写的新值盖掉。
+    with _SETTINGS_PERSIST_LOCK:
+        _write_settings_yaml(settings_path(), _settings_payload())
 
 
 def reload_settings_from_disk() -> None:
@@ -1193,6 +1264,160 @@ def reload_settings_from_disk() -> None:
 def get_scan_workers() -> int:
     """返回当前生效的扫描线程数（默认 :func:`default_scan_workers`）。"""
     return _scan_workers
+
+
+def _auto_mft_procs() -> int:
+    """按核数估一个解析进程数，上限取与解析侧同一个值。
+
+    真正的解析进程数还要看记录量（每进程至少五万条），设置页拿不到记录量，
+    所以这里给出的是上限，界面按它估算内存。
+    """
+    cpu = max(1, os.cpu_count() or 1)
+    return max(1, min(_MFT_PROCS_MAX, cpu - 1 if cpu > 1 else 1))
+
+
+def _drive_key(drive: str) -> str:
+    """把盘符根路径归一成单字母盘符，取不到字母时返回空串。"""
+    text = str(drive or "").strip().upper()
+    return text[:1] if text[:1].isalpha() else ""
+
+
+def get_drive_perf(drive: str) -> dict:
+    """取某个盘单独保存的性能参数，没有单独设置过的盘返回全 0。
+
+    三项里的 0 表示跟随默认，界面据此显示「默认」而不是具体数值。
+    """
+    key = _drive_key(drive)
+    item = _drive_perf.get(key) if key else None
+    if not item:
+        return {"mft_read": 0, "dir_threads": 0, "mft_procs": 0}
+    return {
+        "mft_read": int(item.get("mft_read") or 0),
+        "dir_threads": int(item.get("dir_threads") or 0),
+        "mft_procs": int(item.get("mft_procs") or 0),
+    }
+
+
+def _perf_test_kinds(item) -> dict:
+    """把一条记录整理成 {procs, threads} 两组，兼容旧版只存一组的结构。"""
+    if not isinstance(item, dict):
+        return {}
+    if "procs" in item or "threads" in item:
+        return {
+            "procs": dict(item.get("procs") or {}) if item.get("procs") else {},
+            "threads": dict(item.get("threads") or {}) if item.get("threads") else {},
+        }
+    mode = item.get("mode")
+    if mode == "procs":
+        return {"procs": dict(item), "threads": {}}
+    if mode == "threads":
+        return {"procs": {}, "threads": dict(item)}
+    return {}
+
+
+def get_perf_test(drive: str) -> dict:
+    """取某个盘上一次测试的结果，返回 {procs, threads} 两组，没测过就是空字典。"""
+    key = _drive_key(drive)
+    if not key:
+        return {}
+    return _perf_test_kinds(_perf_tests.get(key))
+
+
+def get_perf_tests() -> dict:
+    """取全部盘的测试结果，盘符为键，每项含 procs 与 threads 两组。"""
+    out = {}
+    for key, item in _perf_tests.items():
+        kinds = _perf_test_kinds(item)
+        if kinds:
+            out[key] = kinds
+    return out
+
+
+def save_perf_test(drive: str, data: dict) -> bool:
+    """把一次测试结果记到对应盘上并立即写盘。
+
+    一次测试会同时得到处理进程数与目录遍历线程两组结果，两组分开存放，
+    重测其中一组不会把另一组抹掉。实测数据不属于待确认的修改，
+    测完就存下来，否则用户本次不改任何设置、关掉再打开就白测了。
+    按盘参数仍然只在他点保存时写盘。
+    """
+    key = _drive_key(drive)
+    if not key or not isinstance(data, dict) or not data:
+        return False
+    kinds = _perf_test_kinds(data)
+    if not kinds:
+        return False
+    current = _perf_test_kinds(_perf_tests.get(key))
+    stamp = int(time.time())
+    merged = {
+        "procs": current.get("procs") or {},
+        "threads": current.get("threads") or {},
+    }
+    for kind in ("procs", "threads"):
+        item = kinds.get(kind) or {}
+        if item:
+            merged[kind] = dict(item, tested_at=stamp)
+    # 先取路径：这一步会初始化存储，首次调用会把设置从文件重载一遍，
+    # 若放在写入内存之后再取，刚写进去的结果会被重载覆盖掉。
+    path = settings_path()
+    _perf_tests[key] = merged
+    try:
+        # 与 _persist 同一套前置条件：清空数据后不再重建目录，
+        # 曾从损坏文件恢复过就先确认副本还在，做不出副本宁可不写。
+        if _data_wiped:
+            return False
+        _ensure_corrupt_settings_backup()
+        with _SETTINGS_PERSIST_LOCK:
+            # 一次测试可能跑两分多钟，期间用户可能换了数据文件夹；
+            # 这时按旧路径写盘会把刚移走的目录重建出来，干脆放弃本次落盘。
+            # 比路径用同一个目录判断，大小写或斜杠写法不同不算换过地方。
+            if not _same_dir(settings_path(), path):
+                return False
+            _write_settings_yaml(path, _settings_payload())
+    except OSError as exc:
+        applog.warn("save perf test failed | %s" % exc)
+        return False
+    return True
+
+
+def get_drive_effective(drive: str) -> dict:
+    """把某个盘的参数补成扫描时真正使用的数值。
+
+    MFT 读取线程没单独设过就用 1；目录遍历线程没设过就用全局扫描线程数；
+    处理进程数没设过就用全局值，全局值为 0 时交给解析侧按核数推导。
+    """
+    raw = get_drive_perf(drive)
+    return {
+        "mft_read": raw["mft_read"] or 1,
+        "dir_threads": raw["dir_threads"] or _scan_workers,
+        "mft_procs": raw["mft_procs"] or _mft_procs,
+    }
+
+
+def set_drive_perf(drive: str, *, mft_read=None, dir_threads=None, mft_procs=None) -> dict:
+    """写入某个盘的参数，传 None 的项保持原样，写 0 表示回到跟随默认。"""
+    key = _drive_key(drive)
+    if not key:
+        return {}
+    item = dict(_drive_perf.get(key) or {"mft_read": 1, "dir_threads": 0, "mft_procs": 0})
+    if mft_read is not None:
+        item["mft_read"] = _clamp_mft_read(mft_read)
+    if dir_threads is not None:
+        item["dir_threads"] = _clamp_workers(dir_threads) if int(dir_threads) else 0
+    if mft_procs is not None:
+        item["mft_procs"] = _clamp_mft_procs(mft_procs)
+    _drive_perf[key] = item
+    return dict(item)
+
+
+def clear_drive_perf(drive: str) -> None:
+    """删掉某个盘的单独设置，回到跟随默认。"""
+    _drive_perf.pop(_drive_key(drive), None)
+
+
+def get_mft_procs() -> int:
+    """返回设置的解析进程数；0 表示按核数自动。"""
+    return _mft_procs
 
 
 def set_scan_workers(n: int) -> int:
@@ -1278,6 +1503,16 @@ def set_auto_check_updates(enabled: bool) -> bool:
         _auto_check_updates = new
         _persist()
     return _auto_check_updates
+
+
+def get_update_badge() -> bool:
+    """发现新版本时是否在窗口标题与侧栏红点上提示（默认 True）。"""
+    return bool(_update_badge)
+
+
+def get_perf_prompt() -> bool:
+    """启动时是否提示去做一次性能测试（默认 True）。"""
+    return bool(_perf_prompt)
 
 
 def get_remember_window_size() -> bool:
@@ -1446,6 +1681,11 @@ def get_log_level() -> str:
     return _normalize_log_level(_log_level)
 
 
+def get_dev_tools() -> bool:
+    """启动时是否打开开发者工具；默认关闭。"""
+    return bool(_dev_tools)
+
+
 def is_log_level_explicit() -> bool:
     """``settings.yaml`` / 设置页是否显式写过 ``log_level``。
 
@@ -1486,13 +1726,28 @@ def get_theme() -> str:
 
 
 def set_theme(theme: str) -> str:
-    """设置主题；值变化时写 YAML。"""
+    """设置主题；值变化时写 YAML，返回生效后的值。"""
     global _theme
     new = _normalize_theme(theme)
     if new != _theme:
         _theme = new
         _persist()
     return _theme
+
+
+def get_size_source() -> str:
+    """文件大小来源（``actual`` 实际占用 / ``logical`` 逻辑占用）。"""
+    return _size_source
+
+
+def set_size_source(source: str) -> str:
+    """设置文件大小来源；值变化时写 YAML，返回生效后的值。"""
+    global _size_source
+    new = _normalize_size_source(source)
+    if new != _size_source:
+        _size_source = new
+        _persist()
+    return _size_source
 
 
 def get_snapshot_dir() -> str:
@@ -1562,11 +1817,16 @@ def set_snapshot_dir(path: str | None) -> str:
 
 _APPLY_SETTINGS_STATE_KEYS = (
     "_scan_workers",
+    "_mft_procs",
+    "_drive_perf",
+    "_perf_tests",
     "_compress_snapshots",
     "_use_mft",
     "_search_memory_index",
     "_temp_cleanup",
     "_auto_check_updates",
+    "_update_badge",
+    "_perf_prompt",
     "_remember_window_size",
     "_window_width",
     "_window_height",
@@ -1574,6 +1834,7 @@ _APPLY_SETTINGS_STATE_KEYS = (
     "_log_sanitize_explicit",
     "_log_level",
     "_log_level_explicit",
+    "_dev_tools",
     "_snapshot_dir",
     "_delete_blacklist",
     "_pinned_snapshots",
@@ -1592,13 +1853,21 @@ _APPLY_SETTINGS_STATE_KEYS = (
     "_ui_tool_panel_open",
     "_ui_tool_panel_open_explicit",
     "_ui_tool_panel_width",
+    "_size_source",
 )
 
 
 def _capture_apply_settings_state() -> dict:
-    """保存批量设置会改动的内存值，供写入失败时整体回滚。"""
+    """保存批量设置会改动的内存值，供写入失败时整体回滚。
+
+    字典项要取副本：按盘参数与测试结果都是原地改的，
+    存引用的话回滚到的就是已经被改过的内容。
+    """
     g = globals()
-    return {name: g[name] for name in _APPLY_SETTINGS_STATE_KEYS}
+    return {
+        name: (g[name].copy() if isinstance(g[name], dict) else g[name])
+        for name in _APPLY_SETTINGS_STATE_KEYS
+    }
 
 
 def _restore_apply_settings_state(state: dict) -> None:
@@ -1630,10 +1899,12 @@ def apply_settings(
     ``ui_toast_warn_max``、``ui_tool_panel_open``、``ui_tool_panel_width``。
     缺省键保持当前值。
     """
-    global _scan_workers, _compress_snapshots, _use_mft, _search_memory_index
+    global _scan_workers, _mft_procs, _compress_snapshots, _use_mft
+    global _search_memory_index
     global _remember_window_size, _window_width, _window_height
     global _log_sanitize, _log_sanitize_explicit
     global _log_level, _log_level_explicit
+    global _dev_tools
     global _snapshot_dir, _delete_blacklist
     global _pinned_snapshots
     global _ui_parent_row_bg, _ui_parent_row_dim
@@ -1641,7 +1912,8 @@ def apply_settings(
     global _ui_tool_panel_open, _ui_tool_panel_open_explicit, _ui_tool_panel_width
     global _ui_multiselect_exit_after_add, _ui_multiselect_double_esc
     global _ui_toast_info_base, _ui_toast_info_max, _ui_toast_warn_base, _ui_toast_warn_max
-    global _temp_cleanup, _auto_check_updates
+    global _temp_cleanup, _auto_check_updates, _update_badge, _perf_prompt
+    global _size_source
 
     if not isinstance(payload, dict):
         payload = {}
@@ -1668,6 +1940,32 @@ def apply_settings(
 
     if "scan_workers" in payload:
         _scan_workers = _clamp_workers(payload["scan_workers"])
+    if "mft_procs" in payload:
+        _mft_procs = _clamp_mft_procs(payload["mft_procs"])
+    if "drives" in payload:
+        next_perf = _drive_perf_from_yaml(payload["drives"])
+        # 合并语义：前端只提交真改过的盘，没提交的盘（比如暂时没解锁的加密卷）
+        # 保持已存参数。某一项发 0 就是显式回到跟随默认。
+        _drive_perf.update(next_perf)
+    if "perf_tests" in payload:
+        # 测试结果只存在本次设置里：用户点保存才随其它设置落盘，
+        # 关掉设置页或点取消都不写配置文件。按盘合并，不清掉没提交的盘。
+        next_tests = _perf_tests_from_yaml(payload["perf_tests"])
+        if next_tests:
+            stamp = int(time.time())
+            for key, val in next_tests.items():
+                kinds = _perf_test_kinds(val)
+                if not kinds:
+                    continue
+                merged: dict = {}
+                for kind in ("procs", "threads"):
+                    group = kinds.get(kind) or {}
+                    if group:
+                        merged[kind] = dict(
+                            group, tested_at=group.get("tested_at") or stamp
+                        )
+                if merged:
+                    _perf_tests[key] = merged
     if "compress_snapshots" in payload:
         _compress_snapshots = bool(payload["compress_snapshots"])
     if "use_mft" in payload:
@@ -1678,6 +1976,10 @@ def apply_settings(
         _temp_cleanup = bool(payload["temp_cleanup"])
     if "auto_check_updates" in payload:
         _auto_check_updates = bool(payload["auto_check_updates"])
+    if "update_badge" in payload:
+        _update_badge = bool(payload["update_badge"])
+    if "perf_prompt" in payload:
+        _perf_prompt = bool(payload["perf_prompt"])
     if "remember_window_size" in payload:
         _remember_window_size = bool(payload["remember_window_size"])
     if "window_width" in payload or "window_height" in payload:
@@ -1690,10 +1992,14 @@ def apply_settings(
     if "log_level" in payload:
         _log_level = _normalize_log_level(payload.get("log_level"))
         _log_level_explicit = True
+    if "dev_tools" in payload:
+        _dev_tools = bool(payload["dev_tools"])
     if "delete_blacklist" in payload:
         _delete_blacklist = _normalize_delete_blacklist(payload.get("delete_blacklist"))
     if "pinned_snapshots" in payload:
         _pinned_snapshots = _normalize_pinned_snapshots(payload.get("pinned_snapshots"))
+    if "size_source" in payload:
+        _size_source = _normalize_size_source(payload.get("size_source"))
     if "ui_parent_row_bg" in payload:
         _ui_parent_row_bg = bool(payload["ui_parent_row_bg"])
     if "ui_parent_row_dim" in payload:
@@ -1795,11 +2101,14 @@ def _clear_settings_recovery() -> None:
 
 def _reset_settings_in_memory(*, lang: str | None = None) -> None:
     """把内存设置全部回到内置默认（**不**碰磁盘上的任何文件）。"""
-    global _scan_workers, _compress_snapshots, _use_mft, _search_memory_index
+    global _scan_workers, _mft_procs, _compress_snapshots, _use_mft
+    global _search_memory_index
     global _remember_window_size, _window_width, _window_height
     global _log_sanitize, _log_sanitize_explicit
     global _log_level, _log_level_explicit
+    global _dev_tools
     global _lang, _theme, _snapshot_dir, _delete_blacklist, _pinned_snapshots
+    global _size_source
     global _ai_enabled, _ai_base_url, _ai_model, _ai_api_key
     global _ai_extra_prompt, _ai_consented, _ai_model_options
     global _ai_cleanup_max_depth, _ai_enabled_tools
@@ -1808,14 +2117,19 @@ def _reset_settings_in_memory(*, lang: str | None = None) -> None:
     global _ui_multiselect_exit_after_add, _ui_multiselect_double_esc
     global _ui_tool_panel_open, _ui_tool_panel_open_explicit, _ui_tool_panel_width
     global _ui_toast_info_base, _ui_toast_info_max, _ui_toast_warn_base, _ui_toast_warn_max
-    global _temp_cleanup, _auto_check_updates
+    global _temp_cleanup, _auto_check_updates, _update_badge, _perf_prompt
 
     _scan_workers = default_scan_workers()
+    _mft_procs = 0
+    _drive_perf.clear()
+    _perf_tests.clear()
     _compress_snapshots = True
     _use_mft = True
     _search_memory_index = True
     _temp_cleanup = True
     _auto_check_updates = True
+    _update_badge = True
+    _perf_prompt = True
     _remember_window_size = True
     _window_width = 0
     _window_height = 0
@@ -1823,7 +2137,9 @@ def _reset_settings_in_memory(*, lang: str | None = None) -> None:
     _log_sanitize_explicit = None
     _log_level = "INFO"
     _log_level_explicit = None
+    _dev_tools = False
     _theme = "light"
+    _size_source = "actual"
     _lang = _normalize_lang(lang) if lang is not None else "en"
     _snapshot_dir = ""
     _delete_blacklist = []
@@ -2192,15 +2508,16 @@ def wipe_app_data(*, delete_data: bool = True) -> dict:
             result["ok"] = False
             result["errors"].append(str(exc))
 
-        # 内存设置回默认，避免继续写已删目录；自定义路径配置一并忘掉
-        _snapshot_dir = ""
+        # 内存设置全部回默认（含 AI 密钥），避免继续写已删目录；
+        # 自定义快照路径、损坏备份记录等一并忘掉。
+        _reset_settings_in_memory(lang=_lang)
         _settings_recovered_path = ""
         _settings_recovered_reason = ""
         _settings_recovered_backup = ""
         # 本会话禁止再 makedirs 重建应用数据根
         _data_wiped = True
     else:
-        # settings_path() 会经 _app_base_dir 创建目录——仅在文件可能存在时再碰路径
+        # 这里只拼路径、不建目录（走的是 _app_base_dir_path），路径本身就是 base
         conf = os.path.join(base, _SETTINGS_FILE)
         try:
             if os.path.isfile(conf):
@@ -2209,6 +2526,13 @@ def wipe_app_data(*, delete_data: bool = True) -> dict:
         except OSError as exc:
             result["ok"] = False
             result["errors"].append(str(exc))
+        if result["ok"]:
+            # 仅删配置后，本会话不能再把 settings.yaml 写回来
+            _reset_settings_in_memory(lang=_lang)
+            _settings_recovered_path = ""
+            _settings_recovered_reason = ""
+            _settings_recovered_backup = ""
+            _data_wiped = True
     return result
 
 
@@ -2234,6 +2558,8 @@ def _settings_dict_impl() -> dict:
         "search_memory_index": _search_memory_index,
         "temp_cleanup": _temp_cleanup,
         "auto_check_updates": bool(_auto_check_updates),
+        "update_badge": bool(_update_badge),
+        "perf_prompt": bool(_perf_prompt),
         "remember_window_size": bool(_remember_window_size),
         "window_width": int(_window_width),
         "window_height": int(_window_height),
@@ -2241,6 +2567,11 @@ def _settings_dict_impl() -> dict:
         "log_sanitize_explicit": _log_sanitize_explicit is not None,
         "log_level": _normalize_log_level(_log_level),
         "log_level_explicit": _log_level_explicit is not None,
+        "dev_tools": bool(_dev_tools),
+        "mft_procs": _mft_procs,
+        "mft_procs_auto": _auto_mft_procs(),
+        "drives": dict(_drive_perf),
+        "perf_tests": dict(_perf_tests),
         "settings_path": settings_path(),
         "settings_file_exists": os.path.isfile(settings_path()),
         "app_data_dir": app_data_dir(),
@@ -2259,6 +2590,7 @@ def _settings_dict_impl() -> dict:
         "settings_recovered": settings_recovered(),
         "delete_blacklist": get_delete_blacklist(),
         "pinned_snapshots": get_pinned_snapshots(),
+        "size_source": _size_source,
         "ui_parent_row_bg": _ui_parent_row_bg,
         "ui_parent_row_dim": _ui_parent_row_dim,
         "ui_hover_group_outline": _ui_hover_group_outline,
