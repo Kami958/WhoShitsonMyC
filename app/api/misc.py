@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import threading
 import time
 
@@ -22,9 +23,53 @@ from version import (
 
 from app.bootstrap import _window_title
 
+# 拉起新进程后等这么久再确认它还活着。只认「进程没有立刻退出」，不认
+# 「窗口已经出现」：单文件打包要先把运行环境展开，那段时间进程活着但
+# 界面还没出来，若等窗口出现要好几秒，用户会以为按钮点了没反应。
+_RESTART_GRACE_SECONDS = 1.2
+
+
+def _wait_process_alive(proc: subprocess.Popen, seconds: float) -> bool:
+    """在给定时间内反复确认子进程没有提前退出。"""
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            return False
+        time.sleep(0.1)
+    return True
+
+
 
 class MiscMixin:
     """不属于单一功能域的杂项方法。"""
+
+    # 本进程是被「立即重启」结束的：退出清理要跳过浏览器缓存，
+    # 那时新进程可能已经在用同一个目录。
+    _restarting = False
+
+    def list_perf_drives(self) -> dict:
+        """列出本机固定磁盘，供性能参数按盘设置使用。
+
+        每项带该盘当前保存的三项参数，0 表示跟随默认。
+        名字不能叫 list_fixed_drives：反查那边已有同名方法，同名会被它遮蔽。
+        """
+        try:
+            from core.link_find import fixed_drives
+
+            roots = fixed_drives()
+        except Exception:  # noqa: BLE001 - 取不到盘符时按空表处理
+            roots = []
+        items = []
+        for root in roots:
+            letter = root[:1].upper()
+            perf = store.get_drive_perf(letter)
+            # 同时给出该盘真正生效的数值：没有单独设过的项会回落到全局默认，
+            # 界面拿它做输入框的初始显示，就不必在前端写一套可能过时的默认值。
+            eff = store.get_drive_effective(letter)
+            items.append(
+                {"letter": letter, "root": root, **perf, "effective": eff}
+            )
+        return {"drives": items, "cpu_count": os.cpu_count() or 1}
 
     def get_app_log(self, limit: int = 400) -> dict:
         """返回进程内内存日志（旧→新）。不落盘；导出另走 export。"""
@@ -95,6 +140,59 @@ class MiscMixin:
                 applog.exception("quit_app window.destroy failed", exc)
                 return {"error": str(exc)}
         return {"ok": True}
+
+    def restart_app(self) -> dict:
+        """重新启动程序：放掉单实例锁、拉起一个新进程、关闭当前窗口。
+
+        打包运行时新进程会重新展开运行环境，所以「解包环境缺失」的提示里
+        用它作为恢复手段。必须先放锁再拉起：单实例检测会在新进程启动时
+        执行，锁还握着的话新进程会判定重复启动直接退出。拉起之后还要确认
+        新进程真的活着再关窗，否则它自己起不来时两个进程会一起消失。
+        """
+        exe = sys.executable or ""
+        if not exe:
+            return {"error": i18n.t(
+                "无法确定程序所在位置，请手动重新打开。",
+                "Cannot locate the program; please reopen it manually.",
+            )}
+        bootstrap._release_single_instance()
+        try:
+            proc = subprocess.Popen([exe] + list(sys.argv[1:]), close_fds=True)
+        except OSError as exc:
+            # 拉不起来就把锁重新握回来，当前实例仍是唯一实例
+            bootstrap._acquire_single_instance()
+            applog.exception("restart failed", exc)
+            return {"error": exc.strerror or str(exc)}
+        if not _wait_process_alive(proc, _RESTART_GRACE_SECONDS):
+            # 新进程自己起不来（正是这个按钮要救的解包环境损坏场景）：
+            # 锁已经放掉、窗口还没关，必须把锁握回来并留在当前窗口，
+            # 否则两个进程一起消失，用户看到程序凭空不见。
+            bootstrap._acquire_single_instance()
+            applog.warn(f"restart target exited early | code={proc.poll()}")
+            return {
+                "error": i18n.t(
+                    "新的程序进程没有成功启动，当前窗口保持打开，请排除问题后重试。",
+                    "The new process did not start. This window stays open; "
+                    "resolve the underlying problem and try again.",
+                )
+            }
+        applog.info("restart requested")
+        self._restarting = True
+        # 给新进程一点时间先拿到单实例锁，再关闭本进程的窗口。
+        timer = threading.Timer(0.4, self._restart_close_window)
+        timer.daemon = True
+        timer.start()
+        return {"ok": True}
+
+    def _restart_close_window(self) -> None:
+        """重启时的收尾：关闭窗口让主循环自然结束。"""
+        win = self._window
+        if win is None:
+            return
+        try:
+            win.destroy()
+        except Exception as exc:  # noqa: BLE001
+            applog.exception("restart window.destroy failed", exc)
 
     def export_app_log(self) -> dict:
         """弹出「另存为」导出日志文本；取消则 cancelled。默认不自动写文件。"""
@@ -352,11 +450,21 @@ class MiscMixin:
                 applog.exception("auto update check failed", exc)
                 return
             if res.get("update_available"):
-                bootstrap._update_available = True
                 applog.info(
                     f"auto update check | update available: {res.get('latest')}"
                 )
+                # 查到了但用户关掉了提示：不亮红点、不改窗口标题，
+                # 手动点「检查更新」仍然照常给结果
+                if not store.get_update_badge():
+                    return
+                bootstrap._update_available = True
                 self._refresh_window_title()
+                # 同时告知界面，让侧栏底部的 GitHub 按钮亮起红点；
+                # 标题栏提示只在窗口激活时看得到，侧栏红点更不容易错过。
+                self._emit("update-available", {
+                    "latest": res.get("latest") or "",
+                    "html_url": res.get("html_url") or GITHUB_RELEASES_URL,
+                })
 
         threading.Thread(
             target=_run, name="auto-update-check", daemon=True

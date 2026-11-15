@@ -63,13 +63,14 @@ def _hits_with_paths(
         pending -= lineage.keys()
 
     hits: dict[str, _SideRow] = {}
-    for eid, _pid, _name, size, is_dir, mtime, *rest in rows:
+    for eid, _pid, _name, size, is_dir, mtime, tag, target, actual in rows:
         path = _lineage_path(lineage, int(eid))
         if path:
             hits[path] = (
                 int(eid), int(size), int(is_dir), int(mtime),
-                int(rest[0]) if rest else 0,
-                str(rest[1]) if len(rest) > 1 else "",
+                int(tag or 0),
+                str(target or ""),
+                None if actual is None else int(actual),
             )
     return hits
 

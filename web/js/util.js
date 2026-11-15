@@ -4,6 +4,23 @@
 // ---- 工具函数 ----
 
 /** 把字节数格式化为易读字符串（不带符号）。 */
+/**
+ * 快照列表里显示的那个数字，要跟当前口径走。
+ *
+ * 口径选了实际占用、而这份快照确实采到时用实际占用，否则退回逻辑大小。
+ * 不跟口径走的话，侧栏卡片和对比栏顶部会各说一个数。
+ */
+function snapshotDisplaySize(s) {
+  if (!s) return 0;
+  const src =
+    (state && state._settings && state._settings.size_source) || "actual";
+  if (src === "actual" && s.actual_size_recorded &&
+      s.actual_size_total != null) {
+    return Number(s.actual_size_total) || 0;
+  }
+  return Number(s.total_size) || 0;
+}
+
 function fmtBytes(n) {
   const units = ["B", "KB", "MB", "GB", "TB", "PB"];
   let v = Math.abs(n);

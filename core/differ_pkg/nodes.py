@@ -10,7 +10,8 @@ from .classify import (
     _classify,
     _propagate_ancestors,
     _read_side_link_ids,
-    _subtree_change_id_sets,
+    _size_of,
+    _subtree_mark_id_sets,
 )
 from .children import _find_dir_id, _has_children, _merge_child_nodes
 import os
@@ -65,27 +66,34 @@ class DiffNodeMixin:
         return nodes
 
     def ensure_marks(self) -> None:
-        """启用「递归范围内含新增/已删除/链接」下钻标记，首次一次性计算后复用。
+        """启用「递归范围内含新增/已删除/变大/变小/链接」下钻标记，首次计算后复用。
 
-        ``self._subtree_added_ids`` / ``self._subtree_removed_ids``：条目 id
-        集合，包含变更条目自身及其祖先。目录的大小是递归汇总的，深层文件的
-        新增不会让目录 kind 变成 added；前端筛「新增/已删除」时据此保留目录
-        作下钻入口，否则树会整层被滤空。
+        ``_subtree_added_ids`` / ``_subtree_removed_ids``：条目 id 集合，包含
+        变更条目自身及其祖先。目录的大小是递归汇总的，深层文件的新增不会让
+        目录 kind 变成 added；前端筛「新增/已删除」时据此保留目录作下钻入口，
+        否则树会整层被滤空。
 
-        ``self._subtree_link_ids``：含链接的子树 id 集合（同样含祖先），
-        供前端筛「链接」时保留下钻入口。v4+ 快照才可能有；v3 恒空。
+        ``_subtree_grew_ids`` / ``_subtree_shrank_ids``：同样的祖先传播，只是
+        依据换成两侧同路径条目的字节数之差。需要一个目录整体变小、但内部
+        仍有文件变大的情况：只看目录自身净变化量会把这类目录整条滤掉，用户
+        看不到里面的变大项。
+
+        ``_subtree_link_ids``：含链接的子树 id 集合（同样含祖先），供前端筛
+        「链接」时保留下钻入口。v4+ 快照才可能有；v3 恒空。
 
         线性算法，不做递归 CTE：递归 CTE 在 SQLite 里每层迭代都重扫全表，
-        大快照下慢一个数量级；这里两侧各一次全表扫描，栈式拼出条目路径，
-        按路径差集（两侧条目 id 各自分配，跨快照可比的是路径），再从差异
-        条目沿 parent 链向上传播。
+        大快照下慢一个量级；这里两侧各一次全表扫描，栈式拼出条目路径，
+        按路径对齐后一次得出四组结果。
         """
         if self._marks_ready:
             return
         old_db, new_db = self._db_paths
-        self._subtree_added_ids, self._subtree_removed_ids = _subtree_change_id_sets(
-            old_db, new_db
-        )
+        (
+            self._subtree_added_ids,
+            self._subtree_removed_ids,
+            self._subtree_grew_ids,
+            self._subtree_shrank_ids,
+        ) = _subtree_mark_id_sets(old_db, new_db, self._size_source)
         self._marks_ready = True
         # 链接标记一并就绪（v3 侧无 reparse_tag 列，跳过）
         if self._link_ids_ready:
@@ -106,15 +114,18 @@ class DiffNodeMixin:
         o: _SideRow | None,
         n: _SideRow | None,
     ) -> DiffNode | None:
-        """由两侧子行 ``(id, size, is_dir, mtime, reparse_tag, link_target)`` 合成节点。"""
+        """由两侧子行 ``(id, size, is_dir, mtime, reparse_tag, link_target,
+        actual_size)`` 合成节点。大小按当前选的来源取数，来源那一格缺失时
+        自动回落到逻辑占用。"""
         if o is None and n is None:
             return None
         path = _child_path(parent, name)
         is_dir = bool((o or n)[2])
         incomparable = path in self._skipped
+        source = getattr(self, "_size_source", "actual")
         old_size, new_size, delta, kind = _classify(
-            o[1] if o else None,
-            n[1] if n else None,
+            _size_of(o, source),
+            _size_of(n, source),
             incomparable,
         )
         mtime = n[3] if n is not None else (o[3] if o is not None else 0)
@@ -137,6 +148,18 @@ class DiffNodeMixin:
                 and ids[0] is not None
                 and ids[0] in self._subtree_removed_ids
             )
+            # 变大/变小按新侧 id 判：目录在新侧不存在时它已被归为删除，
+            # 不该再以「内含变大项」的理由出现在变大筛选里。
+            has_grew = (
+                self._marks_ready
+                and ids[1] is not None
+                and ids[1] in self._subtree_grew_ids
+            )
+            has_shrank = (
+                self._marks_ready
+                and ids[1] is not None
+                and ids[1] in self._subtree_shrank_ids
+            )
             has_link = self._link_ids_ready and (
                 (ids[0] is not None and ids[0] in self._subtree_link_ids)
                 or (ids[1] is not None and ids[1] in self._subtree_link_ids)
@@ -145,6 +168,8 @@ class DiffNodeMixin:
             has_children = False
             has_added = False
             has_removed = False
+            has_grew = False
+            has_shrank = False
             has_link = False
 
         return DiffNode(
@@ -158,6 +183,8 @@ class DiffNodeMixin:
             has_children=has_children,
             has_added=has_added,
             has_removed=has_removed,
+            has_grew=has_grew,
+            has_shrank=has_shrank,
             mtime=mtime,
             reparse_tag=reparse_tag,
             has_link=has_link,

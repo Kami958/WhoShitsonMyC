@@ -593,7 +593,13 @@ const FILTER_OPTIONS = [
 
 /** 是否启用依赖「目录子树含新增/删除/链接」标记的筛选。 */
 function isSubtreeFilter() {
-  return state.filter === "added" || state.filter === "removed" || state.filter === "link";
+  return (
+    state.filter === "added" ||
+    state.filter === "removed" ||
+    state.filter === "link" ||
+    state.filter === "grew" ||
+    state.filter === "shrank"
+  );
 }
 
 const SNAP_SORT_OPTIONS = [
@@ -868,7 +874,11 @@ async function refreshTopWithMarks() {
   if (!state.compared) return;
   state._marksLoaded = true; // 先置位防重入；失败再回退
   const tree = $("#tree");
-  if (tree) tree.innerHTML = `<div class="child-loading">${t("loading")}</div>`;
+  if (tree) {
+    // 这里要扫两侧全表才能得出递归范围内的标记，数据量大时要几秒，
+    // 必须给出明确提示，否则用户看到的是树突然空白却没有任何反馈。
+    tree.innerHTML = `<div class="child-loading loading tree-loading">${t("filterPrepLoading")}</div>`;
+  }
   try {
     const res = await state.api.compare(state.oldPath, state.newPath, true);
     if (res && res.error) {
@@ -985,6 +995,80 @@ function renderSummary(summary) {
   const cap = document.querySelector("#summaryBar .summary-caption");
   const dEl = $("#summaryDelta");
   const browseHint = $("#browseModeHint");
+  const srcHint = $("#sizeSourceHint");
+  const fbNote = $("#sizeFallbackNote");
+  const fbRow = $("#sizeFallbackRow");
+
+  // 取数口径标签：只写口径词；旧快照回落到逻辑占用时，标签转为警告色，
+  // 说明另起一行，不塞进标签。
+  const source = (summary && summary.size_source) || "actual";
+  const fallback = !!(summary && summary.size_fallback);
+  if (srcHint) {
+    srcHint.textContent =
+      source === "actual" ? t("sizeSourceActual") : t("sizeSourceLogical");
+    srcHint.classList.remove("hidden");
+    srcHint.classList.toggle("is-fallback", fallback);
+  }
+  if (fbNote) {
+    if (fallback) {
+      // 哪一侧没有数据要说清楚：只有基准侧旧、只有当前侧旧、两侧都旧，
+      // 说法不同。后端已按侧给出原因，这里不再用合并后的单一原因。
+      // 浏览单个快照时只有一份数据，不能说成「两侧」，也不该提基准侧
+      const browsing = isBrowseMode();
+      const sides = [];
+      if (!browsing && summary.old && summary.old.size_fallback) {
+        sides.push({
+          who: t("sizeFallbackWhoBase"),
+          why: summary.old.fallback_reason,
+        });
+      }
+      if (summary.new && summary.new.size_fallback) {
+        sides.push({
+          who: browsing
+            ? t("sizeFallbackWhoThis")
+            : t("sizeFallbackWhoCurrent"),
+          why: summary.new.fallback_reason,
+        });
+      }
+      const whyKey = (why) =>
+        why === "unrecorded"
+          ? t("sizeFallbackWhyUnrecorded")
+          : t("sizeFallbackWhyVersion");
+      if (sides.length >= 2) {
+        // 两侧原因可能不同，此时按更常见的「版本过低」说，不挑单侧原因
+        const bothWhy = sides.some((s) => s.why !== "unrecorded")
+          ? t("sizeFallbackWhyVersion")
+          : t("sizeFallbackWhyUnrecorded");
+        fbNote.textContent = t("sizeFallbackBoth", bothWhy);
+      } else if (sides.length === 1) {
+        fbNote.textContent = t(
+          "sizeFallbackOne",
+          sides[0].who,
+          whyKey(sides[0].why)
+        );
+      } else {
+        // 后端没给出分侧结果时只说明原因，不猜是哪一侧，也不硬编码成
+        // 「版本过低」——那份快照可能版本不低，只是没采集。
+        const reason = (summary && summary.fallback_reason) || "version";
+        fbNote.textContent = t("sizeFallbackGeneric", whyKey(reason));
+      }
+      fbNote.classList.remove("hidden");
+      if (fbRow) fbRow.classList.remove("hidden");
+    } else {
+      fbNote.classList.add("hidden");
+      if (fbRow) fbRow.classList.add("hidden");
+    }
+  }
+  // 采集过但有漏网条目时，在口径标签的悬停里披露出缺口，不在行内再增文字
+  if (srcHint) {
+    const missing =
+      (summary && summary.new && summary.new.actual_unrecorded) || 0;
+    if (missing > 0) {
+      srcHint.title = t("sizePartialUnrecorded", missing.toLocaleString());
+    } else {
+      srcHint.removeAttribute("title");
+    }
+  }
   if (isBrowseMode()) {
     if (cap) cap.textContent = t("totalSize");
     const total = (summary && summary.new && summary.new.total_size) || 0;
@@ -1293,9 +1377,21 @@ function matchFilter(node) {
   if (isBrowseMode()) return true;
   // 变化方向
   if (state.filter === "grew") {
-    if (node.kind !== "incomparable" && node.delta <= 0) return false;
+    // 目录的大小是递归汇总的：整体变小不代表下面没有变大的文件。
+    // 只看 net 会把这类目录整条滤掉，靠 has_grew 保留作下钻入口。
+    if (node.kind !== "incomparable") {
+      const isGrew = node.delta > 0;
+      const containsGrew = node.is_dir && node.has_grew;
+      if (!isGrew && !containsGrew) return false;
+    }
   } else if (state.filter === "shrank") {
-    if (node.delta >= 0) return false;
+    // 与 grew 完全对称：整体变大的目录里可能有变小的文件；
+    // 「不可比较」的条目同样不参与方向判定，由下面的统一规则处理。
+    if (node.kind !== "incomparable") {
+      const isShrank = node.delta < 0;
+      const containsShrank = node.is_dir && node.has_shrank;
+      if (!isShrank && !containsShrank) return false;
+    }
   } else if (state.filter === "added") {
     // 目录大小是递归汇总的：深层文件新增不会让目录 kind 变 added，
     // 靠 has_added 保留这类目录作下钻入口。
@@ -1829,6 +1925,7 @@ async function runTreeSearch(raw, { append = false } = {}) {
   const elapsedMs = (res && typeof res.elapsed_ms === "number")
     ? res.elapsed_ms
     : clientMs;
+  const truncated = !!(res && res.truncated);
 
   if (!append) list.innerHTML = "";
 
@@ -1852,7 +1949,9 @@ async function runTreeSearch(raw, { append = false } = {}) {
   _searchLoadingMore = false;
 
   const shown = _searchOffset;
-  meta.textContent = t("treeSearchMeta", shown, total, q, elapsedMs);
+  meta.textContent = truncated
+    ? t("treeSearchTruncated", shown, total, q)
+    : t("treeSearchMeta", shown, total, q, elapsedMs);
   _setSearchMoreVisible(shown < total);
   const moreBtn = $("#searchMoreBtn");
   if (moreBtn) {
@@ -2268,7 +2367,7 @@ async function ctxCommand(cmd) {
     const root = (node && node._revealRoot) || state.compareRoot;
     const res = await state.api.reveal_path(root, node.path);
     if (res.error) toast(res.error, true);
-    else if (res.message) toast(res.message);
+    else if (res.message) toastWarn(res.message);
   } else if (cmd === "copy") {
     const p = fullPath(state.compareRoot, node.path);
     if (await copyText(p)) toast(t("copied", p));
@@ -2359,7 +2458,7 @@ async function toggleDir(node, row, children, depth) {
       !children.querySelector(".child-error")
     ) {
       const ph = document.createElement("div");
-      ph.className = "child-loading";
+      ph.className = "child-loading loading";
       // 对齐到下一级目录行缩进
       ph.style.paddingLeft = `${14 + (depth + 1) * 20}px`;
       ph.textContent = t("loading");

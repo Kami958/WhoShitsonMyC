@@ -9,14 +9,17 @@ JS-API 实现在 ``app/`` 包（``from app import Api``）；引导/环境函数
 from __future__ import annotations
 
 import os
+import threading
+import time
 
 import webview  # pywebview
 
-from core import applog, i18n, store, wingeom
+from core import applog, i18n, packenv, store, wingeom
 from version import __version__ as APP_VERSION
 
 from app import bootstrap
 from app.api import Api
+from app.webview2 import clear_webview_storage, sweep_stale_webview_storage
 from app.bootstrap import (
     _ICON_PATH,
     _WEB_DIR,
@@ -26,6 +29,7 @@ from app.bootstrap import (
     _clamp_window_size,
     _default_window_size,
     _detect_lang,
+    _pick_ui_port,
     _prepare_devtools_without_http_spam,
     _start_temp_sweep,
     _start_webview,
@@ -33,6 +37,7 @@ from app.bootstrap import (
     _sync_log_sanitize_to_applog,
     _warn_already_running,
     _warn_missing_webview2,
+    _watch_ui_server,
     _webview2_installed,
     _webview_storage_path,
     _window_title,
@@ -58,6 +63,14 @@ def main() -> None:
     # 验证失败时不创建目录、不写设置，窗口照常建立，由启动恢复界面说明
     # 路径、原因和下一步；扫描与快照在存储恢复前保持停用。
     storage = store.initialize_storage()
+    # 记下打包展开目录能否读取、所在磁盘还剩多少：日后出现「读不到运行
+    # 环境」的反馈时，日志里直接能分清是目录被删还是磁盘紧张导致展开不全。
+    applog.info(packenv.diagnostics_text())
+    # 浏览器缓存放系统临时文件夹，先清掉上次异常退出留下的副本。
+    try:
+        sweep_stale_webview_storage()
+    except Exception as exc:  # noqa: BLE001 - 清扫失败不影响启动
+        applog.warn(f"startup webview sweep failed: {exc}")
     _sync_log_sanitize_to_applog()
     _sync_log_level_to_applog()
     if not storage.get("ok"):
@@ -129,9 +142,13 @@ def main() -> None:
     # v 参数用于破坏 WebView2 静态资源缓存：发版改版本号后强制重载 index.html。
     _boot_theme = store.resolve_theme(store.get_theme())
     _boot_bg = "#ffffff" if _boot_theme == "light" else "#14161a"
+    # v 参数只跟着版本号走，同版本内改了页面不会被重新取；
+    # 因此在地址上再加一个启动时间，保证每次启动都重新读入口页面。
+    # 页内脚本地址上的 ?v= 仍是写死的，改脚本时要把 web/index.html 里的
+    # 那批版本号一并升上去，否则脚本本身仍会命中旧缓存。
     _boot_url = os.path.join(
         _WEB_DIR, "index.html"
-    ) + f"?theme={_boot_theme}&v={APP_VERSION}"
+    ) + f"?theme={_boot_theme}&v={APP_VERSION}&t={int(time.time())}"
     window = webview.create_window(
         title=_window_title(),
         url=_boot_url,
@@ -149,6 +166,7 @@ def main() -> None:
     )
     api.set_window(window)
     _ui_shown = {"done": False}
+    _fallback: list[threading.Timer] = []
 
     def _on_resized(w, h) -> None:
         try:
@@ -199,6 +217,11 @@ def main() -> None:
             if _ui_shown["done"]:
                 return
             _ui_shown["done"] = True
+            for timer in _fallback:
+                try:
+                    timer.cancel()
+                except Exception:  # noqa: BLE001
+                    pass
             _prepare_chrome()
             try:
                 window.show()
@@ -210,13 +233,60 @@ def main() -> None:
             api.start_auto_update_check()
 
         window.events.loaded += _on_loaded
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        applog.warn(
+            f"window loaded event subscribe failed | reason={type(exc).__name__}"
+        )
+
+    def _fallback_show() -> None:
+        """加载事件没送达时只负责把窗口显示出来，不重复做外壳准备。"""
+        if _ui_shown["done"]:
+            return
+        applog.warn("window loaded event missing; showing window as fallback")
+        _ui_shown["done"] = True
+        for timer in _fallback:
+            try:
+                timer.cancel()
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            _prepare_chrome()
+        except Exception as exc:  # noqa: BLE001
+            applog.warn(
+                f"window fallback chrome failed | reason={type(exc).__name__}"
+            )
+        try:
+            window.show()
+        except Exception as exc:  # noqa: BLE001
+            applog.exception("window fallback show failed", exc)
+        try:
+            api.start_auto_update_check()
+        except Exception:  # noqa: BLE001
+            pass
+
+    # 加载事件没送达时兜底显示，否则进程会一直藏着窗口并占着单实例锁
+    try:
+        fallback = threading.Timer(8.0, _fallback_show)
+        fallback.daemon = True
+        _fallback.append(fallback)
+        fallback.start()
+    except Exception as exc:  # noqa: BLE001
+        applog.warn(
+            f"window fallback show schedule failed | reason={type(exc).__name__}"
+        )
     start_kwargs: dict = {
-        # 非隐私模式 + 固定数据目录：默认设置会把 WebView2 数据放进临时目录，
-        # 临时目录不可用或解包失败时进程在没有任何窗口的情况下就退出。
-        "private_mode": False,
+        # 隐私模式 + 固定数据目录：浏览器数据照样写进指定目录，退出时由 pywebview
+        # 自己清除；数据文件夹只放设置、快照、链接登记与迁移历史。
+        "private_mode": True,
     }
+    # 界面服务端口由本程序先试绑一次再交给依赖库。依赖库绑定失败只让后台线程
+    # 退出，窗口照样建出来并导航过去，用户只能看到浏览器错误页，因此既要在启动
+    # 前挑一个确认可用的端口，也要在启动后确认服务真的在接受连接。
+    ui_port = _pick_ui_port()
+    if ui_port:
+        start_kwargs["http_port"] = ui_port
+    else:
+        applog.warn("no free port for ui server; letting the library pick one")
     storage_path = _webview_storage_path()
     if storage_path:
         start_kwargs["storage_path"] = storage_path
@@ -224,17 +294,36 @@ def main() -> None:
         applog.warn("webview storage path unavailable; using pywebview default")
     if os.path.exists(_ICON_PATH):
         start_kwargs["icon"] = _ICON_PATH  # 任务栏/GUI 图标
-    # debug=True：WebView2 可 F12 / 右键检查；仅开发排查时开
-    if _wants_devtools():
+    # debug=True：WebView2 可 F12 / 右键检查；命令行与设置页任一开启即生效
+    want_devtools = _wants_devtools()
+    if not want_devtools:
+        try:
+            want_devtools = store.get_dev_tools()
+        except Exception as exc:  # noqa: BLE001
+            applog.warn(f"read dev_tools setting failed: {exc}")
+    if want_devtools:
         _prepare_devtools_without_http_spam()
         start_kwargs["debug"] = True
-        applog.info("DevTools enabled (--devtools / WSMC_DEVTOOLS)")
+        applog.info("DevTools enabled")
+    ui_server_stop = threading.Event()
+    if ui_port:
+        threading.Thread(
+            target=_watch_ui_server,
+            args=(ui_port, ui_server_stop),
+            daemon=True,
+        ).start()
     try:
         _start_webview(webview, start_kwargs)
     finally:
+        ui_server_stop.set()
         # 消息循环退出（窗口关闭）后先关 Diff、再删临时解压文件，
         # 必须赶在 atexit 之前：那时 sqlite 句柄已释放，删除才会成功。
         api._shutdown()
+        # 浏览器缓存放在系统临时文件夹，退出时删掉；删不掉留给下次启动清扫。
+        # 重启时跳过：新进程可能已经建好并用着同一个目录，删除会把它踹掉，
+        # 残留交给新进程启动时的清扫处理。
+        if not getattr(api, "_restarting", False):
+            clear_webview_storage()
 
 
 if __name__ == "__main__":

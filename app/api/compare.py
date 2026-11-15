@@ -13,9 +13,37 @@ from core.compress import (
     is_session_cached,
 )
 from core.differ import Diff, DiffError, SearchCancelled
+from core.models import SNAPSHOT_FORMAT_VERSION
 from core.snapshot import SnapshotError
+from core.store_paths import _same_dir
 
 from app.bootstrap import _delete_error_message
+
+
+def _session_key(old_path: str, new_path: str) -> tuple[str, str, str]:
+    """对比会话的缓存键：一对快照加上当前取数口径。
+
+    切换文件大小来源后同一个快照对也要重开会话，否则已打开的对比会
+    继续按旧口径显示数字和标签。
+    """
+    try:
+        basis = store.get_size_source()
+    except Exception:  # noqa: BLE001
+        basis = "actual"
+    return (old_path, new_path, basis)
+
+
+def _fallback_reason(meta) -> str:
+    """一侧没有实际占用的原因：``version`` 版本过低，``unrecorded`` 本次未采集。
+
+    两种原因在界面上说法不同：旧快照是「版本过低」，而最新版本的快照走
+    普通目录遍历时同样没有数据，那时说版本过低会与卡片上的版本号矛盾。
+    """
+    if getattr(meta, "actual_size_recorded", False):
+        return ""
+    if int(getattr(meta, "format_version", 0) or 0) < SNAPSHOT_FORMAT_VERSION:
+        return "version"
+    return "unrecorded"
 
 
 class CompareMixin:
@@ -30,7 +58,7 @@ class CompareMixin:
         old = str(old_path or "")
         new = str(new_path or "")
         # 同一对已打开的 Diff 会话：连连接都在，更不需要再解压
-        key = (old, new) if old and new else None
+        key = _session_key(old, new) if old and new else None
         if (
             key is not None
             and self._diff is not None
@@ -169,6 +197,7 @@ class CompareMixin:
                 "sort": str(sort or "delta-desc"),
                 "case_sensitive": bool(case_sensitive),
                 "exact": bool(exact),
+                "truncated": bool(getattr(self._diff, "search_truncated", False)),
                 "elapsed_ms": elapsed_ms,
             }
         except SearchCancelled:
@@ -257,7 +286,7 @@ class CompareMixin:
         if not enabled:
             return {"ok": True, "status": "skipped", "enabled": False}
         diff = self._diff
-        key = (old_path, new_path) if old_path and new_path else None
+        key = _session_key(old_path, new_path) if old_path and new_path else None
         if diff is None or (key is not None and self._diff_key != key):
             return {"ok": True, "status": "idle", "enabled": True}
         return {
@@ -276,7 +305,9 @@ class CompareMixin:
         换一对快照或交换基准/当前时：只丢「新会话不再用到」的解压缓存，
         共用的 ``.dbz`` 临时文件继续复用，避免同快照反复解压。
         """
-        key = (old_path, new_path)
+        # 缓存键带上取数口径：切换文件大小来源后同一个快照对也要重开，
+        # 否则已打开的对比会继续按旧口径显示数字。
+        key = _session_key(old_path, new_path)
         if self._diff is not None and self._diff_key == key:
             return
         prev_key = self._diff_key
@@ -287,7 +318,7 @@ class CompareMixin:
                 os.path.abspath(old_path or ""),
                 os.path.abspath(new_path or ""),
             }
-            for path in prev_key:
+            for path in prev_key[:2]:
                 try:
                     if path and os.path.abspath(path) not in keep:
                         drop_cache_for(path)
@@ -298,7 +329,9 @@ class CompareMixin:
             new_db = ensure_db_path(new_path)
         except (CompressError, SnapshotError):
             raise
-        self._diff = Diff(old_db, new_db)
+        # 口径只读一次并显式传进去：若让构造函数自己再读一遍，设置恰好
+        # 在这两次读取之间被改动时，会话键与实例实际口径会不一致。
+        self._diff = Diff(old_db, new_db, size_source=key[2])
         self._diff_key = key
 
     def _close_diff(self, *, drop_decompress_cache: bool = False) -> None:
@@ -316,7 +349,7 @@ class CompareMixin:
         self._diff = None
         self._diff_key = None
         if drop_decompress_cache and key:
-            for path in key:
+            for path in key[:2]:
                 try:
                     drop_cache_for(path)
                 except Exception:  # noqa: BLE001 - 清临时文件失败不影响关会话
@@ -324,23 +357,65 @@ class CompareMixin:
 
     @staticmethod
     def _summary(diff: Diff) -> dict:
-        """组装界面顶部概览所需的数据。"""
+        """组装界面顶部概览所需的数据。
+
+        两侧的总数与差值必须同一口径，全部走 :meth:`Diff.side_total`。
+        选实际占用但两侧不齐时，构造时已整场降为逻辑占用，这里把
+        降级原因需要的材料（各侧版本号与是否采集）一并交给界面。
+        """
+        fallback = bool(getattr(diff, "_size_fallback", False))
+        # 每侧各自是否缺数据：只把真正缺的那一侧告诉界面，否则会出现
+        # 「一侧没采集」被说成「两侧都快照版本过低」，把用户指向错的快照。
+        source = getattr(diff, "_size_source", "actual")
+        old_reason = _fallback_reason(diff.old_meta)
+        new_reason = _fallback_reason(diff.new_meta)
+        # 口径一旦降级，实例上的取值就已经改成逻辑占用，不能再拿它当
+        # 「用户要的是实际占用」的证据，否则降级后两侧缺数据永远判不到，
+        # 说明句只能退成最模糊的那一条，甚至与快照版本徽标自相矛盾。
+        # 降级标记本身才是「用户原本要实际占用」的凭证。
+        wants_actual = fallback or source == "actual"
+        old_missing = wants_actual and not bool(
+            diff.old_meta.actual_size_recorded
+        )
+        new_missing = wants_actual and not bool(
+            diff.new_meta.actual_size_recorded
+        )
         return {
             "old": {
                 "root": diff.old_meta.root,
                 "scanned_at": diff.old_meta.scanned_at,
-                "total_size": diff.old_meta.total_size,
+                "total_size": diff.side_total(diff.old_meta),
+                "size_fallback": old_missing,
+                "fallback_reason": old_reason,
+                "format_version": diff.old_meta.format_version,
+                "actual_recorded": bool(diff.old_meta.actual_size_recorded),
+                "actual_unrecorded": int(
+                    diff.old_meta.actual_size_unrecorded or 0
+                ),
                 "skipped_count": len(diff.old_meta.skipped),
                 "skipped": list(diff.old_meta.skipped or []),
             },
             "new": {
                 "root": diff.new_meta.root,
                 "scanned_at": diff.new_meta.scanned_at,
-                "total_size": diff.new_meta.total_size,
+                "total_size": diff.side_total(diff.new_meta),
+                "size_fallback": new_missing,
+                "fallback_reason": new_reason,
+                "format_version": diff.new_meta.format_version,
+                "actual_recorded": bool(diff.new_meta.actual_size_recorded),
+                "actual_unrecorded": int(
+                    diff.new_meta.actual_size_unrecorded or 0
+                ),
                 "skipped_count": len(diff.new_meta.skipped),
                 "skipped": list(diff.new_meta.skipped or []),
             },
             "total_delta": diff.total_delta,
+            "size_source": getattr(diff, "_size_source", "actual"),
+            "size_fallback": fallback,
+            # 两侧原因不同时优先说版本过低，那是对比里更常见也更需重扫的原因
+            "fallback_reason": "version" if "version" in (old_reason, new_reason) else (
+                "unrecorded" if (old_reason or new_reason) else ""
+            ),
         }
 
     def check_pending_paths(self, items: list | None = None) -> dict:
@@ -417,21 +492,50 @@ class CompareMixin:
         供待删除列表把正在删的那一项报出已删了多少项；回收站交给系统一次调用，
         拿不到逐项数字。
         """
+        diff = self._diff
+        if diff is None:
+            return {"error": _delete_error_message("no_session"), "code": "no_session"}
+        session_root = str(diff.new_meta.root or "")
+        if not session_root:
+            return {"error": _delete_error_message("invalid_root"), "code": "invalid_root"}
+        # 待删列表是按加入时的扫描根存的，用户可能切到另一块盘的对比后再执行。
+        # 不能按当前会话的根去拼同名相对路径，否则会删到同一相对路径下的另一个文件。
+        # 调用方必须把盘符根传上来，空值不接受：靠这里猜一个根正是要避开的误删路径。
+        ask_root = str(root or "").strip()
+        if not ask_root:
+            applog.info("delete_path missing root | refused")
+            return {
+                "error": _delete_error_message("invalid_root"),
+                "code": "invalid_root",
+            }
+        if not _same_dir(ask_root, session_root):
+            applog.info("delete_path root mismatch | refused")
+            return {
+                "error": _delete_error_message("root_mismatch"),
+                "code": "root_mismatch",
+            }
         bl = store.get_delete_blacklist()
 
         def on_progress(info: dict) -> None:
             self._emit("delete-progress", {
-                "root": root,
+                "root": session_root,
                 "rel": rel_path,
                 "items": int(info.get("items") or 0),
             })
 
         try:
-            full = fs_delete.assert_deletable(root, rel_path, bl)
-            fs_delete.delete_path(full, permanent=bool(permanent), on_progress=on_progress)
+            full = fs_delete.resolve_compare_target(session_root, rel_path)
+            fs_delete.delete_guarded(
+                full,
+                permanent=bool(permanent),
+                channel=fs_delete.CHANNEL_USER,
+                root=session_root,
+                blacklist=bl,
+                on_progress=on_progress,
+            )
         except fs_delete.DeleteError as exc:
             code = str(exc.message or exc)
-            msg = _delete_error_message(code, root=root, rel_path=rel_path)
+            msg = _delete_error_message(code, root=session_root, rel_path=rel_path)
             applog.info(f"delete_path denied/failed | code={code} permanent={bool(permanent)}")
             # code 给前端分类标注（missing / blacklist / …）；文案仍走 error
             return {"error": msg, "code": code}

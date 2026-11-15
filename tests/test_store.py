@@ -113,7 +113,10 @@ def test_list_snapshots_skips_bad_files(tmp_path):
     assert infos[0].total_size == 100
 
 
-def test_delete_snapshot(tmp_path):
+def test_delete_snapshot(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "core.snapshots_store.default_snapshot_dir", lambda: str(tmp_path)
+    )
     db = os.path.join(tmp_path, "x.db")
     _write(db, "C:\\", 100, when=1.0)
     assert os.path.exists(db)
@@ -124,15 +127,20 @@ def test_delete_snapshot(tmp_path):
 
 def test_delete_snapshot_recycle_calls_recycle(tmp_path, monkeypatch):
     """默认 permanent=False 应走回收站，不直接永久删。"""
+    monkeypatch.setattr(
+        "core.snapshots_store.default_snapshot_dir", lambda: str(tmp_path)
+    )
     db = os.path.join(tmp_path, "y.db")
     _write(db, "C:\\", 100, when=1.0)
     calls: list[tuple[str, bool]] = []
 
-    def _fake_delete_path(abs_path: str, *, permanent: bool = False) -> None:
+    def _fake_delete_guarded(
+        abs_path: str, *, permanent: bool = False, **_kw
+    ) -> None:
         calls.append((abs_path, permanent))
         os.remove(abs_path)
 
-    monkeypatch.setattr("core.fs_delete.delete_path", _fake_delete_path)
+    monkeypatch.setattr("core.fs_delete.delete_guarded", _fake_delete_guarded)
     delete_snapshot(db)
     assert not os.path.exists(db)
     assert len(calls) == 1
@@ -277,6 +285,48 @@ def test_set_and_get_scan_workers_roundtrip():
 def test_set_scan_workers_clamps_out_of_range():
     assert set_scan_workers(0) == 1
     assert set_scan_workers(999) == 128
+
+
+def test_dev_tools_setting_roundtrip():
+    """开发者工具开关：默认关，应用后内存与写盘、重载都要一致。"""
+    from core.store import get_dev_tools
+
+    assert get_dev_tools() is False
+    assert apply_settings({"dev_tools": True}).get("dev_tools") is True
+    assert get_dev_tools() is True
+    assert "dev_tools: true" in open(store.settings_path(), encoding="utf-8").read()
+    store._apply_loaded(store._load_settings_yaml(store.settings_path()))
+    assert get_dev_tools() is True
+    apply_settings({"dev_tools": False})
+    assert get_dev_tools() is False
+
+
+def test_update_badge_setting_roundtrip():
+    """新版本提示开关：默认开，关掉后写盘与重载都要保持关。"""
+    from core.store import get_update_badge
+
+    assert get_update_badge() is True
+    assert apply_settings({"update_badge": False}).get("update_badge") is False
+    assert get_update_badge() is False
+    assert "update_badge: false" in open(store.settings_path(), encoding="utf-8").read()
+    store._apply_loaded(store._load_settings_yaml(store.settings_path()))
+    assert get_update_badge() is False
+    apply_settings({"update_badge": True})
+    assert get_update_badge() is True
+
+
+def test_perf_prompt_setting_roundtrip():
+    """性能测试提示开关：默认开，勾过不再提醒后写盘与重载都要保持关。"""
+    from core.store import get_perf_prompt
+
+    assert get_perf_prompt() is True
+    assert apply_settings({"perf_prompt": False}).get("perf_prompt") is False
+    assert get_perf_prompt() is False
+    assert "perf_prompt: false" in open(store.settings_path(), encoding="utf-8").read()
+    store._apply_loaded(store._load_settings_yaml(store.settings_path()))
+    assert get_perf_prompt() is False
+    apply_settings({"perf_prompt": True})
+    assert get_perf_prompt() is True
 
 
 def test_compress_snapshots_defaults_on():
@@ -1056,3 +1106,93 @@ def test_migrate_data_root_counts_unreadable_snapshot_dir(tmp_path, monkeypatch)
     result = store_paths.migrate_data_root(str(src), str(dst), ())
     assert result["failed"] >= 1
     assert result["errors"]
+
+
+def test_wipe_blocks_persist_after_delete(tmp_path, monkeypatch):
+    """删数据后后台保存设置不能再把目录和 settings.yaml 建回来。"""
+    from core.store import wipe_app_data
+
+    app_base = tmp_path / "WhoShitsOnMyC"
+    app_base.mkdir()
+    (app_base / "settings.yaml").write_text(
+        "common:\n  scan_workers: 4\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(store, "_app_base_dir_path", lambda: str(app_base))
+    monkeypatch.setattr(store, "_app_base_dir", lambda: str(app_base))
+    store._data_wiped = False
+
+    r = wipe_app_data(delete_data=True)
+    assert r["ok"] is True
+    assert not app_base.exists()
+
+    store.set_window_size(900, 700)
+    assert not app_base.exists()
+
+
+def test_wipe_clears_ai_key(tmp_path, monkeypatch):
+    """删数据后内存里的接口密钥也要清掉，不能留在会话里。"""
+    from core.store import wipe_app_data
+
+    app_base = tmp_path / "WhoShitsOnMyC"
+    app_base.mkdir()
+    monkeypatch.setattr(store, "_app_base_dir_path", lambda: str(app_base))
+    monkeypatch.setattr(store, "_app_base_dir", lambda: str(app_base))
+    store._data_wiped = False
+    store.set_ai_settings({"api_key": "secret-key", "enabled": True})
+
+    r = wipe_app_data(delete_data=True)
+    assert r["ok"] is True
+    assert store.get_ai_settings().get("api_key") == ""
+
+
+def test_size_source_apply_and_persist(tmp_path, monkeypatch):
+    """设置页保存后内存、返回值与 YAML 三处必须一致。
+
+    这一项走 apply_settings 这条批量路径，漏声明全局变量时它只会改到一个
+    函数内的临时名字：内存不变、写回磁盘的是旧值、返回给界面的也是旧值，
+    表现就是设置页切换后重开又弹回默认。
+    """
+    from core import store as _store
+
+    # 设置文件的绝对路径优先取数据根，必须一起指到临时目录
+    monkeypatch.setattr(_store, "_app_data_root", str(tmp_path))
+    _store.apply_settings({"size_source": "logical"})
+    assert _store.get_size_source() == "logical"
+    assert _store.settings_dict()["size_source"] == "logical"
+
+    text = (tmp_path / "settings.yaml").read_text(encoding="utf-8")
+    assert "size_source: logical" in text
+
+    _store.apply_settings({"size_source": "actual"})
+    assert _store.get_size_source() == "actual"
+
+
+def test_size_source_setter_returns_effective_value(tmp_path, monkeypatch):
+    """单项设置器要返回生效值，不是别的设置项。"""
+    from core import store as _store
+
+    monkeypatch.setattr(_store, "_app_data_root", str(tmp_path))
+    assert _store.set_size_source("logical") == "logical"
+    assert _store.get_size_source() == "logical"
+    assert _store.set_size_source("bogus") == "actual"
+
+
+def test_reset_settings_restores_size_source(tmp_path, monkeypatch):
+    """恢复默认设置必须把口径也复位，否则当前会话仍按旧口径取数。"""
+    from core import store as _store
+
+    monkeypatch.setattr(_store, "_app_data_root", str(tmp_path))
+    _store.apply_settings({"size_source": "logical"})
+    assert _store.get_size_source() == "logical"
+
+    _store.reset_settings_to_defaults()
+    assert _store.get_size_source() == "actual"
+
+
+def test_set_theme_returns_effective_value(tmp_path, monkeypatch):
+    """主题设置器要返回生效值：调用方拿它去刷原生标题栏，返回空会让标题栏停在上一个主题。"""
+    from core import store as _store
+
+    monkeypatch.setattr(_store, "_app_data_root", str(tmp_path))
+    assert _store.set_theme("dark") == "dark"
+    assert _store.resolve_theme(_store.set_theme("dark")) == "dark"

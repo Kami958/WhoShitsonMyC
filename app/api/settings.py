@@ -328,6 +328,10 @@ class SettingsMixin:
                 },
             )
         self._emit("settings-applied", out)
+        # 开发者工具：保存时只要勾着就在现窗口打开，不必等下次启动。
+        # 不比较改动前后，避免“已经勾着再保存没反应”让人以为开关坏了。
+        if bool(d.get("dev_tools")):
+            self._open_devtools()
 
     def get_storage_status(self) -> dict:
         """恢复界面读取数据目录状态、当前运行账户与指针记录情况。"""

@@ -47,6 +47,7 @@ class DiffSearchMixin:
             exact: 是否严格整名匹配，默认否（包含匹配）。
         """
         q = (query or "").strip()
+        self.search_truncated = False
         if not q:
             return [], 0
         lim = max(1, min(int(limit), 200))
@@ -77,7 +78,9 @@ class DiffSearchMixin:
                         e for e in entries
                         if _entry_matches(e, norm_q, case_sensitive=cs, exact=ex)
                     ]
-                ordered = _sort_search_entries(entries, sort_key)
+                ordered = _sort_search_entries(
+                    entries, sort_key, getattr(self, "_size_source", "actual")
+                )
                 self._search_sorted[sorted_key] = ordered
 
             total = len(ordered)
@@ -147,6 +150,11 @@ class DiffSearchMixin:
             )
         self._check_cancelled()
 
+        # 单侧候选撞到上限时，后面补查得到的命中也不完整，界面需要提示
+        self.search_truncated = bool(
+            len(old_hits) >= fetch_n or len(new_hits) >= fetch_n
+        )
+
         paths = set(old_hits) | set(new_hits)
         if path_filter is not None:
             paths = {p for p in paths if path_filter in p.casefold()}
@@ -199,8 +207,13 @@ class DiffSearchMixin:
                     f"WHERE parent_id = ? AND name IN ({marks})",
                     [pid, *chunk],
                 )
-                for name, eid, size, is_dir, mtime, *rest in cur:
+                for name, eid, size, is_dir, mtime, tag, target, actual in cur:
                     hits[_child_path(parent, name)] = (
-                        int(eid), int(size), int(is_dir), int(mtime),
-                        int(rest[0]) if rest else 0,
+                        int(eid),
+                        int(size),
+                        int(is_dir),
+                        int(mtime),
+                        int(tag or 0),
+                        str(target or ""),
+                        None if actual is None else int(actual),
                     )

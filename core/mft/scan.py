@@ -148,7 +148,7 @@ class _AsyncRowWriter:
         self,
         writer: SnapshotWriter | NullWriter,
         *,
-        maxsize: int = 64,
+        maxsize: int = 8,
     ) -> None:
         self._writer = writer
         self._q: queue.Queue = queue.Queue(maxsize=maxsize)
@@ -177,7 +177,17 @@ class _AsyncRowWriter:
             raise self._err
         if self._closed:
             raise RuntimeError("row writer already finished")
-        self._q.put(rows)
+        # 写线程可能因磁盘满或权限问题退出；无超时的 put 会在队列满时永久阻塞，
+        # 建树线程再也没有机会检查错误或取消。
+        while True:
+            try:
+                self._q.put(rows, timeout=0.5)
+                return
+            except queue.Full:
+                if self._err is not None:
+                    raise self._err
+                if self._closed:
+                    raise RuntimeError("row writer already finished")
 
     def finish(self) -> int:
         """投放结束标记并 join；返回已写行数。传播写线程异常。可重复调用。
@@ -202,6 +212,9 @@ class _AsyncRowWriter:
                     pass
         if self._thread.is_alive():
             self._thread.join(timeout=300)
+        if self._thread.is_alive():
+            # 写线程卡死时不能继续 finalize：同一个 SQLite 连接会被两个线程同时用
+            raise RuntimeError("row writer did not finish in time")
         if self._err is not None:
             raise self._err
         return self._written
@@ -221,6 +234,7 @@ def scan_mft_to_snapshot(
     now: float | None = None,
     timer: object | None = None,
     workers: int | None = None,
+    read_threads: int | None = None,
     on_link: LinkCallback | None = None,
 ) -> SnapshotMeta:
     """用 MFT 扫描盘符根。
@@ -313,6 +327,7 @@ def scan_mft_to_snapshot(
                 boot,
                 drive_letter=letter,
                 workers=workers,
+                read_threads=read_threads,
                 on_bytes=on_bytes,
                 on_parse=on_parse,
                 cancel=cancel,
@@ -385,16 +400,21 @@ def scan_mft_to_snapshot(
                     if _span_start:
                         _span_start("drain_rows")
                     try:
-                        _rows, file_count, dir_count, total_size = (
-                            build_entry_rows_from_compact(
-                                table,
-                                follow_reparse=follow_symlinks,
-                                progress=None,
-                                cancel=cancel,
-                                on_batch=on_batch,
-                                timer=timer,
-                                on_link=on_link,
-                            )
+                        (
+                            _rows,
+                            file_count,
+                            dir_count,
+                            total_size,
+                            total_actual_size,
+                            unrecorded_files,
+                        ) = build_entry_rows_from_compact(
+                            table,
+                            follow_reparse=follow_symlinks,
+                            progress=None,
+                            cancel=cancel,
+                            on_batch=on_batch,
+                            timer=timer,
+                            on_link=on_link,
                         )
                         del table
                         _ = _rows
@@ -413,6 +433,14 @@ def scan_mft_to_snapshot(
                     meta.file_count = file_count
                     meta.dir_count = dir_count
                     meta.total_size = total_size
+                    # 实际占用是否可用：一个都没采到时不能声称已采集，否则
+                    # 总量那一层会拿 0 当真实占用显示。空盘（文件数为零）算
+                    # 已采集：它确实是「采了，结果没有文件」。
+                    meta.actual_size_total = total_actual_size
+                    meta.actual_size_recorded = (
+                        file_count == 0 or unrecorded_files < file_count
+                    )
+                    meta.actual_size_unrecorded = unrecorded_files
 
                     if _span_start:
                         _span_start("finalize")
@@ -445,6 +473,10 @@ def scan_mft_to_snapshot(
             raise MftUnavailable(str(exc)) from exc
         finally:
             if gc_was_enabled:
+                # 重开开关不会自己收一次，禁用期间攒下的分配计数已经超过阀值，
+                # 下一次被跟踪的分配就会触发一轮。趁还在扫描线程上先收第零代，
+                # 把这次开销固定在这里，而不是留给碰上下一次分配的那个线程。
+                gc.collect(0)
                 gc.enable()
             if _span_end:
                 _span_end("mft_tree")

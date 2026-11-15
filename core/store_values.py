@@ -11,6 +11,12 @@ def _clamp_workers(n: int) -> int:
     return max(_WORKERS_MIN, min(_WORKERS_MAX, int(n)))
 
 
+def _clamp_mft_procs(n: int) -> int:
+    """解析进程数：0 表示按核数自动，其余限定在 1 到上限之间。"""
+    return max(_MFT_PROCS_MIN, min(_MFT_PROCS_MAX, int(n)))
+
+
+
 def _parse_bool(raw: str) -> bool | None:
     s = raw.strip().lower()
     if s in ("1", "true", "yes", "on"):
@@ -207,6 +213,14 @@ def _normalize_theme(raw: str) -> str:
     return "light"
 
 
+def _normalize_size_source(raw: str) -> str:
+    """文件大小来源：actual（实际占用）|logical（逻辑占用）；非法值回落 actual。"""
+    v = str(raw or "").strip().lower()
+    if v == "logical":
+        return "logical"
+    return "actual"
+
+
 def resolve_theme(preference: str) -> str:
     """把主题偏好解析成实际主题：auto 读系统深浅色，失败默认 light。"""
     pref = _normalize_theme(preference)
@@ -353,11 +367,112 @@ def _normalize_window_size(width, height) -> tuple[int, int]:
 _WORKERS_MIN, _WORKERS_MAX = 1, 128
 
 
-_WORKERS_MIN, _WORKERS_MAX = 1, 128
+# 解析进程数上限，与 core/mft/procs.py 的 _MAX_PROCS 保持一致，取本机逻辑核数；
+# 0 是单独的含义（按核数自动），不是合法进程数。
+_MFT_PROCS_MIN, _MFT_PROCS_MAX = 0, max(2, os.cpu_count() or 8)
 
 
-# 清理深度允许范围（防手滑）
-_AI_CLEANUP_DEPTH_MIN, _AI_CLEANUP_DEPTH_MAX = 1, 8
+_MFT_READ_MIN, _MFT_READ_MAX = 1, 8
+
+
+def _clamp_mft_read(n) -> int:
+    """单盘 MFT 读取线程数，至少 1。"""
+    try:
+        v = int(n)
+    except (TypeError, ValueError):
+        return 1
+    return max(_MFT_READ_MIN, min(_MFT_READ_MAX, v))
+
+
+def _drive_perf_to_yaml(perf: dict) -> str:
+    """把按盘参数编成一行字符串：``C|1|4|11;D|1|8|12``。
+
+    三个数字依次是 MFT 读取线程、目录遍历线程、处理进程数，
+    取 0 表示跟随默认（目录遍历跟全局扫描线程、进程数跟核数自动）。
+    """
+    parts = []
+    for drive in sorted(perf or {}):
+        item = perf.get(drive) or {}
+        key = str(drive).strip().upper()[:1]
+        if not key.isalpha():
+            continue
+        parts.append(
+            "%s|%d|%d|%d"
+            % (
+                key,
+                # 0 要原样写出去，夹成 1 会让「跟随默认」变成「自己设的」
+                0
+                if not item.get("mft_read")
+                else _clamp_mft_read(item.get("mft_read")),
+                max(0, _clamp_workers(item.get("dir_threads", 0)))
+                if item.get("dir_threads")
+                else 0,
+                _clamp_mft_procs(item.get("mft_procs", 0)),
+            )
+        )
+    return ";".join(parts)
+
+
+def _drive_perf_from_yaml(text) -> dict:
+    """解析 ``C|1|4|11;D|1|8|12``，坏条目跳过。"""
+    out: dict = {}
+    for chunk in str(text or "").split(";"):
+        bits = chunk.split("|")
+        if len(bits) != 4:
+            continue
+        key = bits[0].strip().upper()[:1]
+        if not key.isalpha():
+            continue
+        try:
+            mft_read = int(bits[1])
+            dir_threads = int(bits[2])
+            mft_procs = int(bits[3])
+        except ValueError:
+            continue
+        out[key] = {
+            # 0 表示这一项跟随默认。MFT 读取线程的默认值是 1，存 0 与存 1 用起来一样，
+            # 但必须原样保留 0，否则界面分不清「自己设的」与「跟随默认」
+            "mft_read": 0 if mft_read == 0 else _clamp_mft_read(mft_read),
+            "dir_threads": _clamp_workers(dir_threads) if dir_threads else 0,
+            "mft_procs": _clamp_mft_procs(mft_procs),
+        }
+    return out
+
+
+def _perf_tests_to_yaml(data: dict) -> str:
+    """把各盘测试数据压成一个 JSON 串，如 {"C": {...}}，空表给空串。"""
+    import json
+    try:
+        return json.dumps(data or {}, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return ""
+
+
+def _perf_tests_from_yaml(text) -> dict:
+    """解析各盘测试数据；能接受 JSON 串，也能接受已经拆好的字典。
+
+    从界面提交过来的是字典，从配置文件读回来的是 JSON 串，两路都走这里。
+    坏串或非字典一律当空。
+    """
+    import json
+    if not text:
+        return {}
+    if isinstance(text, dict):
+        obj = text
+    else:
+        try:
+            obj = json.loads(str(text))
+        except (TypeError, ValueError):
+            return {}
+    if not isinstance(obj, dict):
+        return {}
+    out: dict = {}
+    for key, val in obj.items():
+        letter = str(key or "").strip().upper()[:1]
+        if not letter.isalpha() or not isinstance(val, dict):
+            continue
+        out[letter] = val
+    return out
 
 
 # 清理深度允许范围（防手滑）

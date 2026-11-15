@@ -131,12 +131,15 @@ def _load_entry() -> types.ModuleType:
     return module
 
 
-def test_startup_reaches_window_creation(monkeypatch):
+def test_startup_reaches_window_creation(monkeypatch, tmp_path):
     """启动序列跑到窗口创建，并且没有中途抛异常。"""
     from app import bootstrap
     from core import store
 
     entry = _load_entry()
+    monkeypatch.setenv("TEMP", str(tmp_path))
+    monkeypatch.setenv("TMP", str(tmp_path))
+    monkeypatch.setattr(entry, "sweep_stale_webview_storage", lambda: 0)
     fake_webview = _FakeWebview()
     swept: list[int] = []
 
@@ -162,12 +165,10 @@ def test_startup_reaches_window_creation(monkeypatch):
     window = fake_webview.created[0]
     assert window.kwargs["js_api"] is not None
     assert window.kwargs["min_size"] == (820, 560)
-    # WebView2 数据不能落在 pywebview 默认的临时目录：临时目录不可用时进程会
-    # 没有任何窗口就退出，所以启动时必须拿到固定目录并关掉隐私模式。
+    # 浏览器缓存放系统临时文件夹，隐私模式下退出时由依赖库清除，程序再兜底一次。
     started = fake_webview.started[0]
-    assert started["private_mode"] is False
-    assert started["storage_path"].endswith("webview")
-    assert os.path.isdir(started["storage_path"])
+    assert started["private_mode"] is True
+    assert started["storage_path"].endswith("wsmc-webview2")
 
 
 def test_single_instance_exit_path(monkeypatch):
@@ -255,11 +256,14 @@ def test_startup_failure_warns_and_cleans_up(monkeypatch):
     assert _FakeApi.instances[0].shutdown_calls == 1, "启动失败后仍要收尾"
 
 
-def test_start_downgrades_parameters_and_keeps_storage(monkeypatch):
+def test_start_downgrades_parameters_and_keeps_storage(monkeypatch, tmp_path):
     """后端不接受参数时逐级降级，中间一档仍带 storage_path 与 private_mode。"""
     from core import store
 
     entry = _load_entry()
+    monkeypatch.setenv("TEMP", str(tmp_path))
+    monkeypatch.setenv("TMP", str(tmp_path))
+    monkeypatch.setattr(entry, "sweep_stale_webview_storage", lambda: 0)
     fake_webview = _StrictWebview()
     _FakeApi.instances = []
 
@@ -273,10 +277,13 @@ def test_start_downgrades_parameters_and_keeps_storage(monkeypatch):
     entry.main()
 
     assert len(fake_webview.started) == 1, "降级后应当仍然进入消息循环"
-    assert fake_webview.started[0] == {}
+    # 第三档只留下界面服务端口：这是本程序自己挑的端口，真实后端接受它
+    assert set(fake_webview.started[0]) <= {"http_port"}
     first, second = fake_webview.calls[0], fake_webview.calls[1]
-    assert first["private_mode"] is False and "storage_path" in first
+    assert first["private_mode"] is True and "storage_path" in first
+    # 端口要在第一档就传进去，否则依赖库会自己挑一个、程序无法监控
+    assert "http_port" in first and "http_port" in second
     # 去掉 icon/debug 的这一档仍要带 WebView2 数据目录
-    assert second["private_mode"] is False and "storage_path" in second
+    assert second["private_mode"] is True and "storage_path" in second
     assert "icon" not in second and "debug" not in second
     assert _FakeApi.instances[0].shutdown_calls == 1

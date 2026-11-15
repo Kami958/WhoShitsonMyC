@@ -6,6 +6,7 @@ import json
 import os
 import threading
 import time
+import uuid
 from . import applog
 from .corrupt_backup import backup_corrupt_file
 from .fs_delete import normalize_abs
@@ -80,7 +81,16 @@ def _clear_registry_recovery() -> None:
 
 
 def load_links() -> list[dict]:
-    """读全部登记；文件缺失返回空表，损坏则先备份再返回空表。"""
+    """读全部登记；文件缺失返回空表，损坏则先备份再返回空表。
+
+    读和写共用同一把锁：写入用临时文件替换正式文件，Windows 上正式文件
+    被打开着读时替换会失败，要挡住这种重叠。
+    """
+    with _REGISTRY_LOCK:
+        return _read_registry()
+
+
+def _read_registry() -> list[dict]:
     try:
         path = _registry_path()
     except OSError as exc:
@@ -106,14 +116,33 @@ def save_links(links: list[dict]) -> None:
     写入失败抛出 OSError，由迁移流程转成用户可读的登记失败结果。若本次
     会话从损坏文件恢复过，写之前先确认损坏副本仍在。
     """
+    with _REGISTRY_LOCK:
+        _write_registry(links)
+
+
+def _write_registry(links: list[dict]) -> None:
     path = _registry_path()
     _ensure_registry_backup(path)
-    tmp = path + ".tmp"
+    # 临时文件名带进程和随机后缀：两个进程同时写时各写各的，不会互相截断。
+    tmp = f"{path}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(links, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, path)
+        last: PermissionError | None = None
+        for attempt in range(6):
+            try:
+                os.replace(tmp, path)
+                last = None
+                break
+            except PermissionError as exc:
+                last = exc
+                if attempt >= 5:
+                    break
+                # 外部程序可能刚好打开着正式文件，等一小会再试
+                time.sleep(0.05)
+        if last is not None:
+            raise last
     except OSError as exc:
         applog.warn(f"link registry write failed | reason={type(exc).__name__}")
         try:
@@ -384,4 +413,5 @@ def delete_junction(link: str) -> str:
     return link
 
 
-_REGISTRY_LOCK = threading.Lock()
+# 读和写共用同一把可重入锁：registrar 类的函数会在锁内再调 load_links 与 save_links。
+_REGISTRY_LOCK = threading.RLock()

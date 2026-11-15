@@ -5,7 +5,10 @@ from __future__ import annotations
 from core import applog, i18n, store
 from core.store_paths import probe_writable_dir
 import os
+import shutil
 import tempfile
+import threading
+import time
 from typing import Any
 from .paths import _RES_DIR
 
@@ -20,8 +23,8 @@ _WEBVIEW2_GUID = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
 _WEBVIEW2_URL = "https://developer.microsoft.com/microsoft-edge/webview2/"
 
 
-# WebView2 用户数据目录名。优先放在当前数据文件夹下，退到系统临时文件夹时用这个固定名字，
-# 关闭隐私模式后登录状态与缓存会持续累积在同一处，目录名带随机后缀会每次重建一份。
+# WebView2 用户数据目录名。缓存放系统临时文件夹，退出时由程序清理；
+# 数据文件夹下这个旧名字只用于清扫上个版本留下的残留。
 _WEBVIEW_STORAGE_DIRNAME = "webview"
 _WEBVIEW_TEMP_STORAGE_DIRNAME = "wsmc-webview2"
 
@@ -126,29 +129,92 @@ def _wire_bundled_webview2() -> bool:
 
 
 def _webview_storage_path() -> str:
-    """WebView2 用户数据目录：优先数据文件夹下的 webview，再退到系统临时文件夹。
+    """WebView2 用户数据目录：放系统临时文件夹，退出时由程序清理。
 
-    两处都用写临时文件的探测确认可写；都不可用时返回空串，由 pywebview 用自己
-    的默认位置。临时文件夹不可用正是启动没有任何窗口就退出的一个原因，所以不能
-    不探就直接交给 pywebview 默认处理。
+    数据文件夹只放设置、快照、链接登记与迁移历史；浏览器缓存放这里，既不占
+    用户数据文件夹，也不长期累积。临时文件夹不可用时返回空串，由 pywebview
+    用自己的默认位置。
     """
-    candidates: list[str] = []
-    try:
-        data_dir = store.app_data_dir()
-    except Exception as exc:  # noqa: BLE001 - 取不到数据文件夹时退到临时文件夹
-        applog.exception("app data folder for webview storage failed", exc)
-        data_dir = ""
-    if data_dir:
-        candidates.append(os.path.join(data_dir, _WEBVIEW_STORAGE_DIRNAME))
-    temp_root = os.environ.get("TEMP") or os.environ.get("TMP") or tempfile.gettempdir()
-    if temp_root:
-        candidates.append(os.path.join(temp_root, _WEBVIEW_TEMP_STORAGE_DIRNAME))
-
-    for candidate in candidates:
-        if not probe_writable_dir(candidate):
-            return candidate
-        applog.warn(f"webview storage path not writable | path={candidate}")
+    # 缓存目录的旧残留由入口在存储初始化后统一清扫；这里只负责解析和创建路径。
+    temp_root = (
+        os.environ.get("TEMP") or os.environ.get("TMP") or tempfile.gettempdir()
+    )
+    if not temp_root:
+        return ""
+    candidate = os.path.join(temp_root, _WEBVIEW_TEMP_STORAGE_DIRNAME)
+    if not probe_writable_dir(candidate):
+        return candidate
+    applog.warn(f"webview storage path not writable | path={candidate}")
     return ""
+
+
+def webview_storage_dir() -> str:
+    """浏览器数据目录的固定位置（系统临时文件夹下），不做可写探测。"""
+    temp_root = (
+        os.environ.get("TEMP") or os.environ.get("TMP") or tempfile.gettempdir()
+    )
+    if not temp_root:
+        return ""
+    return os.path.join(temp_root, _WEBVIEW_TEMP_STORAGE_DIRNAME)
+
+
+def clear_webview_storage(*, wait_seconds: float = 3.0) -> bool:
+    """删除浏览器数据目录；目录被占用时短暂重试，失败返回 False。"""
+    target = webview_storage_dir()
+    if not target or not os.path.isdir(target):
+        return True
+    deadline = time.monotonic() + max(0.0, wait_seconds)
+    while True:
+        try:
+            shutil.rmtree(target)
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError as exc:
+            if time.monotonic() >= deadline:
+                applog.warn(
+                    f"webview storage not removed | path={target}"
+                    f" reason={type(exc).__name__}"
+                )
+                return False
+            time.sleep(0.2)
+
+
+def sweep_stale_webview_storage() -> int:
+    """清扫临时文件夹残留，以及数据文件夹下的旧缓存目录。
+
+    数据文件夹下的 webview 目录是 1.1.9 之前的存放位置。从 1.1.9 起浏览器缓存
+    改放系统临时文件夹，这里的清理只在 1.1.9 保留，下个版本连同
+    _WEBVIEW_STORAGE_DIRNAME 一起删除。
+    """
+    removed = 0
+    target = webview_storage_dir()
+    if target and os.path.isdir(target):
+        if clear_webview_storage(wait_seconds=0.0):
+            removed += 1
+    # 1.1.9 过渡逻辑：清理旧版本留在数据文件夹里的缓存目录，下个版本删除整段。
+    try:
+        legacy = os.path.join(store.app_data_dir(), _WEBVIEW_STORAGE_DIRNAME)
+    except Exception:  # noqa: BLE001 - 数据文件夹不可知时只清临时目录
+        legacy = ""
+    if legacy and os.path.isdir(legacy):
+        try:
+            entries = os.listdir(legacy)
+        except OSError:
+            entries = []
+        if "EBWebView" not in entries:
+            # 只删上个版本留下的浏览器数据目录，用户自己的同名目录不动
+            applog.warn(f"legacy webview storage kept | path={legacy}")
+            return removed
+        try:
+            shutil.rmtree(legacy)
+            removed += 1
+        except OSError as exc:
+            applog.warn(
+                f"legacy webview storage not removed | path={legacy}"
+                f" reason={type(exc).__name__}"
+            )
+    return removed
 
 
 def _webview_start_failed_message() -> str:
@@ -180,6 +246,99 @@ def _warn_webview_start_failed() -> None:
             applog.warn(msg)
     except Exception:  # noqa: BLE001 - 提示框失败也只能记日志
         applog.warn(msg)
+
+
+# 界面服务端口相关。依赖库在端口绑定失败时只让后台线程退出，主线程照样
+# 建出窗口并导航过去，用户看到的是一句浏览器错误页，与程序自身的提示完全
+# 脱节，所以启动前后各设一道关。
+_UI_PORT_ATTEMPTS = 10
+_UI_PORT_MIN = 20_000
+_UI_PORT_MAX = 60_000
+_UI_SERVER_WAIT_SECONDS = 6.0
+
+
+def _pick_ui_port() -> int | None:
+    """挑一个当前能绑定的本机端口交给界面服务。
+
+    先试绑一次再释放，能把「端口已被其它程序占用」挡在启动之前，而不是等
+    依赖库在后台线程里静默失败。返回 None 表示没试出可用端口，此时不指定
+    端口，交给依赖库自行选择。
+    """
+    import random
+    import socket
+
+    for _ in range(_UI_PORT_ATTEMPTS):
+        port = random.randint(_UI_PORT_MIN, _UI_PORT_MAX)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.bind(("127.0.0.1", port))
+        except OSError:
+            continue
+        finally:
+            sock.close()
+        return port
+    return None
+
+
+def _ui_server_accepts(port: int, timeout: float = 0.4) -> bool:
+    """确认该端口上已经有服务在接受连接。"""
+    import socket
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.settimeout(timeout)
+        sock.connect(("127.0.0.1", port))
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
+def _warn_ui_server_failed(port: int) -> None:
+    """原生警告框告知界面服务未能启动；端口只进日志。"""
+    applog.warn(f"ui server not accepting connections | port={port}")
+    msg = i18n.t(
+        (
+            f"程序需要通过本机的 {port} 端口提供界面，但该端口上没有任何服务响应。"
+            "\n\n"
+            "通常是这个端口已被其它程序占用。请关闭占用该端口的程序，"
+            "或重新打开本程序让程序重新选择端口。"
+        ),
+        (
+            "This app serves its own interface over a local port, but nothing "
+            f"answered on port {port}."
+            "\n\n"
+            "Another program is most likely holding that port. Close it, or "
+            "reopen this app so it can pick a different port."
+        ),
+    )
+    title = i18n.t("界面服务未能启动", "Interface service did not start")
+    try:
+        import ctypes
+
+        if os.name == "nt":
+            # MB_OK | MB_ICONWARNING
+            ctypes.windll.user32.MessageBoxW(0, msg, title, 0x30)
+        else:
+            applog.warn(msg)
+    except Exception:  # noqa: BLE001 - 提示框失败也只能记日志
+        applog.warn(msg)
+
+
+def _watch_ui_server(port: int, stop: threading.Event) -> None:
+    """等界面服务接受连接，一直等不到就明确告知用户。"""
+    deadline = time.time() + _UI_SERVER_WAIT_SECONDS
+    while time.time() < deadline:
+        if stop.is_set():
+            return
+        if _ui_server_accepts(port):
+            applog.info(f"ui server ready | port={port}")
+            return
+        time.sleep(0.2)
+    if stop.is_set():
+        return
+    _warn_ui_server_failed(port)
 
 
 def _start_webview(pywebview: Any, start_kwargs: dict[str, Any]) -> None:

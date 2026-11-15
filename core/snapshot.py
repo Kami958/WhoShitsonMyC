@@ -37,10 +37,20 @@ _BATCH_SIZE = 10_000
 
 # 各版本 entries 表的 SELECT 列清单。v4 起含 reparse_tag，v5 起含 link_target。
 # 解析器按快照 format_version 分派：读旧快照不带新列，读出的新字段补默认值。
-_ENTRY_COLS_V3 = "id, parent_id, name, size, is_dir, mtime"
-_ENTRY_COLS_V4 = "id, parent_id, name, size, is_dir, mtime, reparse_tag"
+# 列清单：所有版本统一返回九列，旧版本缺的列用 NULL 字面量补在尾部。
+# 好处是读取侧不用再逐行判断“这一行缺哪几格”，固定元数解包即可；
+# 补 NULL 而非 0 是因为 0 会被当成真实数字（文件确实占 0 字节），
+# 而 NULL 能如实表达“这份旧快照根本没记这一格”。
+_ENTRY_COLS_V3 = "id, parent_id, name, size, is_dir, mtime, NULL, NULL, NULL"
+_ENTRY_COLS_V4 = (
+    "id, parent_id, name, size, is_dir, mtime, reparse_tag, NULL, NULL"
+)
 _ENTRY_COLS_V5 = (
-    "id, parent_id, name, size, is_dir, mtime, reparse_tag, link_target"
+    "id, parent_id, name, size, is_dir, mtime, reparse_tag, link_target, NULL"
+)
+_ENTRY_COLS_V6 = (
+    "id, parent_id, name, size, is_dir, mtime, reparse_tag, link_target,"
+    " actual_size"
 )
 
 # 反链查询（哪些链接指向某个目录）要在快照里按链接目标找行。这类行只占全部
@@ -60,9 +70,16 @@ def entry_columns(version: int) -> str:
     """按快照格式版本返回 entries 表 SELECT 列清单。
 
     这是读取侧的**统一解析分派**：任何读 entries 的 SQL 都用它选列。
-    v5 及以上走 8 列，v4 走 7 列，低于 v4（v3）走 6 列。
+    所有版本都返回九列，顺序固定：id、parent_id、name、size、is_dir、
+    mtime、reparse_tag、link_target、actual_size。旧版本缺的尾部列由
+    查询语句直接给出 NULL 字面量，所以调用方拿到的行宽永远一致。
+
+    不能拿这个字符串拼排序或筛选条件：补上的那几列是字面量，不是真列，
+    按它们排序会变成“全部相等”。
     """
     v = int(version)
+    if v >= 6:
+        return _ENTRY_COLS_V6
     if v >= 5:
         return _ENTRY_COLS_V5
     if v >= 4:
@@ -89,6 +106,7 @@ class EntryRow(NamedTuple):
     mtime: int = 0
     reparse_tag: int = 0  # Windows 重解析点标签；0=普通项，非 0=链接
     link_target: str = ""  # 链接指向的真实路径；非链接为空串
+    actual_size: int | None = None  # 实际占用字节数；None=没采到，0=确实占 0
 
     @staticmethod
     def file(
@@ -99,10 +117,12 @@ class EntryRow(NamedTuple):
         mtime: int = 0,
         reparse_tag: int = 0,
         link_target: str = "",
+        actual_size: int | None = None,
     ) -> EntryRow:
         """构造文件行（``is_dir=0``）。"""
         return EntryRow(
-            id, parent_id, name, size, 0, mtime, reparse_tag, link_target
+            id, parent_id, name, size, 0, mtime, reparse_tag, link_target,
+            actual_size,
         )
 
     @staticmethod
@@ -114,10 +134,12 @@ class EntryRow(NamedTuple):
         mtime: int = 0,
         reparse_tag: int = 0,
         link_target: str = "",
+        actual_size: int | None = None,
     ) -> EntryRow:
         """构造目录行（``is_dir=1``）。"""
         return EntryRow(
-            id, parent_id, name, size, 1, mtime, reparse_tag, link_target
+            id, parent_id, name, size, 1, mtime, reparse_tag, link_target,
+            actual_size,
         )
 
     @staticmethod
@@ -132,6 +154,7 @@ class EntryRow(NamedTuple):
             entry.mtime,
             entry.reparse_tag,
             entry.link_target,
+            entry.actual_size,
         )
 
 
@@ -197,7 +220,9 @@ class SnapshotWriter:
             "  is_dir INTEGER NOT NULL,"
             "  mtime INTEGER NOT NULL DEFAULT 0,"
             "  reparse_tag INTEGER NOT NULL DEFAULT 0,"
-            "  link_target TEXT NOT NULL DEFAULT ''"
+            "  link_target TEXT NOT NULL DEFAULT '',"
+            # 可空且无默认值：没采到记 NULL，与「占用 0 字节」严格区分
+            "  actual_size INTEGER"
             ")"
         )
         cur.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
@@ -225,8 +250,9 @@ class SnapshotWriter:
                 del self._buffer[:_BATCH_SIZE]
                 self._conn.executemany(
                     "INSERT INTO entries"
-                    " (id, parent_id, name, size, is_dir, mtime, reparse_tag, link_target)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    " (id, parent_id, name, size, is_dir, mtime, reparse_tag,"
+                    " link_target, actual_size)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     chunk,
                 )
 
@@ -246,8 +272,9 @@ class SnapshotWriter:
             return
         self._conn.executemany(
             "INSERT INTO entries"
-            " (id, parent_id, name, size, is_dir, mtime, reparse_tag, link_target)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            " (id, parent_id, name, size, is_dir, mtime, reparse_tag,"
+            " link_target, actual_size)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             self._buffer,
         )
         self._buffer.clear()
@@ -280,6 +307,9 @@ class SnapshotWriter:
             "format_version": str(meta.format_version),
             "note": (meta.note or "").strip(),
             "free_size": str(meta.free_size),
+            "actual_size_total": str(meta.actual_size_total),
+            "actual_size_recorded": "1" if meta.actual_size_recorded else "0",
+            "actual_size_unrecorded": str(meta.actual_size_unrecorded),
         }
         self._conn.executemany(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
@@ -365,14 +395,19 @@ def read_meta(db_path: str) -> SnapshotMeta:
                   f"Snapshot is missing metadata: {db_path}")
             )
 
-        version = int(rows.get("format_version", "0"))
-        if version > SNAPSHOT_FORMAT_VERSION:
+        # 版本号与 open_readonly 同源：以 entries 表的实际列为准，表结构
+        # 不可识别时才退回 meta 的声明。但「声明比程序还新」必须先拒：
+        # 表结构里多出来的新列我们根本认不出来，不能让旧程序硬读一份更新的
+        # 文件，那会得到看似正常的错误数据。
+        declared = int(rows.get("format_version", "0"))
+        if declared > SNAPSHOT_FORMAT_VERSION:
             raise SnapshotError(
-                t(f"快照格式版本 {version} 高于本程序支持的 "
+                t(f"快照格式版本 {declared} 高于本程序支持的 "
                   f"{SNAPSHOT_FORMAT_VERSION}，请升级程序后再打开。",
-                  f"Snapshot format version {version} is newer than this app supports "
+                  f"Snapshot format version {declared} is newer than this app supports "
                   f"({SNAPSHOT_FORMAT_VERSION}); please update the app.")
             )
+        version = _probe_version(conn) or declared
         return SnapshotMeta(
             root=rows["root"],
             scanned_at=float(rows["scanned_at"]),
@@ -383,6 +418,9 @@ def read_meta(db_path: str) -> SnapshotMeta:
             format_version=version,
             note=(rows.get("note") or "").strip(),
             free_size=int(rows.get("free_size", "0")),
+            actual_size_total=int(rows.get("actual_size_total", "0")),
+            actual_size_recorded=rows.get("actual_size_recorded", "0") == "1",
+            actual_size_unrecorded=int(rows.get("actual_size_unrecorded", "0")),
         )
     finally:
         conn.close()
@@ -428,6 +466,31 @@ class _SnapshotConnection(sqlite3.Connection):
     _wmc_version: int = SNAPSHOT_FORMAT_VERSION
 
 
+def _probe_version(conn: sqlite3.Connection) -> int:
+    """从 entries 表的实际列推断格式版本，不依赖 meta。
+
+    当快照的 meta 缺失、损坏或写得不对时，不能一律当成最新版：旧文件没有
+    新增的列，按最新版选列会直接报「没有这个列」。看表里有哪些列反而可靠。
+    返回 0 表示表不存在或结构不可识别，调用方仍需自己兜底。
+    """
+    try:
+        cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(entries)")}
+    except sqlite3.Error:  # pragma: no cover - 依赖文件损坏
+        return 0
+    if "actual_size" in cols:
+        return 6
+    if "link_target" in cols:
+        return 5
+    if "reparse_tag" in cols:
+        return 4
+    # 第三版的最小列集：少了任何一列说明是更早的结构（例如按完整路径存的
+    # 版本），不能当成第三版放过去，否则读到一半才报「没有某一列」，
+    # 用户看到的是一句技术错误而不是「格式过旧，请重扫」。
+    if {"id", "parent_id", "name", "size", "is_dir", "mtime"} <= cols:
+        return 3
+    return 0  # 没有 entries 表或结构不可识别，交给调用方兜底
+
+
 def open_readonly(db_path: str) -> sqlite3.Connection:
     """以只读方式打开一个快照连接（供 differ 做 ATTACH 对比或查询子节点）。
 
@@ -435,7 +498,8 @@ def open_readonly(db_path: str) -> sqlite3.Connection:
 
     返回的连接携带 ``_wmc_version`` 属性（快照的 format_version）：
     读侧解析按它分派列清单，旧 v3 快照自动用 v3 列（无 ``reparse_tag``）。
-    读取失败/缺 meta 时按最新版本兜底（新写入的都是当前版）。
+    版本号一律以 entries 表的实际列为准（meta 只作记录）：meta 缺失、
+    损坏或写错时，表里真实存在哪几列才是唯一可靠依据。
 
     ``check_same_thread=False``：pywebview 的每次 JS-API 调用都可能在
     不同线程上执行，对比会话（:class:`~core.differ.Diff`）会跨调用复用
@@ -448,17 +512,29 @@ def open_readonly(db_path: str) -> sqlite3.Connection:
         check_same_thread=False,
         factory=_SnapshotConnection,
     )
-    version = 0
     try:
-        row = conn.execute(
-            "SELECT value FROM meta WHERE key = 'format_version'"
-        ).fetchone()
-        if row:
-            version = int(row[0])
-    except (sqlite3.Error, ValueError, TypeError):  # pragma: no cover - 依赖文件
-        version = 0
-    conn._wmc_version = version or SNAPSHOT_FORMAT_VERSION  # type: ignore[attr-defined]
-    return conn
+        # 以 entries 表的实际列为准：meta 缺失、损坏或写错时，真实存在
+        # 哪几列才是唯一可靠依据。版本号偏小时不会去查不存在的列，
+        # 偏大时也不会把已有的列当成缺失而静默回落。
+        # 表结构完全认不出来时退回文件里声明的版本，与读取元信息那个入口
+        # 保持一致，否则同一份文件会在两处得到不同版本，徽标与读列互相矛盾。
+        probed = _probe_version(conn)
+        if not probed:
+            declared = 0
+            try:
+                row = conn.execute(
+                    "SELECT value FROM meta WHERE key='format_version'"
+                ).fetchone()
+                if row and str(row[0]).strip().isdigit():
+                    declared = int(str(row[0]).strip())
+            except sqlite3.Error:
+                declared = 0
+            probed = declared or SNAPSHOT_FORMAT_VERSION
+        conn._wmc_version = probed  # type: ignore[attr-defined]
+        return conn
+    except Exception:
+        conn.close()
+        raise
 
 
 def children_of(conn: sqlite3.Connection, parent_id: int | None) -> Iterator[Entry]:
@@ -484,7 +560,7 @@ def children_of(conn: sqlite3.Connection, parent_id: int | None) -> Iterator[Ent
             f"SELECT {cols} FROM entries WHERE parent_id = ?",
             (parent_id,),
         )
-    for eid, pid, name, size, is_dir, mtime, *rest in cur:
+    for eid, pid, name, size, is_dir, mtime, tag, target, actual in cur:
         yield Entry(
             id=eid,
             parent_id=pid,
@@ -492,8 +568,10 @@ def children_of(conn: sqlite3.Connection, parent_id: int | None) -> Iterator[Ent
             size=size,
             is_dir=bool(is_dir),
             mtime=mtime,
-            reparse_tag=int(rest[0]) if rest else 0,
-            link_target=str(rest[1]) if len(rest) > 1 else "",
+            reparse_tag=int(tag or 0),
+            link_target=str(target or ""),
+            # 旧快照这一列是查询补的 NULL，保持 None（未记录），不能变成 0
+            actual_size=None if actual is None else int(actual),
         )
 
 

@@ -35,11 +35,12 @@ def _children_map(
         (parent_id,),
     )
     out: dict[str, _SideRow] = {}
-    for name, eid, size, is_dir, mtime, *rest in cur:
+    for name, eid, size, is_dir, mtime, tag, target, actual in cur:
         out[name] = (
             eid, size, is_dir, mtime,
-            int(rest[0]) if rest else 0,
-            str(rest[1]) if len(rest) > 1 else "",
+            int(tag or 0),
+            str(target or ""),
+            None if actual is None else int(actual),
         )
     return out
 
@@ -78,11 +79,12 @@ def _merge_child_nodes(
                 "WHERE parent_id = ?",
                 (parent_b,),
             )
-            for name, eid, size, is_dir, mtime, *rest in cur:
+            for name, eid, size, is_dir, mtime, tag, target, actual in cur:
                 other_row = (
                     eid, size, is_dir, mtime,
-                    int(rest[0]) if rest else 0,
-                    str(rest[1]) if len(rest) > 1 else "",
+                    int(tag or 0),
+                    str(target or ""),
+                    None if actual is None else int(actual),
                 )
                 base_row = base_rows.pop(name, None)
                 node = make_node(name, base_row, other_row)
@@ -101,11 +103,12 @@ def _merge_child_nodes(
             "WHERE parent_id = ?",
             (parent_a,),
         )
-        for name, eid, size, is_dir, mtime, *rest in cur:
+        for name, eid, size, is_dir, mtime, tag, target, actual in cur:
             other_row = (
                 eid, size, is_dir, mtime,
-                int(rest[0]) if rest else 0,
-                str(rest[1]) if len(rest) > 1 else "",
+                int(tag or 0),
+                str(target or ""),
+                None if actual is None else int(actual),
             )
             base_row = base_rows.pop(name, None)
             node = make_node(name, other_row, base_row)

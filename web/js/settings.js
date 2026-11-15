@@ -47,23 +47,17 @@ async function chooseDataFolder() {
   await refreshAfterStorageChange();
 }
 
-function fillWorkerSelect(sel, s) {
-  if (!sel) return;
-  const cpu = s.cpu_count || 2;
-  const opts = [...new Set([1, 2, 4, 8, 16, cpu, s.scan_workers])]
-    .filter((n) => n >= 1 && n <= Math.max(128, cpu, s.scan_workers || 1))
-    .sort((a, b) => a - b);
-  sel.innerHTML = opts
-    .map((n) => `<option value="${n}">${n}${n === cpu ? t("cpuTag") : ""}</option>`)
-    .join("");
-  sel.value = String(s.scan_workers);
-}
-
 /**
  * 设置页草稿：打开时从后端拷贝，控件只改草稿；
  * 点「完成」才 apply_settings 一次写入。关闭/取消丢弃草稿。
  */
 let _settingsDraft = null;
+
+/** 打开设置页时的表单快照，用来判断关掉时是否还有改动没保存。 */
+let _settingsFormSnapshot = "";
+
+/** 用户本次打开设置页后是否真的动过控件；程序写值不算改动。 */
+let _settingsTouched = false;
 
 /** 读取设置并填充设置页控件（仅草稿，不写后端）。 */
 async function loadSettings() {
@@ -82,14 +76,19 @@ async function loadSettings() {
   applyToastTiming(s);
   _settingsDraft = {
     scan_workers: Number(s.scan_workers) || 1,
+    mft_procs: Number(s.mft_procs) || 0,
+    // 各盘上一次的实测结果，打开设置页时用来还原曲线
+    perf_tests: s.perf_tests && typeof s.perf_tests === "object" ? s.perf_tests : {},
     compress_snapshots: !!s.compress_snapshots,
     use_mft: !!s.use_mft,
     search_memory_index: s.search_memory_index !== false,
     temp_cleanup: s.temp_cleanup !== false,
     auto_check_updates: s.auto_check_updates !== false,
+    update_badge: s.update_badge !== false,
     remember_window_size: s.remember_window_size !== false,
     log_sanitize: s.log_sanitize !== false,
     log_level: _normalizeLogLevel(s.log_level),
+    dev_tools: !!s.dev_tools,
     // 空串 = 内置目录；非空 = 自定义绝对路径
     snapshot_dir: s.snapshot_dir_is_custom ? (s.snapshot_dir_configured || s.snapshot_dir || "") : "",
     snapshot_dir_display: s.snapshot_dir || "",
@@ -104,6 +103,7 @@ async function loadSettings() {
     cpu_count: s.cpu_count,
     delete_blacklist: _normalizeBlacklistDraft(s.delete_blacklist),
     theme: _normalizeUiTheme(s.theme),
+    size_source: _normalizeSizeSource(s.size_source),
     ui_parent_row_bg: s.ui_parent_row_bg === true,
     ui_parent_row_dim: s.ui_parent_row_dim === true,
     ui_hover_group_outline: s.ui_hover_group_outline === true,
@@ -149,6 +149,11 @@ function _normalizeUiTheme(raw) {
   return v === "light" || v === "dark" ? v : "auto";
 }
 
+/** 文件大小来源：actual（实际占用，默认）| logical（逻辑占用）。 */
+function _normalizeSizeSource(raw) {
+  return String(raw || "").trim().toLowerCase() === "logical" ? "logical" : "actual";
+}
+
 /** 悬停分组框最少行数：0-50 收拢，非法回落 2。 */
 function _normalizeHoverGroupMin(raw) {
   const n = Math.round(Number(raw));
@@ -170,6 +175,17 @@ function applyUiSettingFlags(s) {
   root.classList.toggle("ui-pdim-off", !!(s && s.ui_parent_row_dim === false));
   root.classList.toggle("ui-guide-on", !!(s && s.ui_tree_guide === true));
   root.classList.toggle("ui-psep-on", !!(s && s.ui_parent_sep === true));
+}
+
+/** 文件大小来源切换：只记到草稿，等点完成保存后才生效。
+ *
+ *  不能在这里顺手改当前设置：保存收尾要靠「保存前」与「保存后」两个值
+ *  判断要不要重画，提前改掉就永远相等，重画永远不会发生。
+ */
+function onSizeSourceChange() {
+  const el = document.querySelector('input[name="sizeSource"]:checked');
+  const val = _normalizeSizeSource(el && el.value);
+  if (_settingsDraft) _settingsDraft.size_source = val;
 }
 
 /** 设置页「界面」页签：主题选择即时生效（light/dark/auto）。 */
@@ -296,13 +312,1627 @@ async function pickBlacklistFolder() {
   }
 }
 
+/* ---- 性能参数：按盘保存的读取线程、处理进程数与本机测试 --------------- */
+
+// 当前选中的盘，空串表示还没从后端拿到盘列表
+let _perfDrive = "";
+// 后端返回的固定磁盘，每项带该盘已保存的三项参数，0 表示跟随默认
+let _perfDrives = [];
+// 当前曲线看的是哪条路径：procs 是读 MFT 那条，threads 是目录遍历那条
+let _perfMode = "procs";
+// 每个盘的测试结果，键是盘符，值是 {kind, read_s, single_parse_s, points, timedOut, tested, suggest}
+let _perfData = {};
+// 每个盘输入框里正在编辑的值，切盘时用来保存与恢复
+let _perfInputs = {};
+// 打开设置页时每个盘呈现的三项值，用来判断哪一项真正改过
+let _perfBaseline = {};
+// 盘列表是否已经拉回来并建好基线，没就绪时不提交按盘参数
+let _perfReady = false;
+// 本轮测试是否已被前端判成放弃，迟到的事件不再回写界面
+let _perfAbandoned = false;
+// 测试的兜底定时器句柄，收到终态事件才清，见 _perfClearGuard
+let _perfGuard = null;
+// 打开设置页时测试结果的初始快照，用来判断本次有没有新测出东西
+let _perfTestsBase = "{}";
+// 被点了「恢复默认」的盘：提交时这三项发 0，表示回到跟随默认
+let _perfResetFlags = {};
+let _perfBusy = false;
+// 本轮测试是否还没收到终态事件，用来挡住「事件比接口返回先到」的时序
+let _perfPending = false;
+let _perfEventsBound = false;
+// 内存一律用测试实测到的每进程占用，没测到就不显示内存，
+// 不拿常量乘进程数去估
+function _perfPerProc(data) {
+  const v = Number(data && data.per_proc_mb) || 0;
+  return v > 0 ? v : 0;
+}
+// 上限取本机逻辑核数：进程数超过核数只会多占内存，没有速度收益
+const MFT_PROCS_MAX = Math.max(2, navigator.hardwareConcurrency || 8);
+// 目录遍历线程的滑杆上限，超过这个数收益已经很小，再高只是难调
+const PERF_DIR_MAX = 8;
+// 目录遍历线程的定位上限。要跟着后端的合法范围走（那里允许到 128），
+// 不能比全局默认值小，否则高核数机器上打开设置页保存一次就会被夹到更小的值。
+const PERF_DIR_CAP = 128;
+
+function _perfDemoOf(letter) {
+  const group = _perfData[letter];
+  const d = group && group[_perfMode];
+  return d && d.tested ? d : null;
+}
+
+function _perfProcsOf(letter) {
+  const item = _perfDrives.find((x) => x.letter === letter);
+  return item || null;
+}
+
+// 某个盘当前生效的三项值：没单独设过的项用后端给的生效值，
+// 不在这里写死默认数，否则界面显示的默认跟实际扫描用的不是一回事。
+function _perfValueOf(letter) {
+  const item = _perfProcsOf(letter);
+  const eff = (item && item.effective) || {};
+  // 编辑缓存优先：点过恢复默认之后又改过某一项时，改动存在缓存里，
+  // 若让恢复标记排在前面，切走再切回会用默认值把刚改的覆盖掉
+  const saved = _perfInputs[letter];
+  if (saved) return saved;
+  // 点过恢复默认且没再动过：输入框显示恢复之后会用的值，那是全局默认
+  if (_perfResetFlags[letter]) return _perfGlobalDefaults();
+  const def = _perfGlobalDefaults();
+  const mft = (item && item.mft_read) || eff.mft || def.mft;
+  const dir = (item && item.dir_threads) || eff.dir || def.dir;
+  // 生效值里的进程数为 0 表示交给解析侧按核数推导，用自动值显示
+  const procs = (item && item.mft_procs) || eff.procs || def.procs;
+  return { mft, dir, procs };
+}
+
+// 自动档实际会用的进程数：全局设过就用全局值，否则按核数减一
+function _perfAutoProcs() {
+  const s = state._settings || {};
+  const global = Number(s.mft_procs) || 0;
+  if (global > 0) return Math.max(1, Math.min(MFT_PROCS_MAX, global));
+  const auto = Number(s.mft_procs_auto) || 0;
+  if (auto > 0) return Math.max(1, Math.min(MFT_PROCS_MAX, auto));
+  return Math.max(1, MFT_PROCS_MAX - 1);
+}
+
+// 全局默认：恢复默认后一块盘会回到的数值
+function _perfGlobalDefaults() {
+  const s = state._settings || {};
+  return {
+    mft: 1,
+    dir: Math.max(1, Math.min(PERF_DIR_CAP, Number(s.scan_workers) || 4)),
+    procs: _perfAutoProcs(),
+  };
+}
+
+// 把当前输入框的值收进缓存，切盘或保存前调用。
+// 越界值夹回来之后同时写回输入框，否则界面还写着 20、实际提交的是 16。
+function _perfStashInputs() {
+  if (!_perfDrive) return;
+  const mft = $("#perfMft");
+  const dir = $("#perfDir");
+  const procs = $("#perfProcs");
+  const take = (el, lo, hi, fallback) => {
+    if (!el) return fallback;
+    // 取整：输入框键入 1.5 时后端会把整条盘记录当成非法跳过，界面上却提示已应用
+    const raw = Math.round(Number(el.value)) || fallback;
+    const n = Math.max(lo, Math.min(hi, raw));
+    if (String(n) !== String(el.value)) el.value = String(n);
+    return n;
+  };
+  _perfInputs[_perfDrive] = {
+    mft: take(mft, 1, 8, 1),
+    dir: take(dir, 1, PERF_DIR_CAP, 4),
+    procs: take(procs, 1, MFT_PROCS_MAX, 1),
+  };
+}
+
+// 拼成 ``C|1|4|11;D|0|0|8``，后端按同样格式解析后合并进已有参数。
+// 只提交真的动过的盘：后端是合并语义，没提交的盘保持已存值，
+// 这样解锁前的加密卷、临时离线的盘不会因为这次没出现在列表里就被抹掉。
+// 未就绪时返回 null，表示这次不下发按盘参数。
+function _perfDrivesPayload() {
+  _perfStashInputs();
+  if (!_perfReady || !_perfDrives.length) return null;
+  const parts = [];
+  _perfDrives
+    .map((item) => item && item.letter)
+    .filter(Boolean)
+    .sort()
+    .forEach((letter) => {
+      const saved = _perfProcsOf(letter) || {};
+      const v = _perfInputs[letter];
+      if (_perfResetFlags[letter]) {
+        // 被点了恢复默认的盘：仍等于默认值的项继续跟随默认（发 0），
+        // 之后又动过的那几项发具体值，不必把三项一起钉死。
+        const def = _perfGlobalDefaults();
+        const keep = (key) => {
+          const cur = v && Number(v[key]);
+          return cur && cur !== def[key] ? cur : 0;
+        };
+        parts.push([letter, keep("mft"), keep("dir"), keep("procs")].join("|"));
+        return;
+      }
+      const base = _perfBaseline[letter];
+      if (!v || !base) return;
+      // 这一块盘一项都没改就不用提交，交给后端保留原值
+      if (base.mft === v.mft && base.dir === v.dir && base.procs === v.procs) {
+        return;
+      }
+      const pick = (key, stored) => {
+        const old = Number(stored) || 0;
+        return base[key] === v[key] ? old : v[key];
+      };
+      parts.push(
+        [
+          letter,
+          pick("mft", saved.mft_read),
+          pick("dir", saved.dir_threads),
+          pick("procs", saved.mft_procs),
+        ].join("|")
+      );
+    });
+  return parts.join(";");
+}
+
+// 打开设置页时记下每个盘看到的呈现值，提交时用来判断某一项是否被改过
+function _perfSnapshotBaseline() {
+  _perfBaseline = {};
+  _perfDrives.forEach((item) => {
+    if (item && item.letter) {
+      _perfBaseline[item.letter] = { ..._perfValueOf(item.letter) };
+    }
+  });
+}
+
+function _perfColors() {
+  const cs = getComputedStyle(document.documentElement);
+  return {
+    accent: cs.getPropertyValue("--accent").trim() || "#1f6feb",
+    muted: cs.getPropertyValue("--text-muted").trim() || "#737d89",
+    border: cs.getPropertyValue("--border").trim() || "#d4d9df",
+    text: cs.getPropertyValue("--text-dim").trim() || "#444c56",
+    warn: cs.getPropertyValue("--warn").trim() || "#9a6700",
+    // 推荐标记用绿色；主题里没有专门的绿色语义变量，用缩小方向的绿
+    good: cs.getPropertyValue("--shrink").trim() || "#1a7f37",
+  };
+}
+
+// 横轴刻度：数大时抽稀，最多六个
+function _perfTicks(max) {
+  const out = [1];
+  if (max <= 1) return out;
+  const step = Math.max(1, Math.ceil((max - 1) / 5));
+  for (let v = 1 + step; v < max; v += step) out.push(v);
+  if (out[out.length - 1] !== max) out.push(max);
+  return out;
+}
+
+function _perfAxisMax() {
+  return _perfMode === "procs" ? MFT_PROCS_MAX : PERF_DIR_MAX;
+}
+
+// 目录遍历是实测点，中间按分段直线插值，超出末点就取末点
+function _perfDirCost(points, n) {
+  if (!points || !points.length) return null;
+  if (n <= points[0][0]) return points[0][1];
+  for (let i = 1; i < points.length; i += 1) {
+    const [x1, y1] = points[i];
+    if (n <= x1) {
+      const [x0, y0] = points[i - 1];
+      if (x1 === x0) return y1;
+      return y0 + ((y1 - y0) * (n - x0)) / (x1 - x0);
+    }
+  }
+  return points[points.length - 1][1];
+}
+
+// 内存：目录遍历的线程几乎不占内存，实测一直加到十二个线程也只多八兆
+function _perfMemAt(n, perProc) {
+  if (!(perProc > 0)) return null;
+  return Math.round(n * perProc);
+}
+
+// 处理进程数模式：时间线与内存线在图上高度相同时的进程数
+function _perfBestPoint(data) {
+  if (!data) return 0;
+  const single = Number(data.single_parse_s) || 0;
+  const read = Number(data.read_s) || 0;
+  if (!(single > 0)) return 0;
+  const tSpan = Math.max(single, read);
+  if (!(tSpan > 0) || MFT_PROCS_MAX < 2) return 0;
+  const perProc = _perfPerProc(data);
+  // 没采到内存时没有内存线可比，取解析耗时降到读取耗时时的进程数
+  if (!(perProc > 0)) {
+    return Math.max(1, Math.min(MFT_PROCS_MAX, Math.round(single / Math.max(read, 1e-6))));
+  }
+  const memMax = Math.max(50, Math.ceil((MFT_PROCS_MAX * perProc) / 50) * 50);
+  // 时间轴用的是图上那条解析曲线本身（single / n），不是整次扫描时间。
+  // 整次扫描要取读取与解析里较慢的那段，解析降到读取以下后就变得恒定，
+  // 拿它去和内存线求交点会把交点推到右侧，圈就落在曲线之外了。
+  const gap = (n) => single / n / tSpan - (n * perProc) / memMax;
+  if (gap(1) <= 0) return 1;
+  if (gap(MFT_PROCS_MAX) >= 0) return MFT_PROCS_MAX;
+  let lo = 1;
+  let hi = MFT_PROCS_MAX;
+  for (let i = 0; i < 40; i += 1) {
+    const mid = (lo + hi) / 2;
+    if (gap(mid) > 0) lo = mid;
+    else hi = mid;
+  }
+  return (lo + hi) / 2;
+}
+
+// 目录遍历模式：取耗时把总降幅走完大半的最小档位。
+// 直接取最低点会把线程数推到八，可图上的线早在第二档就压平了，
+// 再加线程只多占内存，因此这里找的是「再往上几乎没有改善」的那个点。
+function _perfThreadSuggest(points) {
+  const list = (points || [])
+    .filter((p) => Number(p[0]) > 0 && Number(p[1]) > 0)
+    .slice()
+    .sort((a, b) => Number(a[0]) - Number(b[0]));
+  if (!list.length) return 0;
+  const one = Number(list[0][1]);
+  let low = one;
+  list.forEach((p) => {
+    if (Number(p[1]) < low) low = Number(p[1]);
+  });
+  const total = one - low;
+  if (!(total > 0)) return Number(list[0][0]);
+  for (let i = 0; i < list.length; i += 1) {
+    if (one - Number(list[i][1]) >= total * 0.85) return Number(list[i][0]);
+  }
+  return Number(list[list.length - 1][0]);
+}
+
+// 目录遍历各档的内存实测点，取不到就是空
+function _perfThreadMem(data) {
+  const mem = data && data.mem;
+  if (!mem || !mem.length) return null;
+  return mem
+    .filter((p) => Number(p[0]) > 0 && Number(p[1]) >= 0)
+    .map((p) => [Number(p[0]), Number(p[1])]);
+}
+
+function _perfThreadMemAt(mem, n) {
+  if (!mem || !mem.length) return null;
+  if (n <= mem[0][0]) return mem[0][1];
+  for (let i = 1; i < mem.length; i += 1) {
+    const [x1, y1] = mem[i];
+    if (n <= x1) {
+      const [x0, y0] = mem[i - 1];
+      if (x1 === x0) return y1;
+      return y0 + ((y1 - y0) * (n - x0)) / (x1 - x0);
+    }
+  }
+  return mem[mem.length - 1][1];
+}
+
+function _perfDraw(cur) {
+  const cv = $("#perfChart");
+  if (!cv) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth || 520;
+  const h = 172;
+  cv.width = Math.round(w * dpr);
+  cv.height = Math.round(h * dpr);
+  const g = cv.getContext("2d");
+  if (!g) return;
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+
+  const c = _perfColors();
+  const padL = 42;
+  const padR = 68;
+  const padT = 30;
+  const padB = 22;
+  const cw = w - padL - padR;
+  const ch = h - padT - padB;
+  g.font = "11px system-ui, sans-serif";
+  g.textBaseline = "middle";
+
+  const data = _perfDemoOf(_perfDrive);
+  const max = _perfAxisMax();
+  const xOf = (n) => padL + ((n - 1) / Math.max(1, max - 1)) * cw;
+  const procsMode = _perfMode === "procs";
+  const perProc = procsMode ? _perfPerProc(data) : 0;
+  const threadMem = procsMode ? null : _perfThreadMem(data);
+  // 两种模式都按实测内存画线：进程模式是每进程内存乘进程数，线程模式按各档实测值
+  const hasMem = procsMode ? perProc > 0 : !!(threadMem && threadMem.length);
+  let memMax = 0;
+  if (hasMem) {
+    if (procsMode) {
+      memMax = Math.max(50, Math.ceil((MFT_PROCS_MAX * perProc) / 50) * 50);
+    } else {
+      const top = Math.max(1, ...threadMem.map((p) => p[1]));
+      memMax = Math.max(10, Math.ceil(top / 10) * 10);
+    }
+  }
+  const memAt = (n) => (procsMode ? _perfMemAt(n, perProc) : _perfThreadMemAt(threadMem, n));
+  const yM = (v) => padT + ch - (Math.min(v, memMax) / memMax) * ch;
+
+  // 时间量程：进程模式看读取与单进程解析，线程模式看实测点的最大值
+  let tMax = 20;
+  if (data) {
+    if (procsMode) {
+      tMax = Math.max(Number(data.single_parse_s) || 0, Number(data.read_s) || 0) || 20;
+    } else {
+      const pts = data.points || [];
+      tMax = Math.max(1, ...pts.map((p) => Number(p[1]) || 0)) * 1.15;
+    }
+  }
+  const yT = (v) => padT + ch - (Math.min(v, tMax) / tMax) * ch;
+
+  // 横向网格，左时间右内存
+  g.strokeStyle = c.border;
+  g.lineWidth = 1;
+  for (let i = 0; i <= 2; i += 1) {
+    const y = padT + ch * (i / 2);
+    g.globalAlpha = i === 2 ? 0.8 : 0.3;
+    g.beginPath();
+    g.moveTo(padL, y + 0.5);
+    g.lineTo(padL + cw, y + 0.5);
+    g.stroke();
+    g.globalAlpha = 1;
+    g.fillStyle = c.text;
+    g.textAlign = "right";
+    g.fillText((tMax * (1 - i / 2)).toFixed(1) + "s", padL - 6, y);
+    g.fillStyle = c.text;
+    if (hasMem) {
+      g.textAlign = "left";
+      g.fillText(Math.round(memMax * (1 - i / 2)) + " MB", padL + cw + 6, y);
+    } else {
+      g.textAlign = "left";
+      g.fillText("--", padL + cw + 6, y);
+    }
+  }
+
+  // 轴名
+  g.fillStyle = c.text;
+  g.textAlign = "left";
+  g.fillText(t("perfAxisTime"), padL - 2, 12);
+  g.textAlign = "right";
+  g.fillStyle = c.text;
+  g.fillText(t("perfAxisMem"), padL + cw + padR - 6, 12);
+  g.fillStyle = c.muted;
+  g.textAlign = "center";
+  g.fillText(t("perfLegendLine"), padL + cw / 2, 12);
+
+  if (!data) return;
+
+  // 内存线只在真测到内存时才画。
+  // 进程模式下这条线是「每进程内存乘进程数」推算出来的，而图例说
+  // 实线为实测值、虚线为推算值，所以它必须画虚线；目录遍历那条是
+  // 各档实测的内存点直接连起来，保持实线。
+  if (hasMem) {
+    g.strokeStyle = c.warn;
+    g.globalAlpha = 0.85;
+    g.lineWidth = 1.5;
+    g.setLineDash(procsMode ? [5, 4] : []);
+    g.beginPath();
+    if (procsMode) {
+      for (let n = 1; n <= max; n += 1) {
+        const my = yM(memAt(n));
+        if (n === 1) g.moveTo(xOf(n), my);
+        else g.lineTo(xOf(n), my);
+      }
+    } else {
+      threadMem.forEach(([n, mb], i) => {
+        if (i === 0) g.moveTo(xOf(n), yM(mb));
+        else g.lineTo(xOf(n), yM(mb));
+      });
+    }
+    g.stroke();
+    g.setLineDash([]);
+    g.globalAlpha = 1;
+    g.fillStyle = c.warn;
+    g.textAlign = "left";
+    const endMem = memAt(max);
+    g.fillText(
+      t("mftProcsCurveMem") + " " + Math.round(endMem) + " MB",
+      xOf(max) + 4,
+      Math.min(yM(endMem) + 12, padT + ch - 4)
+    );
+  }
+
+  if (procsMode) {
+    _perfDrawProcs(g, data, { padL, padR, padT, cw, ch, c, xOf, yT, yM, cur, max });
+  } else {
+    _perfDrawThreads(g, data, { padL, cw, padT, ch, c, xOf, yT, yM, cur, hasMem, memAt });
+  }
+
+  // 当前值竖线
+  const cx = xOf(cur);
+  g.strokeStyle = c.text;
+  g.globalAlpha = 0.3;
+  g.lineWidth = 1;
+  g.beginPath();
+  g.moveTo(cx + 0.5, padT);
+  g.lineTo(cx + 0.5, padT + ch);
+  g.stroke();
+  g.globalAlpha = 1;
+}
+
+function _perfPointTag(g, x, y, text, color, rightEdge, topEdge, bottomEdge) {
+  // 点在竖线上，标签放右侧；靠右边放不下时翻到左侧。
+  // 标签靠上下边缘时向内夹，不能压到轴名、图例和横轴刻度上。
+  g.font = "11px system-ui, sans-serif";
+  const w = g.measureText(text).width;
+  const toRight = x + 9 + w <= rightEdge;
+  const ty = Math.max(topEdge, Math.min(bottomEdge, y));
+  g.fillStyle = color;
+  g.textAlign = toRight ? "left" : "right";
+  g.fillText(text, toRight ? x + 9 : x - 9, ty);
+}
+
+function _perfDrawProcs(g, data, m) {
+  const { padL, padT, cw, ch, c, xOf, yT, yM, cur, max } = m;
+  const perProc = _perfPerProc(data);
+  const hasMem = perProc > 0;
+  const read = Number(data.read_s) || 0;
+  const singleParse = Number(data.single_parse_s) || 0;
+  if (!(read > 0)) return;
+  const timedOut = !!data.timedOut;
+
+  // 只画解析曲线。读取耗时是一条与进程数无关的水平线，
+  // 画在图上会和曲线混在一起，改为只在摘要与结果里用文字说明。
+  if (singleParse > 0) {
+    g.strokeStyle = c.accent;
+    g.lineWidth = 2;
+    g.setLineDash(timedOut ? [5, 4] : []);
+    g.beginPath();
+    for (let n = 1; n <= max; n += 1) {
+      const qx = xOf(n);
+      const qy = yT(singleParse / n);
+      if (n === 1) g.moveTo(qx, qy);
+      else g.lineTo(qx, qy);
+    }
+    g.stroke();
+    g.setLineDash([]);
+    g.fillStyle = c.text;
+    g.textAlign = "right";
+    if (timedOut) {
+      g.fillText(t("mftProcsCurveUnfinished"), padL + cw, padT + 4);
+    } else {
+      g.fillText(
+        t("mftProcsCurveParse") + " " + (singleParse / max).toFixed(1) + "s",
+        padL + cw - 2,
+        yT(singleParse / max) - 10
+      );
+    }
+  } else {
+    g.fillStyle = c.text;
+    g.textAlign = "right";
+    g.fillText(t("mftProcsCurveUnfinished"), padL + cw, padT + 4);
+  }
+
+  // 最佳点：时间线与内存线高度相同的位置
+  const best = _perfBestPoint(data);
+  if (!(best > 0)) return;
+  g.strokeStyle = c.good;
+  g.globalAlpha = 0.5;
+  g.lineWidth = 1;
+  g.setLineDash([3, 3]);
+  g.beginPath();
+  g.moveTo(xOf(best) + 0.5, padT);
+  g.lineTo(xOf(best) + 0.5, padT + ch);
+  g.stroke();
+  g.setLineDash([]);
+  g.globalAlpha = 1;
+  g.lineWidth = 2;
+  // 圈画在解析曲线上，与上方的交点算法用同一条时间线
+  const bestY = yT(singleParse / best);
+  g.beginPath();
+  g.arc(xOf(best), bestY, 4.5, 0, Math.PI * 2);
+  g.stroke();
+  g.fillStyle = c.good;
+  g.textAlign = "center";
+  g.fillText(t("mftProcsCurveBest"), xOf(best), bestY - 12);
+
+  if (singleParse > 0) {
+    const py = yT(singleParse / cur);
+    g.fillStyle = c.accent;
+    g.beginPath();
+    g.arc(xOf(cur), py, 3.5, 0, Math.PI * 2);
+    g.fill();
+    // 圆点旁边的数值：拖动滑杆时直接看得到该档的解析耗时。
+    // 推荐标记也写在同一高度，两者撞上时把数值挪到点下方。
+    let tagY = py - 12;
+    if (Math.abs(py - bestY) < 14 && Math.abs(xOf(cur) - xOf(best)) < 62) {
+      tagY = py + 13;
+    }
+    _perfPointTag(
+      g,
+      xOf(cur),
+      tagY,
+      t("perfTagParse") + " " + (singleParse / cur).toFixed(1) + t("perfUnitSec"),
+      c.accent,
+      padL + cw,
+      padT + 9,
+      padT + ch - 9
+    );
+  }
+  if (hasMem) {
+    const my = yM(_perfMemAt(cur, perProc));
+    g.fillStyle = c.warn;
+    g.beginPath();
+    g.arc(xOf(cur), my, 3, 0, Math.PI * 2);
+    g.fill();
+    _perfPointTag(
+      g,
+      xOf(cur),
+      my + 13,
+      t("mftProcsCurveMem") + " " + _perfMemText(_perfMemAt(cur, perProc)),
+      c.warn,
+      padL + cw,
+      padT + 9,
+      padT + ch - 9
+    );
+  }
+}
+
+function _perfDrawThreads(g, data, m) {
+  const { padL, padT, cw, ch, c, xOf, yT, yM, cur } = m;
+  const points = data.points || [];
+  if (!points.length) return;
+
+  // 目录遍历耗时曲线：按实测点连直线
+  g.strokeStyle = c.accent;
+  g.lineWidth = 2;
+  g.setLineDash(data.timedOut ? [5, 4] : []);
+  g.beginPath();
+  points.forEach(([n, sec], i) => {
+    const px = xOf(n);
+    const py = yT(sec);
+    if (i === 0) g.moveTo(px, py);
+    else g.lineTo(px, py);
+  });
+  g.stroke();
+  g.setLineDash([]);
+  g.fillStyle = c.accent;
+  points.forEach(([n, sec]) => {
+    g.beginPath();
+    g.arc(xOf(n), yT(sec), 2.6, 0, Math.PI * 2);
+    g.fill();
+  });
+
+  // 最低点：实测里耗时最短的线程数
+  const low = _perfThreadSuggest(points);
+  if (!(low > 0)) return;
+  const lowCost = _perfDirCost(points, low);
+  g.strokeStyle = c.good;
+  g.globalAlpha = 0.5;
+  g.lineWidth = 1;
+  g.setLineDash([3, 3]);
+  g.beginPath();
+  g.moveTo(xOf(low) + 0.5, padT);
+  g.lineTo(xOf(low) + 0.5, padT + ch);
+  g.stroke();
+  g.setLineDash([]);
+  g.globalAlpha = 1;
+  g.lineWidth = 2;
+  g.beginPath();
+  g.arc(xOf(low), yT(lowCost), 4.5, 0, Math.PI * 2);
+  g.stroke();
+  g.fillStyle = c.good;
+  g.textAlign = "center";
+  g.fillText(t("perfCurveLowest"), xOf(low), yT(lowCost) - 12);
+
+  const curCost = _perfDirCost(points, cur);
+  g.fillStyle = c.accent;
+  g.beginPath();
+  g.arc(xOf(cur), yT(curCost), 3.5, 0, Math.PI * 2);
+  g.fill();
+  g.font = "11px system-ui, sans-serif";
+  // 与「推荐」文字撞位时，数值标签改画在点下方
+  let walkTagY = yT(curCost) - 12;
+  if (
+    Math.abs(yT(curCost) - yT(lowCost)) < 14 &&
+    Math.abs(xOf(cur) - xOf(low)) < 62
+  ) {
+    walkTagY = yT(curCost) + 13;
+  }
+  _perfPointTag(
+    g,
+    xOf(cur),
+    walkTagY,
+    t("perfTagWalk") + " " + curCost.toFixed(1) + t("perfUnitSec"),
+    c.accent,
+    padL + cw,
+    padT + 9,
+    padT + ch - 9
+  );
+
+  if (m.hasMem) {
+    const my = yM(m.memAt(cur));
+    g.fillStyle = c.warn;
+    g.beginPath();
+    g.arc(xOf(cur), my, 3, 0, Math.PI * 2);
+    g.fill();
+    _perfPointTag(
+      g,
+      xOf(cur),
+      my + 13,
+      t("mftProcsCurveMem") + " " + _perfMemText(m.memAt(cur)),
+      c.warn,
+      padL + cw,
+      padT + 9,
+      padT + ch - 9
+    );
+  }
+}
+
+function _perfSummary() {
+  const el = $("#perfSummary");
+  const range = $("#perfRange");
+  if (!el || !range) return;
+  const n = Number(range.value) || 1;
+  const data = _perfDemoOf(_perfDrive);
+  const mb = _perfMemAt(n, _perfPerProc(data));
+  if (!data) {
+    el.textContent = "";
+    return;
+  }
+  if (_perfMode === "procs") {
+    const read = Number(data.read_s) || 0;
+    const single = Number(data.single_parse_s) || 0;
+    if (data.timedOut && !(single > 0)) {
+      el.textContent = t("mftProcsSummaryUnfinished", {
+        read: read.toFixed(1),
+        n,
+        mb,
+      });
+      return;
+    }
+    const parse = single / n;
+    el.textContent = t("mftProcsSummary", {
+      read: read.toFixed(1),
+      total: Math.max(read, parse).toFixed(1),
+      mb,
+    });
+    return;
+  }
+  const tmem = _perfThreadMemAt(_perfThreadMem(data), n);
+  el.textContent = t(tmem === null ? "perfSummaryThreadsNoMem" : "perfSummaryThreads", {
+    n,
+    mb: tmem === null ? "" : String(Math.round(tmem)),
+  });
+}
+
+// 刻度按当前轴上限生成
+function _perfPlaceScale() {
+  const scale = $("#perfScale");
+  const range = $("#perfRange");
+  if (!scale || !range) return;
+  const max = _perfAxisMax();
+  range.max = String(max);
+  const cur = Math.max(1, Math.min(max, Number(range.value) || 1));
+  range.value = String(cur);
+  scale.innerHTML = "";
+  _perfTicks(max).forEach((v) => {
+    const el = document.createElement("span");
+    el.textContent = String(v);
+    el.style.left = ((v - 1) / Math.max(1, max - 1)) * 100 + "%";
+    scale.appendChild(el);
+  });
+}
+
+function _perfSync() {
+  const range = $("#perfRange");
+  const procs = $("#perfProcs");
+  if (!range) return;
+  // 没有管理员权限时，读取 MFT 与处理进程数测不了；提示一次，测试仍可跑（只测目录遍历）
+  const envWarn = $("#perfEnvWarn");
+  if (envWarn) {
+    const admin = !!(state._settings && state._settings.is_admin);
+    envWarn.classList.toggle("hidden", admin);
+  }
+  _perfPlaceScale();
+  const n = Number(range.value) || 1;
+  if (procs && _perfMode === "procs") procs.value = String(n);
+  _perfSummary();
+  _perfDraw(n);
+  _perfUpdateDriveFlags();
+  _perfUpdateHint();
+  const testBtn = $("#perfTest");
+  if (testBtn) testBtn.disabled = !_perfDrive || _perfBusy;
+  const resetBtn = $("#perfResetDefault");
+  if (resetBtn) resetBtn.disabled = !_perfDrive || _perfBusy;
+}
+
+// 切语言时把这一区临时生成的文字重画一遍
+function _perfRefreshLanguage() {
+  if (!$("#perfChart")) return;
+  _perfSync();
+  _perfSetBusy(_perfBusy);
+}
+
+// 启动时判断要不要提醒去做性能测试。
+// 只看有没有测过：任意一块盘的处理进程数或目录遍历任意一组有数据就算测过。
+// 非管理员不影响判断，因为目录遍历线程数照样能测。
+function _perfHasAnyTest(raw) {
+  if (!raw || typeof raw !== "object") return false;
+  return Object.keys(raw).some(function (letter) {
+    const item = raw[letter];
+    if (!item || typeof item !== "object") return false;
+    const procs = item.procs;
+    const threads = item.threads;
+    if (procs && typeof procs === "object" && Number(procs.read_s) > 0) return true;
+    if (threads && typeof threads === "object" && Array.isArray(threads.points) && threads.points.length) return true;
+    return false;
+  });
+}
+
+function maybeShowPerfPrompt() {
+  const overlay = $("#perfPromptOverlay");
+  if (!overlay) return;
+  const s = state._settings || {};
+  if (s.perf_prompt === false) return;
+  if (_perfHasAnyTest(s.perf_tests)) return;
+  // 已经有别的弹窗开着时让位，避免两层模态叠在一起
+  if (document.querySelectorAll(".overlay:not(.hidden)").length) return;
+  overlay.classList.remove("hidden");
+}
+
+// 勾了以后不再提醒就把开关写进设置，取消与关闭只关窗
+function wirePerfPromptUi() {
+  const overlay = $("#perfPromptOverlay");
+  if (!overlay || overlay.dataset.bound === "1") return;
+  overlay.dataset.bound = "1";
+  const chk = $("#perfPromptOffChk");
+
+  function rememberOff() {
+    if (!chk || !chk.checked) return;
+    state._settings = state._settings || {};
+    state._settings.perf_prompt = false;
+    try {
+      const p = state.api.apply_settings({ perf_prompt: false });
+      if (p && typeof p.catch === "function") p.catch(function () {});
+    } catch (e) {}
+  }
+
+  function closeOnly() {
+    overlay.classList.add("hidden");
+    rememberOff();
+  }
+
+  const cancelBtn = $("#perfPromptCancelBtn");
+  if (cancelBtn) cancelBtn.addEventListener("click", closeOnly);
+  const closeBtn = $("#perfPromptCloseBtn");
+  if (closeBtn) closeBtn.addEventListener("click", closeOnly);
+  const goBtn = $("#perfPromptGoBtn");
+  if (goBtn) {
+    goBtn.addEventListener("click", function () {
+      rememberOff();
+      overlay.classList.add("hidden");
+      if (typeof openSettings === "function") openSettings("perf");
+    });
+  }
+}
+
+function _perfUpdateHint() {
+  const el = $("#perfHint");
+  if (!el) return;
+  el.textContent = t(_perfMode === "procs" ? "perfHintProcs" : "perfHintThreads");
+}
+
+// 清掉测试的兜底定时器。收到终态事件、或接口直接报错时才清，
+// 接口正常返回不意味着测试结束，它在后台线程里继续跑。
+function _perfClearGuard() {
+  if (_perfGuard) {
+    clearTimeout(_perfGuard);
+    _perfGuard = null;
+  }
+}
+
+// 盘符按钮的两种标记按「参数是否已被单独设置」与「是否有实测数据」分别判定：
+// 走默认的盘（没设过，或刚点过恢复默认）铺淡警示底色，
+// 测过且自己设过参数的盘铺淡绿色底色，其余保持普通底色。
+function _perfUpdateDriveFlags() {
+  const def = _perfGlobalDefaults();
+  // MFT 读取线程的默认值恒为 1，设成 1 与跟随默认用起来完全一样，
+  // 所以这一项只要等于默认就不算「自己设过」，否则恢复默认后被存成 1，
+  // 重开设置页就会误判成自己设过而标成绿色
+  const sameMft = (n) => {
+    const v = Number(n) || 0;
+    return v === 0 || v === def.mft;
+  };
+  document.querySelectorAll(".perf-drive-btn").forEach((btn) => {
+    const letter = btn.dataset.drive;
+    const stored = _perfProcsOf(letter) || {};
+    const edited = _perfInputs[letter] || null;
+    const tested = !!(letter && _perfTested(letter));
+    // 走默认的判定分三种情形：刚点过恢复默认、控件里有值（可能是切盘时暂存下来的）、
+    // 只有存储值。控件里有值不等于用户改过，所以一律按「是否仍等于默认」判断。
+    let followsDefault;
+    if (edited) {
+      followsDefault =
+        sameMft(edited.mft) &&
+        Number(edited.dir) === def.dir &&
+        Number(edited.procs) === def.procs;
+    } else if (_perfResetFlags[letter]) {
+      followsDefault = true;
+    } else {
+      followsDefault =
+        sameMft(stored.mft_read) &&
+        !(Number(stored.dir_threads) || 0) &&
+        !(Number(stored.mft_procs) || 0);
+    }
+    btn.classList.toggle("is-default", followsDefault);
+    btn.classList.toggle("is-measured", tested && !followsDefault);
+  });
+}
+
+// 这块盘是否至少有一组实测数据（与当前看的是哪种曲线无关）
+function _perfTested(letter) {
+  const groups = _perfData[letter];
+  if (!groups) return false;
+  return Object.keys(groups).some((kind) => groups[kind] && groups[kind].tested);
+}
+
+function _perfRenderDrives() {
+  const box = $("#perfDrive");
+  if (!box) return;
+  box.innerHTML = "";
+  _perfDrives.forEach((item) => {
+    const letter = String(item.letter || "").trim();
+    if (!letter) return;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "perf-drive-btn";
+    btn.dataset.drive = letter;
+    btn.textContent = letter;
+    if (letter === _perfDrive) btn.classList.add("is-active");
+    btn.addEventListener("click", () => _perfSetDrive(letter));
+    box.appendChild(btn);
+  });
+  _perfUpdateDriveFlags();
+  _perfSyncCopyVisible();
+}
+
+function _perfSetDrive(letter) {
+  // 测试进行中不许换盘，否则结果会记到别的盘上
+  if (_perfBusy || !letter || letter === _perfDrive) return;
+  _perfStashInputs();
+  _perfDrive = letter;
+  // 快速应用面板的目标列表是按上一块盘生成的，切盘就收起来
+  const copyPanel = $("#perfCopyPanel");
+  if (copyPanel) copyPanel.classList.add("hidden");
+  document.querySelectorAll(".perf-drive-btn").forEach((btn) => {
+    btn.classList.toggle("is-active", btn.dataset.drive === letter);
+  });
+  _perfLoadInputs();
+  _perfResetResult();
+  _perfSync();
+  // 切盘只是换一块盘的显示值，不算改动
+  _settingsRefreshSnapshotIfUntouched();
+}
+
+function _perfLoadInputs() {
+  const v = _perfValueOf(_perfDrive);
+  const mft = $("#perfMft");
+  const dir = $("#perfDir");
+  const procs = $("#perfProcs");
+  const range = $("#perfRange");
+  if (mft) mft.value = String(v.mft);
+  if (dir) dir.value = String(v.dir);
+  if (procs) procs.value = String(v.procs);
+  if (range) range.value = String(_perfMode === "procs" ? v.procs : v.dir);
+}
+
+// 换盘或换曲线时把上一轮的结果面板收起来，避免结果挂在别的盘下
+function _perfResetResult() {
+  const panel = $("#perfResult");
+  if (panel) panel.classList.add("hidden");
+}
+
+function _perfSetBusy(on) {
+  _perfBusy = on;
+  const range = $("#perfRange");
+  const btn = $("#perfTest");
+  const mft = $("#perfMft");
+  const dir = $("#perfDir");
+  const procs = $("#perfProcs");
+  [range, mft, dir, procs].forEach((el) => {
+    if (el) el.disabled = on;
+  });
+  document.querySelectorAll(".perf-drive-btn").forEach((el) => {
+    el.disabled = on;
+  });
+  document.querySelectorAll(".perf-switch-btn").forEach((el) => {
+    el.disabled = on;
+  });
+  const resetBtn = $("#perfResetDefault");
+  if (resetBtn) resetBtn.disabled = on || !_perfDrive;
+  if (btn) {
+    // 一块盘都没取到时也置灰，避免发出没有盘符的测试请求
+    btn.disabled = on || !_perfDrive;
+    btn.textContent = on
+      ? t("mftProcsBusy")
+      : (_perfDemoOf(_perfDrive) ? t("mftProcsRetest") : t("perfTestStart"));
+  }
+}
+
+function _perfShowProgress() {
+  const prog = $("#perfProgress");
+  const result = $("#perfResult");
+  const live = $("#perfLive");
+  const fill = $("#perfFill");
+  if (result) result.classList.add("hidden");
+  if (prog) prog.classList.remove("hidden");
+  if (live) live.textContent = t("mftProcsTestingLive", { cpu: "0", mem: "0 MB", sec: "0", pct: "0" });
+  if (fill) fill.style.width = "0%";
+}
+
+function _perfHideProgress() {
+  const prog = $("#perfProgress");
+  if (prog) prog.classList.add("hidden");
+}
+
+function _perfMemText(mb) {
+  if (!mb) return "0 MB";
+  return mb >= 1024 ? (mb / 1024).toFixed(1) + " GB" : Math.round(mb) + " MB";
+}
+
+function _perfShowResult(title, body, canApply) {
+  const panel = $("#perfResult");
+  const titleEl = $("#perfResultTitle");
+  const bodyEl = $("#perfResultBody");
+  const ignore = $("#perfIgnore");
+  const apply = $("#perfApply");
+  if (panel) panel.classList.remove("hidden");
+  if (titleEl) {
+    titleEl.textContent = title || "";
+    // 没有标题时整行收起来，不留一条空行
+    titleEl.classList.toggle("hidden", !title);
+  }
+  if (bodyEl) bodyEl.textContent = body || "";
+  if (ignore) ignore.textContent = t("mftProcsGotIt");
+  if (apply) apply.classList.toggle("hidden", !canApply);
+  _perfHideProgress();
+}
+
+// 把界面上现有的测试结果整理成与配置一致的形状，供提交时带给后端。
+// 只有本次新测出来的结果才需要提交，没新测过就不带这个键，
+// 免得干扰「设置有没有改动」的判断。
+function _perfTestsPayload() {
+  const out = {};
+  Object.keys(_perfData || {}).forEach((letter) => {
+    const groups = _perfData[letter] || {};
+    const obj = {};
+    ["procs", "threads"].forEach((kind) => {
+      const g = groups[kind];
+      if (!g || !g.tested) return;
+      const copy = {};
+      Object.keys(g).forEach((k) => {
+        if (k === "kind" || k === "tested" || k === "timedOut" || k === "suggest") return;
+        copy[k] = g[k];
+      });
+      copy.mode = kind;
+      copy.timed_out = !!g.timedOut;
+      obj[kind] = copy;
+    });
+    if (Object.keys(obj).length) out[letter] = obj;
+  });
+  return out;
+}
+
+function _perfSaveGroup(letter, kind, data) {
+  const group = _perfData[letter] && typeof _perfData[letter] === "object" ? _perfData[letter] : {};
+  // 只换本次测到的那一组，另一组保留，避免重测一项把另一项抹掉
+  group[kind] = data;
+  _perfData[letter] = group;
+}
+
+function _perfProcsDataOf(payload) {
+  const read = Number(payload.read_s) || 0;
+  const single = Number(payload.single_parse_s) || 0;
+  const data = {
+    kind: "procs",
+    tested: true,
+    timedOut: !!payload.timed_out,
+    read_s: read,
+    single_parse_s: single,
+    // 内存只用测试里采到的实测值，采不到就是 0，界面据此不提内存
+    per_proc_mb: Number(payload.per_proc_mb) || 0,
+  };
+  // 交叉点很少刚好落在整数上，取右侧最近的那个整数：
+  // 进程越多解析越快，右侧就是时间更少的一侧
+  data.suggest = Math.max(1, Math.min(MFT_PROCS_MAX, Math.ceil(_perfBestPoint(data)) || 1));
+  return data;
+}
+
+function _perfThreadsDataOf(payload) {
+  const points = (payload.points || []).map((p) => [Number(p[0]) || 1, Number(p[1]) || 0]);
+  const mem = (payload.mem || []).map((p) => [Number(p[0]) || 1, Number(p[1]) || 0]);
+  const data = {
+    kind: "threads",
+    tested: true,
+    timedOut: !!payload.timed_out,
+    points,
+    mem,
+    sample: Number(payload.sample) || 0,
+  };
+  data.suggest = _perfThreadSuggest(points);
+  return data;
+}
+
+// 一次测试两组结果一起交回：先写进数据，再按当前曲线给出正文
+function _perfShowAllResult(payload) {
+  const letter = _perfDrive;
+  const procsRaw = (payload && payload.procs) || {};
+  const threadsRaw = (payload && payload.threads) || {};
+  let procsData = null;
+  let threadsData = null;
+  if ((Number(procsRaw.read_s) || 0) > 0) {
+    procsData = _perfProcsDataOf(procsRaw);
+    _perfSaveGroup(letter, "procs", procsData);
+  }
+  if ((threadsRaw.points || []).length) {
+    threadsData = _perfThreadsDataOf(threadsRaw);
+    _perfSaveGroup(letter, "threads", threadsData);
+  }
+
+  // 两条路径各自给一句，一起摆在结果里，不用来回切曲线看
+  const lines = [];
+  if (procsData) {
+    const n = procsData.suggest;
+    lines.push(t("perfAllProcs", { n }));
+  }
+  if (threadsData) {
+    lines.push(t("perfAllThreads", { n: threadsData.suggest }));
+  }
+  if (payload && payload.mft_skipped) {
+    lines.push(String(payload.mft_skipped));
+  }
+  // 测试结果不再用「X 盘测试结果」开头，标题只留给超时提示
+  const title = payload && payload.timed_out
+    ? t("mftProcsTimeoutTitle", Math.round(Number(payload.elapsed_s) || 0) || 0)
+    : "";
+  _perfShowResult(title, lines.join(" "), !!(procsData || threadsData));
+  _perfSetBusy(false);
+  // 测完直接把当前盘调到两组建议值上，不用再点一次「填入」
+  _perfAutoApply(letter, procsData, threadsData);
+  _perfSync();
+}
+
+// 把测出来的建议值写进当前盘的参数。只是改本次设置，点保存才生效。
+function _perfAutoApply(letter, procsData, threadsData) {
+  if (!letter) return;
+  const values = Object.assign({}, _perfValueOf(letter));
+  let changed = false;
+  if (procsData && procsData.suggest > 0) {
+    values.procs = procsData.suggest;
+    changed = true;
+  }
+  if (threadsData && threadsData.suggest > 0) {
+    values.dir = Math.min(PERF_DIR_CAP, threadsData.suggest);
+    changed = true;
+  }
+  if (!changed) return;
+  _perfInputs[letter] = values;
+  // 这是程序替你填的值，但它确实会被保存，所以算作本次的未保存改动，
+  // 否则后面切一下盘重建快照，就把这份改动当成初始状态抹掉了。
+  _settingsTouched = true;
+  // 写成具体值了，就不是「跟随默认」了
+  delete _perfResetFlags[letter];
+  const procsEl = $("#perfProcs");
+  const dirEl = $("#perfDir");
+  const range = $("#perfRange");
+  if (procsEl) procsEl.value = String(values.procs);
+  if (dirEl) dirEl.value = String(values.dir);
+  if (range) {
+    range.value = String(
+      _perfMode === "threads"
+        ? Math.min(PERF_DIR_MAX, values.dir)
+        : values.procs
+    );
+  }
+  _perfUpdateDriveFlags();
+}
+
+function _perfShowTimeout(payload) {
+  const letter = _perfDrive;
+  const procsRaw = (payload && payload.procs) || {};
+  const threadsRaw = (payload && payload.threads) || {};
+  const gotProcs = (Number(procsRaw.read_s) || 0) > 0;
+  const gotThreads = (threadsRaw.points || []).length > 0;
+  if (gotProcs) {
+    const d = _perfProcsDataOf(procsRaw);
+    // 解析已经测完就不动那组数据：超时往往发生在后面的目录遍历段，
+    // 此时处理进程数的结果已经写进配置，再清零就把有效结果抹掉了。
+    if (!(Number(d.single_parse_s) > 0)) {
+      d.single_parse_s = 0;
+      d.suggest = 0;
+      d.timedOut = true;
+    }
+    _perfSaveGroup(letter, "procs", d);
+  }
+  if (gotThreads) {
+    _perfSaveGroup(letter, "threads", _perfThreadsDataOf(threadsRaw));
+  }
+  let body = t("mftProcsTimeoutBody");
+  if (!gotProcs && !gotThreads) body = t("mftProcsTimeoutBodyNoRead");
+  _perfShowResult(
+    t("mftProcsTimeoutTitle", Math.round(Number(payload && payload.timeout_s) || 0) || 0),
+    body,
+    false
+  );
+  _perfSetBusy(false);
+  _perfSync();
+}
+
+function _perfBind() {
+  const range = $("#perfRange");
+  const btn = $("#perfTest");
+  const procs = $("#perfProcs");
+  const dir = $("#perfDir");
+  if (!range || !btn || range.dataset.bound === "1") return;
+  range.dataset.bound = "1";
+
+  // 恢复默认后再动控件，只需要更新输入值；
+  // 这块盘的恢复标记保留，提交时按项比较就能表达「哪几项又改回去了」
+  const edited = () => {
+    _perfStashInputs();
+  };
+
+  // 滑杆与数字框双向联动：滑杆拖的是当前曲线对应的那一项
+  range.addEventListener("input", () => {
+    const n = Number(range.value) || 1;
+    if (_perfMode === "procs" && procs) procs.value = String(n);
+    if (_perfMode === "threads" && dir) dir.value = String(n);
+    edited();
+    _perfSummary();
+    _perfDraw(n);
+  });
+  if (procs) {
+    procs.addEventListener("input", () => {
+      const n = Math.max(1, Math.min(MFT_PROCS_MAX, Number(procs.value) || 1));
+      if (_perfMode === "procs") range.value = String(n);
+      edited();
+      _perfSummary();
+      _perfDraw(Number(range.value) || 1);
+    });
+  }
+  if (dir) {
+    dir.addEventListener("input", () => {
+      const n = Math.max(1, Math.min(PERF_DIR_CAP, Number(dir.value) || 1));
+      if (_perfMode === "threads") range.value = String(Math.min(PERF_DIR_MAX, n));
+      edited();
+      _perfSummary();
+      _perfDraw(Number(range.value) || 1);
+    });
+  }
+  const mft = $("#perfMft");
+  if (mft) mft.addEventListener("input", edited);
+
+  // 曲线切换：两条路径各自一份测试数据
+  document.querySelectorAll(".perf-switch-btn").forEach((btnEl) => {
+    btnEl.addEventListener("click", () => {
+      if (_perfBusy) return;
+      const target = btnEl.dataset.target;
+      if (target === _perfMode) return;
+      _perfMode = target;
+      document.querySelectorAll(".perf-switch-btn").forEach((b) => {
+        b.classList.toggle("is-active", b.dataset.target === target);
+      });
+      const v = _perfValueOf(_perfDrive);
+      range.value = String(target === "procs" ? v.procs : Math.min(PERF_DIR_MAX, v.dir));
+      _perfResetResult();
+      _perfSync();
+      // 切曲线只改界面显示，不算用户改动，否则什么都没改也会提示未保存
+      _settingsRefreshSnapshotIfUntouched();
+    });
+  });
+
+  // 等接口返回这段时间里忙碌标记还没置上，靠单独的开关拦住连点
+  let starting = false;
+  btn.addEventListener("click", async () => {
+    if (_perfBusy || starting) return;
+    const api = state.api || {};
+    const fn = api.test_perf;
+    if (typeof fn !== "function") return;
+    if (!_perfDrive) return;
+    starting = true;
+    _perfPending = true;
+    _perfAbandoned = false;
+    _perfClearGuard();
+    // 接口返回前就要拦住切盘与快速应用，否则结果会记到切过去的那块盘上
+    _perfBusy = true;
+    // 调用永远不返回时（窗口重载、内核卡住）按钮不能一直死着。
+    // 后端的自超时是 150 秒，这里要比它长，免得后端还在正常测，界面先把它判成已取消。
+    // 注意这个定时器要等到终态事件到了才清，不能在接口返回时就清：
+    // 接口只负责启动后台线程、毫秒级就返回，真正跑的是后台线程。
+    _perfGuard = setTimeout(() => {
+      if (!_perfPending) return;
+      starting = false;
+      _perfPending = false;
+      // 这一轮已经放弃，迟到的终态事件不再回写界面
+      _perfAbandoned = true;
+      _perfSetBusy(false);
+      _perfHideProgress();
+      _perfShowResult("", t("mftProcsCancelled"), false);
+    }, 160000);
+    const item = _perfProcsOf(_perfDrive);
+    const root = (item && item.root) || _perfDrive + ":\\";
+    let res = null;
+    try {
+      res = await fn.call(api, root);
+    } catch (err) {
+      res = { error: String(err && err.message ? err.message : err) };
+    } finally {
+      starting = false;
+    }
+    // 后端几乎立刻失败时，终态事件可能已经把界面收拾好了
+    if (!_perfPending) return;
+    if (res && res.error) {
+      _perfClearGuard();
+      _perfShowResult("", res.error, false);
+      _perfPending = false;
+      _perfSetBusy(false);
+      return;
+    }
+    _perfSetBusy(true);
+    _perfShowProgress();
+  });
+
+  const cancelBtn = $("#perfCancel");
+  if (cancelBtn) {
+    cancelBtn.addEventListener("click", () => {
+      if (state.api && typeof state.api.cancel_mft_proc_test === "function") {
+        state.api.cancel_mft_proc_test();
+      }
+    });
+  }
+
+  const ignore = $("#perfIgnore");
+  if (ignore) {
+    ignore.addEventListener("click", () => {
+      _perfResetResult();
+    });
+  }
+
+  const apply = $("#perfApply");
+  if (apply) {
+    apply.addEventListener("click", () => {
+      const data = _perfDemoOf(_perfDrive);
+      if (!data || !(data.suggest > 0)) return;
+      if (_perfMode === "procs") {
+        if (procs) procs.value = String(data.suggest);
+        range.value = String(data.suggest);
+      } else {
+        if (dir) dir.value = String(data.suggest);
+        range.value = String(Math.min(PERF_DIR_MAX, data.suggest));
+      }
+      _perfStashInputs();
+      // 这是点「填入」产生的改动，要算进未保存判断里
+      _settingsTouched = true;
+      _perfShowResult(
+        _perfMode === "procs"
+          ? t("mftProcsApplied", data.suggest)
+          : t("perfAppliedThreads", data.suggest),
+        "",
+        false
+      );
+      _perfSync();
+    });
+  }
+
+  if (!_perfEventsBound) {
+    _perfEventsBound = true;
+    const prev = window.__onPyEvent;
+    window.__onPyEvent = function (event, payload) {
+      try {
+        if (typeof prev === "function") prev(event, payload);
+      } catch (e) {}
+      if (event === "mft-proc-test-progress") {
+        // 这一轮已经被前端判成放弃，迟到的进度不能再把面板拉回来
+        if (_perfAbandoned) return;
+        const prog = $("#perfProgress");
+        const live = $("#perfLive");
+        const fill = $("#perfFill");
+        const pct = Math.max(0, Math.min(100, Number(payload && payload.pct) || 0));
+        if (prog) prog.classList.remove("hidden");
+        const lead = $("#perfLead");
+        if (lead) {
+          lead.textContent =
+            payload && payload.phase === "threads"
+              ? t("perfTestingThreadsLead")
+              : t("mftProcsTestingLead");
+        }
+        if (live) {
+          live.textContent = t("mftProcsTestingLive", {
+            cpu: (Number(payload && payload.cpu_pct) || 0).toFixed(0),
+            mem: _perfMemText(Number(payload && payload.mem_mb) || 0),
+            sec: (Number(payload && payload.elapsed_s) || 0).toFixed(0),
+            pct: String(pct),
+          });
+        }
+        if (fill) fill.style.width = pct + "%";
+      } else if (event === "mft-proc-test-done") {
+        _perfClearGuard();
+        // 这一轮已经被前端判成放弃，迟到的结果不再往界面上写
+        if (_perfAbandoned) return;
+        _perfPending = false;
+        _perfHideProgress();
+        if (payload && payload.timed_out) {
+          _perfShowTimeout(payload || {});
+        } else {
+          // 一次测试交回两组结果，统一由这里写入并展示
+          _perfShowAllResult(payload || {});
+        }
+      } else if (event === "mft-proc-test-error") {
+        _perfClearGuard();
+        if (_perfAbandoned) return;
+        _perfPending = false;
+        _perfHideProgress();
+        _perfSetBusy(false);
+        _perfShowResult("", (payload && payload.message) || "", false);
+      } else if (event === "mft-proc-test-cancelled") {
+        _perfClearGuard();
+        if (_perfAbandoned) return;
+        _perfPending = false;
+        _perfHideProgress();
+        _perfSetBusy(false);
+        _perfShowResult("", t("mftProcsCancelled"), false);
+      }
+    };
+  }
+
+  // 恢复默认：把当前盘的三项参数清掉，回到跟随全局默认值。
+  // 只改草稿，点「完成」保存后才真正生效。
+  const resetBtn = $("#perfResetDefault");
+  if (resetBtn) {
+    resetBtn.addEventListener("click", () => {
+      if (_perfBusy || !_perfDrive) return;
+      const letter = _perfDrive;
+      _perfResetFlags[letter] = true;
+      delete _perfInputs[letter];
+      // 恢复默认也是一次未保存的改动
+      _settingsTouched = true;
+      _perfLoadInputs();
+      _perfResetResult();
+      _perfSync();
+      if (typeof toast === "function") toast(t("perfResetDone"), "info");
+    });
+  }
+
+  _perfBindCopy();
+
+  new MutationObserver(() => _perfSync()).observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: ["data-theme"],
+  });
+
+  // 设置窗口可拖拽缩放，画布像素只在于显式重画时才按新宽度重建，
+  // 不重画就会把旧图拉伸成模糊的。
+  let resizePending = false;
+  window.addEventListener("resize", () => {
+    if (resizePending) return;
+    resizePending = true;
+    requestAnimationFrame(() => {
+      resizePending = false;
+      const overlay = $("#settingsOverlay");
+      if (!overlay || overlay.classList.contains("hidden")) return;
+      // 停在别的页签时画布宽为零，重画只会得到一张宽度不对的图，跳过
+      const pane = document.querySelector('[data-settings-pane="perf"]');
+      if (!pane || pane.classList.contains("hidden")) return;
+      if (!$("#perfChart")) return;
+      _perfPlaceScale();
+      _perfDraw(Number($("#perfRange") && $("#perfRange").value) || 1);
+    });
+  });
+}
+
+// 快速应用按钮只在存在别的固定盘时才显示
+function _perfSyncCopyVisible() {
+  const btn = $("#perfCopyTo");
+  const panel = $("#perfCopyPanel");
+  if (!btn) return;
+  const others = _perfDrives
+    .map((item) => item.letter)
+    .filter((letter) => letter && letter !== _perfDrive);
+  const none = others.length === 0;
+  btn.classList.toggle("hidden", none);
+  if (none && panel) panel.classList.add("hidden");
+}
+
+// 快速应用：把当前盘这三个参数写到勾选的盘，测试结果不跟着走
+function _perfBindCopy() {
+  const btn = $("#perfCopyTo");
+  const panel = $("#perfCopyPanel");
+  const list = $("#perfCopyList");
+  const applyBtn = $("#perfCopyApply");
+  const cancelBtn = $("#perfCopyCancel");
+  if (!btn || !panel || !list || btn.dataset.bound === "1") return;
+  btn.dataset.bound = "1";
+
+  const targets = () =>
+    _perfDrives.map((item) => item.letter).filter((letter) => letter && letter !== _perfDrive);
+
+  // 只有一个可写的盘时这一项没有意义，直接不显示
+  const syncVisible = () => _perfSyncCopyVisible();
+
+  btn.addEventListener("click", () => {
+    if (_perfBusy) return;
+    const letters = targets();
+    if (!letters.length) return;
+    list.innerHTML = "";
+    letters.forEach((letter) => {
+      const label = document.createElement("label");
+      label.className = "perf-copy-item";
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.value = letter;
+      // 默认全选：后面还要再点一次应用，误点的机会不大
+      box.checked = true;
+      const text = document.createElement("span");
+      text.textContent = letter;
+      label.appendChild(box);
+      label.appendChild(text);
+      list.appendChild(label);
+    });
+    panel.classList.remove("hidden");
+    syncVisible();
+  });
+
+  if (cancelBtn) {
+    cancelBtn.addEventListener("click", () => panel.classList.add("hidden"));
+  }
+
+  if (applyBtn) {
+    applyBtn.addEventListener("click", () => {
+      _perfStashInputs();
+      const from = _perfDrive;
+      const value = _perfInputs[from] || _perfValueOf(from);
+      if (!value) return;
+      // 源盘本身就是「跟随默认」时，目标盘也应该跟随默认，
+      // 否则把全局默认值当成具体值写进目标盘，以后改全局默认时它不会跟着变
+      const fromDefault = !!_perfResetFlags[from];
+      const picked = [];
+      list.querySelectorAll("input[type=checkbox]").forEach((box) => {
+        if (box.checked) picked.push(box.value);
+      });
+      if (!picked.length) return;
+      // 套用到其他盘也是未保存的改动
+      _settingsTouched = true;
+      picked.forEach((letter) => {
+        if (fromDefault) {
+          delete _perfInputs[letter];
+          _perfResetFlags[letter] = true;
+          return;
+        }
+        _perfInputs[letter] = { mft: value.mft, dir: value.dir, procs: value.procs };
+        // 目标盘本来点过恢复默认的话，这次写入的就是具体值，标记要撤掉
+        delete _perfResetFlags[letter];
+      });
+      panel.classList.add("hidden");
+      _perfUpdateDriveFlags();
+      _perfSummary();
+      if (typeof toast === "function") {
+        toast(t("perfCopyDone", { from, n: picked.length }), "info");
+      }
+    });
+  }
+
+  syncVisible();
+}
+
+// 从后端取盘列表，没有返回值时至少保证当前盘可用
+// 把后端返回的盘列表归一：只接受能推出单字母盘符的项，字段缺了给默认值。
+// 归一这一步不能省：盘符是空串时按钮既没有文字，又会全被当成当前盘染成选中色。
+function _perfNormalizeDrives(raw) {
+  const out = [];
+  (Array.isArray(raw) ? raw : []).forEach((item) => {
+    if (!item) return;
+    if (typeof item === "string") {
+      const l = item.replace(/:.*$/, "").trim().slice(0, 1).toUpperCase();
+      if (/[A-Z]/.test(l)) {
+        out.push({ letter: l, root: l + ":\\", mft_read: 0, dir_threads: 0, mft_procs: 0 });
+      }
+      return;
+    }
+    const root = String(item.root || "");
+    const rawLetter = String(item.letter || root.replace(/:.*$/, "") || "");
+    const letter = rawLetter.trim().slice(0, 1).toUpperCase();
+    if (!/[A-Z]/.test(letter)) return;
+    out.push({
+      letter,
+      root: item.root || letter + ":\\",
+      mft_read: Number(item.mft_read) || 0,
+      dir_threads: Number(item.dir_threads) || 0,
+      mft_procs: Number(item.mft_procs) || 0,
+      // 该盘真正生效的数值，未单独设过的项等于全局默认
+      effective:
+        item.effective && typeof item.effective === "object"
+          ? {
+              mft: Number(item.effective.mft_read) || 0,
+              dir: Number(item.effective.dir_threads) || 0,
+              procs: Number(item.effective.mft_procs) || 0,
+            }
+          : null,
+    });
+  });
+  return out;
+}
+
+async function _perfLoadDrives() {
+  // 重新拉盘列表意味着要回到后端刚返回的值，先把上一轮编辑与基线清掉，
+  // 否则刚换数据目录或恢复默认后，界面还在显示旧值、基线也记着旧值。
+  _perfInputs = {};
+  _perfBaseline = {};
+  _perfResetFlags = {};
+  _perfReady = false;
+  let items = [];
+  let failed = false;
+  try {
+    if (state.api && typeof state.api.list_perf_drives === "function") {
+      const res = await state.api.list_perf_drives();
+      items = _perfNormalizeDrives(res && res.drives);
+    } else {
+      failed = true;
+    }
+  } catch (e) {
+    failed = true;
+  }
+  if (!items.length) {
+    // 拿不到盘符时不要编造一块 C 盘去显示参数，否则用户会以为那就是真实配置；
+    // 保留空表并禁用测试按钮，同时告知实际发生了什么。
+    _perfDrives = [];
+    _perfDrive = "";
+    _perfRenderDrives();
+    if (typeof toast === "function" && failed) toast(t("perfDrivesFailed"), "warn");
+    _perfSync();
+    _settingsRefreshSnapshotIfUntouched();
+    return;
+  }
+  _perfDrives = items;
+  if (!_perfDrive || !items.some((x) => x.letter === _perfDrive)) {
+    _perfDrive = items[0].letter;
+  }
+  _perfReady = true;
+  _perfRenderDrives();
+  _perfLoadInputs();
+  _perfSnapshotBaseline();
+  _perfSync();
+  // 盘符、输入框到这里才是最终值，把它当成“打开时的初始状态”
+  _settingsRefreshSnapshotIfUntouched();
+}
+
+// 把配置里存着的测试结果还原成界面用的结构，按盘逐项还原。
+// 存下来的是接口原样载荷（mode / timed_out / points ...），
+// 界面这边认的是 kind / tested / timedOut，两种结构在这里对齐。
+function _perfRestoreTests(raw) {
+  const out = {};
+  if (!raw || typeof raw !== "object") return out;
+  Object.keys(raw).forEach((letter) => {
+    const item = raw[letter];
+    if (!item || typeof item !== "object") return;
+    const group = {};
+    const procs = item.procs || {};
+    if ((Number(procs.read_s) || 0) > 0) {
+      group.procs = _perfProcsDataOf(procs);
+    }
+    const threads = item.threads || {};
+    if ((threads.points || []).length) {
+      group.threads = _perfThreadsDataOf(threads);
+    }
+    if (Object.keys(group).length) out[letter] = group;
+  });
+  return out;
+}
+
+function _perfFill() {
+  if (!_settingsDraft) return;
+  _perfBind();
+  _perfData = _perfRestoreTests(_settingsDraft.perf_tests);
+  _perfTestsBase = JSON.stringify(_perfTestsPayload());
+  _perfLoadDrives();
+}
+
 function fillSettingsFormFromDraft() {
   const d = _settingsDraft;
   if (!d) return;
-  fillWorkerSelect($("#workerSel"), {
-    scan_workers: d.scan_workers,
-    cpu_count: d.cpu_count,
-  });
+  _perfFill();
   const compressChk = $("#compressChk");
   if (compressChk) compressChk.checked = !!d.compress_snapshots;
   const mftChk = $("#mftChk");
@@ -326,6 +1956,10 @@ function fillSettingsFormFromDraft() {
   if (autoCheckUpdateChk) {
     autoCheckUpdateChk.checked = d.auto_check_updates !== false;
   }
+  const updateBadgeChk = $("#updateBadgeChk");
+  if (updateBadgeChk) {
+    updateBadgeChk.checked = d.update_badge !== false;
+  }
   const logSanitizeChk = $("#logSanitizeChk");
   if (logSanitizeChk) {
     logSanitizeChk.checked = d.log_sanitize !== false;
@@ -334,8 +1968,16 @@ function fillSettingsFormFromDraft() {
   if (logLevelSel) {
     logLevelSel.value = _normalizeLogLevel(d.log_level);
   }
+  const devToolsChk = $("#devToolsChk");
+  if (devToolsChk) {
+    devToolsChk.checked = !!d.dev_tools;
+  }
   const uiThemeSel = $("#uiThemeSel");
   if (uiThemeSel) uiThemeSel.value = _normalizeUiTheme(d.theme);
+  const sizeSrc = _normalizeSizeSource(d.size_source);
+  for (const el of document.querySelectorAll('input[name="sizeSource"]')) {
+    el.checked = el.value === sizeSrc;
+  }
   const uiParentBgChk = $("#uiParentBgChk");
   if (uiParentBgChk) uiParentBgChk.checked = d.ui_parent_row_bg === true;
   const uiParentDimChk = $("#uiParentDimChk");
@@ -366,6 +2008,9 @@ function fillSettingsFormFromDraft() {
     snapshot_dir: d.snapshot_dir_display || d.snapshot_dir_builtin || "",
     snapshot_dir_is_custom: !!d.snapshot_dir_is_custom,
   });
+  // 这一整段都是程序在填值（含换数据文件夹后的重填），
+  // 把填完的那一刻当作初始状态，否则关页会误报未保存
+  _settingsRefreshSnapshotIfUntouched();
 }
 
 /** 数据文件夹行：当前位置、当前运行账户与指针记录状态。 */
@@ -825,6 +2470,8 @@ function switchSettingsTab(tabId) {
   const aiTest = $("#aiTestBtn");
   if (aiTest) aiTest.classList.toggle("hidden", id !== "ai");
   if (id === "log") refreshLogView();
+  // 性能页隐藏时画布宽为 0，切过去必须按真实宽度重画一次
+  if (id === "perf") _perfSync();
 }
 
 function _fmtLogTime(ts) {
@@ -1133,11 +2780,86 @@ async function openSettings(tabId) {
   _setOpenReleaseVisible(false);
   switchSettingsTab(tab);
   $("#settingsOverlay").classList.remove("hidden");
+  // “未保存”判断靠快照：控件值在加载完盘列表后会被程序再改一次，
+  // 所以得能区分“程序改的”与“用户改的”，否则什么都不改也会提示未保存。
+  _settingsTouched = false;
+  _settingsBindTouchWatch();
+  // 记下刚打开时的表单状态，关掉时靠它判断有没有改过没保存
+  _settingsFormSnapshot = _formFingerprint();
+}
+
+/** 用户真的动过控件才置位：程序写 input.value 不会触发事件，所以不会被误置。 */
+function _settingsBindTouchWatch() {
+  const overlay = $("#settingsOverlay");
+  if (!overlay || overlay.dataset.touchBound === "1") return;
+  overlay.dataset.touchBound = "1";
+  const mark = () => {
+    _settingsTouched = true;
+  };
+  overlay.addEventListener("input", mark, true);
+  overlay.addEventListener("change", mark, true);
+}
+
+/** 程序自己把表单填好以后重建快照；用户已经动过就不动，避免吞掉改动。 */
+function _settingsRefreshSnapshotIfUntouched() {
+  const overlay = $("#settingsOverlay");
+  if (!overlay || overlay.classList.contains("hidden")) return;
+  if (_settingsTouched) return;
+  _settingsFormSnapshot = _formFingerprint();
+}
+
+/** 表单里所有控件的当前值拼成一串，只用于前后比对。 */
+function _formFingerprint() {
+  const parts = [];
+  const root = $("#settingsOverlay");
+  if (!root) return "";
+  root.querySelectorAll("input, select, textarea").forEach((el) => {
+    const key = el.id || el.name || "";
+    if (!key) return;
+    let value;
+    if (el.type === "radio") {
+      // 单选框同一个 name 只记选中的那个，所以值里要带上选项自己的取值，
+      // 否则在同一组里换选项时指纹不会变
+      if (!el.checked) return;
+      value = "r:" + String(el.value);
+    } else if (el.type === "checkbox") {
+      value = el.checked ? "1" : "0";
+    } else {
+      value = String(el.value);
+    }
+    parts.push(key + "=" + value);
+  });
+  return parts.join("\u0001");
+}
+
+/** 点叉或按 Esc 关闭：有改动没保存时先警告一句，再关。 */
+function closeSettingsDiscarding() {
+  const changed =
+    !!_settingsFormSnapshot && _formFingerprint() !== _settingsFormSnapshot;
+  closeSettings();
+  if (changed) toastWarn(t("settingsUnsaved"));
 }
 
 function closeSettings() {
+  _settingsFormSnapshot = "";
   $("#settingsOverlay").classList.add("hidden");
   _settingsDraft = null;
+  // 按盘编辑值与基线跟着草稿一起丢弃，否则关掉再打开会把已放弃的值写回配置
+  _perfInputs = {};
+  _perfBaseline = {};
+  _perfResetFlags = {};
+  // 盘列表要重新拉，拉到之前不允许提交按盘参数
+  _perfReady = false;
+  // 关页时测试可能还在后台跑：把后续事件当已放弃，
+  // 否则它跑完会把结果自动填进下次打开的界面
+  if (_perfBusy || _perfPending) {
+    _perfAbandoned = true;
+    _perfBusy = false;
+    _perfPending = false;
+  }
+  _perfClearGuard();
+  const copyPanel = $("#perfCopyPanel");
+  if (copyPanel) copyPanel.classList.add("hidden");
   // 收起所有展开的说明
   document.querySelectorAll(".settings-help-panel").forEach((p) => {
     p.classList.add("hidden");
@@ -1300,6 +3022,64 @@ function waitSettingsApplied(timeoutMs) {
  * 关闭（✕ / Esc）不调用本函数 → 草稿丢弃。
  * 目录变更时先关设置、显示迁移进度；后端在后台线程推送进度与终态。
  */
+/** 提交内容与当前生效设置是否完全一致。
+ *
+ * 用来区分「真的改了」与「点完成但一项没动」：后者不该说设置已应用。
+ * 快照目录按界面显示的目录比较，因为提交值里的空串表示沿用默认目录，
+ * 与当前生效的目录路径形态不同。AI 配置单独提交，不在这里比较。
+ */
+function _settingsPayloadUnchanged(payload) {
+  const cur = state._settings || {};
+  const normDir = (p) =>
+    String(p || "").replace(/[\\/]+$/, "").toLowerCase();
+  const prevDir = normDir(cur.snapshot_dir);
+  const draft = _settingsDraft || {};
+  const nextDir = normDir(
+    draft.snapshot_dir_is_custom
+      ? draft.snapshot_dir_display || draft.snapshot_dir
+      : draft.snapshot_dir_builtin
+  );
+  if (prevDir !== nextDir) return false;
+  for (const key of Object.keys(payload)) {
+    if (key === "snapshot_dir") continue;
+    // 按盘参数在提交侧是拼接串、在生效侧是对象，两边取字符串永远不相等；
+    // 前端只提交真改过的盘，所以提交串非空本身就意味着有改动
+    if (key === "drives") {
+      if (String(payload[key] || "").trim() !== "") return false;
+      continue;
+    }
+    const a = payload[key];
+    const b = cur[key];
+    if (key === "delete_blacklist") {
+      if (!_sameDeleteBlacklist(a, b)) return false;
+    } else if (typeof a === "boolean" || typeof b === "boolean") {
+      if (!!a !== !!b) return false;
+    } else if (typeof a === "number" || typeof b === "number") {
+      if (Number(a) !== Number(b)) return false;
+    } else if (String(a ?? "") !== String(b ?? "")) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** 删除白名单按路径与模式规范化后比较，忽略顺序和大小写。 */
+function _sameDeleteBlacklist(a, b) {
+  const norm = (items) => {
+    const out = [];
+    for (const it of Array.isArray(items) ? items : []) {
+      if (!it || typeof it !== "object") continue;
+      out.push(
+        String(it.path || "").trim().toLowerCase() +
+          "\u0000" +
+          String(it.mode || "prefix").trim().toLowerCase()
+      );
+    }
+    return out.sort().join("\u0001");
+  };
+  return norm(a) === norm(b);
+}
+
 async function applySettingsAndClose() {
   if (!_settingsDraft) {
     closeSettings();
@@ -1307,19 +3087,22 @@ async function applySettingsAndClose() {
   }
   renderSnapDirMigrateNote(null);
   // 从表单再读一遍，防止漏绑 change
-  const workerSel = $("#workerSel");
   const compressChk = $("#compressChk");
   const mftChk = $("#mftChk");
   const searchMemIdxChk = $("#searchMemIdxChk");
   const rememberWinSizeChk = $("#rememberWinSizeChk");
   const tempCleanupChk = $("#tempCleanupChk");
   const autoCheckUpdateChk = $("#autoCheckUpdateChk");
+  const updateBadgeChk = $("#updateBadgeChk");
   const logSanitizeChk = $("#logSanitizeChk");
   const logLevelSel = $("#logLevelSel");
+  const devToolsChk = $("#devToolsChk");
   const uiParentStyleChk = $("#uiParentStyleChk");
   const uiHoverOutlineChk = $("#uiHoverOutlineChk");
   const payload = {
-    scan_workers: workerSel ? Number(workerSel.value) : _settingsDraft.scan_workers,
+    // 扫描线程数不再单独暴露，未设过目录遍历线程数的盘仍以它作默认值
+    scan_workers: Number(_settingsDraft.scan_workers) || 1,
+    mft_procs: Number(_settingsDraft.mft_procs) || 0,
     compress_snapshots: compressChk ? !!compressChk.checked : _settingsDraft.compress_snapshots,
     use_mft: mftChk ? !!mftChk.checked : _settingsDraft.use_mft,
     search_memory_index: searchMemIdxChk
@@ -1334,15 +3117,23 @@ async function applySettingsAndClose() {
     auto_check_updates: autoCheckUpdateChk
       ? !!autoCheckUpdateChk.checked
       : (_settingsDraft.auto_check_updates !== false),
+    update_badge: updateBadgeChk
+      ? !!updateBadgeChk.checked
+      : (_settingsDraft.update_badge !== false),
     log_sanitize: logSanitizeChk
       ? !!logSanitizeChk.checked
       : (_settingsDraft.log_sanitize !== false),
     log_level: logLevelSel
       ? _normalizeLogLevel(logLevelSel.value)
       : _normalizeLogLevel(_settingsDraft.log_level),
+    dev_tools: devToolsChk ? !!devToolsChk.checked : _settingsDraft.dev_tools === true,
     ui_parent_row_bg: $("#uiParentBgChk")
       ? !!$("#uiParentBgChk").checked
       : (_settingsDraft.ui_parent_row_bg === true),
+    size_source: (() => {
+      const el = document.querySelector('input[name="sizeSource"]:checked');
+      return el ? el.value : _normalizeSizeSource(_settingsDraft.size_source);
+    })(),
     ui_parent_row_dim: $("#uiParentDimChk")
       ? !!$("#uiParentDimChk").checked
       : (_settingsDraft.ui_parent_row_dim === true),
@@ -1383,6 +3174,15 @@ async function applySettingsAndClose() {
       ? _settingsDraft.delete_blacklist
       : [],
   };
+  // 按盘参数只下发真改过的盘；没改过或还忙不过来时不下发这个键，
+  // 后端就不会动已存的按盘参数
+  const drivesPayload = _perfDrivesPayload();
+  if (drivesPayload !== null) payload.drives = drivesPayload;
+  // 本次新测出结果才捎上，没测过就不带，避免干扰「设置有没有改动」的判断
+  const testsPayload = _perfTestsPayload();
+  if (JSON.stringify(testsPayload) !== _perfTestsBase) {
+    payload.perf_tests = testsPayload;
+  }
   payload.ui_toast_info_max = Math.max(payload.ui_toast_info_max, payload.ui_toast_info_base);
   payload.ui_toast_warn_max = Math.max(payload.ui_toast_warn_max, payload.ui_toast_warn_base);
 
@@ -1397,6 +3197,13 @@ async function applySettingsAndClose() {
     prevDir &&
     draftDir.replace(/[\\/]+$/, "").toLowerCase() !==
       prevDir.replace(/[\\/]+$/, "").toLowerCase();
+
+  const prevSizeSource = _normalizeSizeSource(
+    (state._settings && state._settings.size_source) || "actual"
+  );
+
+  // 提交前先比一遍：与当前生效设置没有差异时，提示语换成「没有改动」
+  const unchanged = _settingsPayloadUnchanged(payload);
 
   const doneBtn = $("#settingsDoneBtn");
   if (doneBtn) doneBtn.disabled = true;
@@ -1453,7 +3260,7 @@ async function applySettingsAndClose() {
     }
     applyUiSettingFlags(state._settings);
     applyToastTiming(state._settings);
-    toast(t("settingsApplied"));
+    toast(t(unchanged ? "settingsUnchanged" : "settingsApplied"));
     if (payload.use_mft && state._settings && !state._settings.is_admin) {
       toastWarn(t("mftNeedAdmin"));
     }
@@ -1461,6 +3268,7 @@ async function applySettingsAndClose() {
       toastMigrateDone(kick.migrate || {});
       loadSnapshots();
     }
+    await _rerunAfterSettingsApplied(prevSizeSource);
     return;
   }
 
@@ -1500,13 +3308,72 @@ async function applySettingsAndClose() {
   const dirChanged = !!(res && res.snapshot_dir_changed);
   const mig = (res && res.migrate) || {};
 
-  toast(t("settingsApplied"));
+  toast(t(unchanged && !dirChanged ? "settingsUnchanged" : "settingsApplied"));
   if (payload.use_mft && state._settings && !state._settings.is_admin) {
     toastWarn(t("mftNeedAdmin"));
   }
   if (dirChanged) {
     toastMigrateDone(mig, true);
     loadSnapshots();
+  }
+  await _rerunAfterSettingsApplied(prevSizeSource);
+}
+
+/**
+ * 设置保存后重新拉一次当前视图。
+ *
+ * 取数口径变了，后端下次取数会换一个会话，不重画的话会出现顶部还是
+ * 旧口径、新展开的子节点已经是新口径的半屏混合状态。
+ */
+async function _rerunAfterSettingsApplied(prevSource) {
+  const now = _normalizeSizeSource(
+    (state._settings && state._settings.size_source) || "actual"
+  );
+  if (now === prevSource) return;
+  // 侧栏卡片上的数字也跟口径走，它不依赖是否已打开对比，所以先无条件重画。
+  // 纯 DOM 重绘，不读盘。
+  if (typeof renderSnapshotList === "function") {
+    try {
+      renderSnapshotList();
+    } catch (e) {}
+  }
+  if (!state.compared || !state.oldPath || !state.newPath) return;
+  // 重画会重置筛选与搜索，但用户只是换了取数口径，不是换了快照对。
+  // 筛选条件本身与口径无关（例如「只看变大」），先存下来、画完再放回。
+  const savedFilter = {
+    filter: state.filter,
+    filterTime: state.filterTime,
+    filterTimeDays: state.filterTimeDays,
+    filterDeltaOp: state.filterDeltaOp,
+    filterDeltaVal: state.filterDeltaVal,
+    filterDeltaUnit: state.filterDeltaUnit,
+  };
+  // 搜索框内容也要留：重画会把它清空并收起，用户只是换了口径，
+  // 不该丢掉刚输入的关键词。只填回内容，不自动重发查询。
+  const searchInput = $("#treeSearchInput");
+  const searchWrap = $("#treeSearchWrap");
+  const savedQuery = searchInput ? searchInput.value : "";
+  const searchWasOpen = !!(
+    searchWrap && searchWrap.classList.contains("is-open")
+  );
+  try {
+    if (state.oldPath === state.newPath) {
+      await browseSnapshot(state.oldPath);
+    } else {
+      await doCompare();
+    }
+    Object.assign(state, savedFilter);
+    if (state.filter !== "all" && typeof applyFilterToTree === "function") {
+      applyFilterToTree();
+    }
+    if (savedQuery) {
+      const input = $("#treeSearchInput");
+      if (input) input.value = savedQuery;
+      if (searchWasOpen && searchWrap) searchWrap.classList.add("is-open");
+      if (typeof syncTreeSearchChrome === "function") syncTreeSearchChrome();
+    }
+  } catch (e) {
+    // 重画失败不影响设置已保存这一事实，静默保留旧画面
   }
 }
 
@@ -1522,6 +3389,9 @@ async function resetSettingsToDefaults() {
     danger: true,
   });
   if (!ok) return;
+  const prevSource = _normalizeSizeSource(
+    (state._settings && state._settings.size_source) || "actual"
+  );
   let res;
   try {
     res = await state.api.reset_settings();
@@ -1560,8 +3430,10 @@ async function resetSettingsToDefaults() {
     search_memory_index: res.search_memory_index !== false,
     temp_cleanup: res.temp_cleanup !== false,
     auto_check_updates: res.auto_check_updates !== false,
+    update_badge: res.update_badge !== false,
     log_sanitize: res.log_sanitize !== false,
     log_level: _normalizeLogLevel(res.log_level),
+    dev_tools: !!res.dev_tools,
     snapshot_dir: "",
     snapshot_dir_display: res.snapshot_dir || res.snapshot_dir_builtin || "",
     snapshot_dir_builtin: res.snapshot_dir_builtin || "",
@@ -1572,6 +3444,7 @@ async function resetSettingsToDefaults() {
     cpu_count: res.cpu_count,
     delete_blacklist: _normalizeBlacklistDraft(res.delete_blacklist),
     theme: _normalizeUiTheme(res.theme),
+    size_source: _normalizeSizeSource(res.size_source),
     ui_parent_row_bg: res.ui_parent_row_bg === true,
     ui_parent_row_dim: res.ui_parent_row_dim === true,
     ui_hover_group_outline: res.ui_hover_group_outline === true,
@@ -1586,4 +3459,6 @@ async function resetSettingsToDefaults() {
   fillSettingsFormFromDraft();
   updateSettingsWarnings(res);
   toast(t("resetSettingsDone"));
+  // 恢复默认也会把口径改回实际占用，与保存设置走同一套重画判断
+  await _rerunAfterSettingsApplied(prevSource);
 }

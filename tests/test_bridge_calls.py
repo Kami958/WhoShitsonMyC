@@ -39,6 +39,7 @@ READ_ONLY_CALLS = (
     "get_app_log",
     "list_modules",
     "list_fixed_drives",
+    "list_perf_drives",
     "list_snapshots",
     "list_snapshot_folders",
     "list_directory_links",
@@ -164,6 +165,26 @@ def test_read_only_calls_do_not_raise(api):
         assert isinstance(result, (dict, list)), f"{name} 返回了 {result!r}"
         if isinstance(result, dict):
             assert "error" not in result, f"{name} 出错：{result}"
+
+
+def test_perf_drives_expose_saved_and_effective(api):
+    """性能页的盘列表要带已存值与生效值。
+
+    这两组数是分开的：已存值为 0 表示该项跟随默认，生效值是扫描时真正用的数。
+    两者缺一，界面就只能自己编一个默认值，跟实际扫描对不上。
+    """
+    result = api.list_perf_drives()
+    assert "error" not in result, f"盘列表出错：{result}"
+    drives = result.get("drives")
+    assert isinstance(drives, list) and drives, "没有取到任何固定盘"
+    first = drives[0]
+    assert first.get("letter"), f"盘符为空：{first}"
+    for key in ("mft_read", "dir_threads", "mft_procs"):
+        assert key in first, f"缺字段 {key}：{first}"
+    eff = first.get("effective")
+    assert isinstance(eff, dict), f"缺生效值：{first}"
+    for key in ("mft_read", "dir_threads", "mft_procs"):
+        assert key in eff, f"生效值缺字段 {key}：{eff}"
 
 
 def test_compare_flow(api, tree):
@@ -323,7 +344,15 @@ def test_remigration_flow(api, tmp_path, monkeypatch):
     assert rec["old_target_exists"] is True
     assert (link / "f.txt").read_text(encoding="utf-8") == "m"
 
-    deleted = call(api, "delete_old_target", str(link), True)
+    # 后台作业先把结果写进登记表、再放开作业位，中间有一小段窗口。
+    # 机器忙的时候这个窗口会变宽，等登记表一变就去删会撞上「已有迁移正在进行」，
+    # 所以这里轮询到占位真正放开为止。
+    deleted: dict = {}
+    for _ in range(100):
+        deleted = call(api, "delete_old_target", str(link), True)
+        if "already running" not in str(deleted.get("error") or ""):
+            break
+        time.sleep(0.1)
     assert deleted.get("ok") is True, deleted
     assert not (tmp_path / (first.name + " 旧目标")).exists()
     after = [r for r in (call(api, "list_directory_links").get("links") or []) if r["link"] == str(link)]
@@ -387,16 +416,60 @@ def test_delete_old_target_clears_missing_dir(api, tmp_path, monkeypatch):
     assert cleared.get("ok") is True, cleared
     assert not (_record() or {}).get("old_target")
     # 旧目标不再挡路，还能接着往第三块盘迁
-    assert call(api, "validate_directory_remigration", str(link), str(third)).get("ok") is True
+    third_pre = call(api, "validate_directory_remigration", str(link), str(third))
+    assert third_pre.get("ok") is True, third_pre
 
 
-def test_delete_path_and_link_records(api, tmp_path):
+def test_delete_path_rejects_wrong_or_missing_root(api, tmp_path, monkeypatch):
+    """删除必须按该项自己的扫描根来，不能拿当前对比的根去拼同名路径。"""
+
+    class _Meta:
+        root = str(tmp_path)
+
+    class _FakeDiff:
+        new_meta = _Meta()
+
+    monkeypatch.setattr(api, "_diff", _FakeDiff())
+
+    junk = tmp_path / "keep"
+    junk.mkdir()
+    victim = junk / "file.txt"
+    victim.write_text("v", encoding="utf-8")
+
+    # 另一块盘（或另一个扫描根）的项：一律拒绝，且不能动到同名文件
+    other = str(tmp_path.parent / "another-root")
+    refused = call(api, "delete_path", other, "keep/file.txt", True)
+    assert refused.get("code") == "root_mismatch", refused
+    assert refused.get("error")
+    assert victim.exists(), "跨根的删除请求不应该真的删掉任何东西"
+
+    # 没带上扫描根：无法确认属于哪个快照，宁可拒绝
+    missing = call(api, "delete_path", "", "keep/file.txt", True)
+    assert missing.get("code") == "invalid_root", missing
+    assert victim.exists()
+
+    # 根对上了才能删
+    ok = call(api, "delete_path", str(tmp_path), "keep/file.txt", True)
+    assert ok.get("ok") is True, ok
+    assert not victim.exists()
+
+
+def test_delete_path_and_link_records(api, tmp_path, monkeypatch):
     """删除单个路径；链接记录类接口用空参数调用只验证不抛异常。"""
+
+    class _Meta:
+        root = str(tmp_path)
+
+    class _FakeDiff:
+        new_meta = _Meta()
+
+    monkeypatch.setattr(api, "_diff", _FakeDiff())
+
     junk = tmp_path / "junk"
     junk.mkdir()
     (junk / "gone.txt").write_text("g", encoding="utf-8")
 
-    deleted = call(api, "delete_path", str(junk), "gone.txt", True)
+    deleted = call(api, "delete_path", str(tmp_path), "junk/gone.txt", True)
     assert isinstance(deleted, dict)
     assert not (junk / "gone.txt").exists()
 
@@ -410,3 +483,186 @@ def test_delete_path_and_link_records(api, tmp_path):
         ("cancel_link_find", ()),
     ):
         assert isinstance(call(api, name, *args), dict), f"{name} 没有返回字典"
+
+
+def test_start_scan_reports_pack_env_error(api, tree, monkeypatch):
+    """解包环境读不到时不启动扫描，把原因交回前端弹「重启或降级」的提示。
+
+    这条分支只在打包运行且展开目录已损坏时才走到，正常开发环境永远不触发，
+    所以必须显式构造，否则改动坏了也没人发现。
+    """
+    import app.api.scan as scan_mod
+
+    # 临时目录不是盘符根，实际不会启用多进程解析；这里显式声明会启用，
+    # 才能走到解包检查这条分支
+    monkeypatch.setattr(scan_mod, "is_mft_eligible", lambda _root: True)
+    monkeypatch.setattr(
+        scan_mod, "check_pack_env", lambda: (False, "FileNotFoundError: gone")
+    )
+    res = call(api, "start_scan", str(tree))
+    assert res.get("started") is not True
+    assert res.get("pack_env_error") == "FileNotFoundError: gone"
+    assert res.get("error")
+
+
+def test_start_scan_skips_pack_check_for_plain_folder(api, tree, monkeypatch):
+    """扫普通目录时根本不启用多进程解析，不该被解包环境拦住。
+
+    用户为一次只走多线程的扫描被迫点「单线程处理」既不必要，也会让
+    下次再弹一次。这里确认检查条件本身就把它排除了。
+    """
+    import app.api.scan as scan_mod
+
+    calls = {"n": 0}
+
+    def boom():
+        calls["n"] += 1
+        return False, "should not be called"
+
+    monkeypatch.setattr(scan_mod, "is_mft_eligible", lambda _root: False)
+    monkeypatch.setattr(scan_mod, "check_pack_env", boom)
+    res = call(api, "start_scan", str(tree))
+    assert res.get("started") is True
+    assert calls["n"] == 0
+
+def test_start_scan_skips_check_when_no_parallel(api, tree, monkeypatch):
+    """用户选「单进程处理」时不再检查展开目录，直接开始扫描。
+
+    降级路径必须绕过这道检查：否则提示框刚说完「改用单进程」，
+    却因为同一个检查再拦一次，扫描永远起不来。
+    """
+    import app.api.scan as scan_mod
+
+    calls = {"n": 0}
+
+    def boom():
+        calls["n"] += 1
+        return False, "should not be called"
+
+    monkeypatch.setattr(scan_mod, "is_mft_eligible", lambda _root: True)
+    monkeypatch.setattr(scan_mod, "check_pack_env", boom)
+    res = call(api, "start_scan", str(tree), False, True)
+    assert res.get("started") is True
+    assert calls["n"] == 0
+
+
+def test_auto_update_check_emits_update_available(api, monkeypatch):
+    """自动检查发现新版本时，除了标题栏提示，还要告知界面点亮红点。
+
+    这条事件是侧栏红点的唯一来源：只改标题栏的话，窗口没激活时用户
+    完全看不到有新版本。
+    """
+    from core import store
+
+    monkeypatch.setattr(store, "get_auto_check_updates", lambda: True)
+    monkeypatch.setattr(
+        api,
+        "check_for_updates",
+        lambda: {
+            "ok": True,
+            "update_available": True,
+            "latest": "9.9.9",
+            "html_url": "https://example.com/rel",
+        },
+    )
+    monkeypatch.setattr(api, "_refresh_window_title", lambda: None)
+    emitted = []
+    monkeypatch.setattr(
+        api, "_emit", lambda event, payload: emitted.append((event, payload))
+    )
+
+    api.start_auto_update_check()
+    deadline = time.time() + 5
+    while time.time() < deadline and not emitted:
+        time.sleep(0.02)
+
+    assert emitted, "没有推送更新事件"
+    event, payload = emitted[0]
+    assert event == "update-available"
+    assert payload["latest"] == "9.9.9"
+    assert payload["html_url"] == "https://example.com/rel"
+
+
+def test_auto_update_check_silent_when_latest(api, monkeypatch):
+    """已经是最新版本时不推送事件，红点不会亮。"""
+    from core import store
+
+    monkeypatch.setattr(store, "get_auto_check_updates", lambda: True)
+    monkeypatch.setattr(
+        api,
+        "check_for_updates",
+        lambda: {"ok": True, "update_available": False, "latest": "1.0.0"},
+    )
+    emitted = []
+    monkeypatch.setattr(
+        api, "_emit", lambda event, payload: emitted.append((event, payload))
+    )
+
+    api.start_auto_update_check()
+    time.sleep(0.3)
+    assert not emitted
+
+class _FakeProc:
+    """假的子进程：只关心它有没有提前退出。"""
+
+    def __init__(self, alive=True):
+        self._alive = alive
+
+    def poll(self):
+        return None if self._alive else 1
+
+
+def test_restart_keeps_window_when_new_process_dies(api, monkeypatch):
+    """新进程起不来时不能关窗：否则锁已放、窗已关，程序凭空消失。
+
+    这个分支正是「立即重启」要救的场景——解包环境损坏时新进程大概率
+    也起不来，若不检查就会出现用户点完按钮什么都没了。
+    """
+    import app.api.misc as misc_mod
+
+    acquired = []
+    monkeypatch.setattr(misc_mod.sys, "executable", "wsmc.exe")
+    monkeypatch.setattr(misc_mod, "_RESTART_GRACE_SECONDS", 0.05)
+    monkeypatch.setattr(
+        misc_mod.subprocess, "Popen", lambda *a, **k: _FakeProc(alive=False)
+    )
+    monkeypatch.setattr(
+        misc_mod.bootstrap, "_acquire_single_instance", lambda: acquired.append(1)
+    )
+    monkeypatch.setattr(misc_mod.bootstrap, "_release_single_instance", lambda: None)
+
+    res = api.restart_app()
+
+    assert res.get("error"), "新进程没起来必须给出提示"
+    assert "ok" not in res
+    assert acquired == [1], "锁要收回来，否则能再开第二个实例"
+    assert api._restarting is False, "没有真的重启，退出清理仍应正常执行"
+
+
+def test_restart_closes_window_when_new_process_lives(api, monkeypatch):
+    """新进程活着才允许关窗，并把本进程标记为「正在重启」。"""
+    import app.api.misc as misc_mod
+
+    timers = []
+
+    class _FakeTimer:
+        def __init__(self, interval, func=None, args=None, kwargs=None):
+            timers.append((interval, func))
+            self.daemon = False
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr(misc_mod.sys, "executable", "wsmc.exe")
+    monkeypatch.setattr(misc_mod, "_RESTART_GRACE_SECONDS", 0.05)
+    monkeypatch.setattr(
+        misc_mod.subprocess, "Popen", lambda *a, **k: _FakeProc(alive=True)
+    )
+    monkeypatch.setattr(misc_mod.bootstrap, "_release_single_instance", lambda: None)
+    monkeypatch.setattr(misc_mod.threading, "Timer", _FakeTimer)
+
+    res = api.restart_app()
+
+    assert res.get("ok") is True
+    assert api._restarting is True, "退出清理要据此跳过浏览器缓存删除"
+    assert timers, "要安排关闭窗口"

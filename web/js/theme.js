@@ -91,10 +91,23 @@ function scheduleTitlebarSync() {
 
 const GITHUB_URL = "https://github.com/Kami958/WhoShitsonMyC";
 
+/** 后端查到新版本时，在 GitHub 按钮右上角点一个红点。 */
+function markUpdateAvailable() {
+  const btn = $("#githubBtn");
+  if (btn) btn.classList.add("has-update");
+}
+
+/** 用户点开 GitHub 后清掉红点：已经看到了，不必再提醒。 */
+function clearUpdateDot() {
+  const btn = $("#githubBtn");
+  if (btn) btn.classList.remove("has-update");
+}
+
 async function openGitHub() {
   try {
     const res = await state.api.open_url(GITHUB_URL);
     if (res && res.error) toast(res.error, true);
+    else clearUpdateDot();
   } catch (e) {
     toast(String(e), true);
   }

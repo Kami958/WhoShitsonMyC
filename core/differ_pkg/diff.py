@@ -18,7 +18,7 @@ from ..snapshot import (
 )
 
 from .children import _entry_matches, _find_dir_id, _has_children, _merge_child_nodes, _norm_root, _root_id
-from .classify import _SEARCH_SORT_KEYS, _SearchEntry, _SideRow, _child_path, _classify, _conn_version, _propagate_ancestors, _read_side_link_ids, _side_cols, _subtree_change_id_sets
+from .classify import _SEARCH_SORT_KEYS, _SearchEntry, _SideRow, _child_path, _classify, _conn_version, _propagate_ancestors, _read_side_link_ids, _side_cols, _subtree_mark_id_sets
 from .errors import DiffError, DiffRootMismatch, SearchCancelled
 from .hitspaths import _hits_with_paths
 from .links import _links_into_target, _split_parent, _strip_root
@@ -54,12 +54,16 @@ class Diff(DiffPreheatMixin, DiffSearchMixin, DiffNodeMixin, DiffLinkMixin):
         记得用 ``with`` 或手动 :meth:`close` 释放数据库连接。
         """
 
-        def __init__(self, old_db: str, new_db: str) -> None:
+        def __init__(
+            self, old_db: str, new_db: str, size_source: str | None = None
+        ) -> None:
             """打开两份快照并校验根一致、格式为 v3。
 
             Args:
                 old_db: 旧（基准）快照路径。
                 new_db: 新（当前）快照路径。
+                size_source: 大小取数口径，``actual`` 实际占用或 ``logical``
+                    逻辑占用；不传则读当前设置。
 
             Raises:
                 DiffRootMismatch: 两份快照的扫描根不同。
@@ -67,6 +71,29 @@ class Diff(DiffPreheatMixin, DiffSearchMixin, DiffNodeMixin, DiffLinkMixin):
             """
             self.old_meta: SnapshotMeta = read_meta(old_db)
             self.new_meta: SnapshotMeta = read_meta(new_db)
+
+            # 取数口径：显式传入优先，否则用当前设置。
+            # 只有两侧都记录了实际占用才能用实际口径：一侧有、一侧没有时，
+            # 两侧总量与差值会变成两种单位相减，得出无意义的数字。
+            # 这种情况整场对比统一降级为逻辑占用，并在界面说明原因。
+            if size_source is None:
+                try:
+                    from ..store import get_size_source
+
+                    size_source = get_size_source()
+                except Exception:
+                    size_source = "actual"
+            requested = str(size_source or "actual")
+            both_recorded = bool(
+                self.old_meta.actual_size_recorded
+                and self.new_meta.actual_size_recorded
+            )
+            if requested == "actual" and not both_recorded:
+                self._size_source = "logical"
+                self._size_fallback = True
+            else:
+                self._size_source = requested
+                self._size_fallback = False
 
             for meta, path in ((self.old_meta, old_db), (self.new_meta, new_db)):
                 if meta.format_version < 3:
@@ -92,12 +119,16 @@ class Diff(DiffPreheatMixin, DiffSearchMixin, DiffNodeMixin, DiffLinkMixin):
             self._skipped: set[str] = set(self.old_meta.skipped) | set(
                 self.new_meta.skipped
             )
-            # 「递归范围内含新增/已删除」下钻标记。默认关闭：差集要全量扫两侧
-            # 快照，放首屏会让解压到出树的时长上一个量级；前端筛「新增/已删除」
-            # 时才由接口参数触发（见 :meth:`ensure_marks`），首次一次性计算后复用。
+            # 「递归范围内含新增/已删除/变大/变小」下钻标记。默认关闭：差集要
+            # 全量扫两侧快照，放首屏会让解压到出树的时长上一个量级；前端筛这些
+            # 条件时才由接口参数触发（见 :meth:`ensure_marks`），首次一次性计算
+            # 后复用。变大/变小也靠祖先标记：目录整体变小不代表下面没有变大的
+            # 文件，只看目录自身净变化量会把这类目录整条滤掉。
             self._marks_ready = False
             self._subtree_added_ids: set[int] = set()
             self._subtree_removed_ids: set[int] = set()
+            self._subtree_grew_ids: set[int] = set()
+            self._subtree_shrank_ids: set[int] = set()
             # 「递归范围内含链接」下钻标记。v4+ 快照才可能有；v3 恒空。
             self._link_ids_ready = False
             self._subtree_link_ids: set[int] = set()
@@ -105,6 +136,8 @@ class Diff(DiffPreheatMixin, DiffSearchMixin, DiffNodeMixin, DiffLinkMixin):
             # 区分大小写/严格匹配是候选的子集，只在内存过滤，不另查库。
             # 快照只读，会话内无需失效；翻页/换排序直接复用排好的列表。
             self._search_cache: tuple[str, list[_SearchEntry]] | None = None
+            # 最近一次搜索是否撞到单侧候选上限；供界面提示结果可能不完整
+            self.search_truncated = False
             self._search_sorted: dict[
                 tuple[str, bool, bool, str], list[_SearchEntry]
             ] = {}
@@ -122,10 +155,20 @@ class Diff(DiffPreheatMixin, DiffSearchMixin, DiffNodeMixin, DiffLinkMixin):
             # （见 :meth:`_ensure_link_index`）。
             self._link_index_ready = False
 
+        def side_total(self, meta: SnapshotMeta) -> int:
+            """按本次对比生效的口径取一侧的总量。
+
+            生效口径在构造时就已统一降级（两侧不齐时全走逻辑占用），
+            所以这里不再逐侧回落，保证两侧总量与差值同单位。
+            """
+            if self._size_source == "actual" and meta.actual_size_recorded:
+                return meta.actual_size_total
+            return meta.total_size
+
         @property
         def total_delta(self) -> int:
-            """新旧总大小之差（新 − 旧），供界面顶部概览显示。"""
-            return self.new_meta.total_size - self.old_meta.total_size
+            """新旧总量之差（新 − 旧），供界面顶部概览显示。"""
+            return self.side_total(self.new_meta) - self.side_total(self.old_meta)
 
         def close(self) -> None:
             """关闭两份快照连接；停掉未完成的预热线程并等其释放连接。"""

@@ -23,6 +23,7 @@ class _SideIndex:
 
     __slots__ = (
         "ids", "parents", "sizes", "mtimes", "dirs", "rtags", "link_targets",
+        "actuals",
         "blob", "starts", "orig_blob", "orig_starts", "_path_cache",
     )
 
@@ -34,6 +35,8 @@ class _SideIndex:
         self.dirs = bytearray()
         self.rtags = array("I")     # reparse_tag（32 位无符号）；v3 快照全 0
         self.link_targets: list[str] = []  # 链接目标（v4 及更早为空串）
+        # 实际占用；-1 表示这份快照没记这一格
+        self.actuals = array("q")
         self.blob = ""
         self.starts = array("q")
         self.orig_blob = ""
@@ -57,9 +60,10 @@ class _SideIndex:
             if not rows:
                 break
             # 按列批量 extend（C 级），比逐行 append 快数倍。
-            # v5 多 reparse_tag、link_target 两列；v4 只有 reparse_tag；
-            # v3 都没有，按默认值补。
-            ids, pids, nms, sizes, dirs, mtimes, *rest = zip(*rows)
+            # 列清单统一为九列后，任何版本 rest 都是三项；旧快照缺的列由
+            # 查询补 NULL，这里必须把空值归一成各列的真实默认值，
+            # 否则整列 None 会直接抛错（整数数组）或留下 None（链接目标）。
+            ids, pids, nms, sizes, dirs, mtimes, tags, targets, actuals = zip(*rows)
             idx.ids.extend(ids)
             idx.parents.extend(
                 -1 if p is None else p for p in pids
@@ -67,10 +71,10 @@ class _SideIndex:
             idx.sizes.extend(sizes)
             idx.mtimes.extend(mtimes)
             idx.dirs.extend(1 if d else 0 for d in dirs)
-            idx.rtags.extend(rest[0] if rest else (0 for _ in nms))
-            idx.link_targets.extend(
-                rest[1] if len(rest) > 1 else ("" for _ in nms)
-            )
+            idx.rtags.extend(0 if v is None else v for v in tags)
+            idx.link_targets.extend("" if v is None else v for v in targets)
+            # 实际占用：缺少时记 -1，表示未记录，不能当 0
+            idx.actuals.extend(-1 if a is None else a for a in actuals)
             names.extend(nm or "" for nm in nms)
         if stop.is_set():
             return None
@@ -148,17 +152,19 @@ class _SideIndex:
         return result
 
     def row_at(self, i: int) -> _SideRow:
+        a = int(self.actuals[i]) if i < len(self.actuals) else -1
         return (
             int(self.ids[i]), int(self.sizes[i]),
             int(self.dirs[i]), int(self.mtimes[i]),
             int(self.rtags[i]), self.link_targets[i],
+            None if a < 0 else a,
         )
 
     def approx_bytes(self) -> int:
         """索引常驻内存的粗略字节数（供日志排查用）。"""
         total = sys.getsizeof(self.blob) + sys.getsizeof(self.orig_blob)
         for arr in (self.ids, self.parents, self.sizes, self.mtimes,
-                    self.starts, self.orig_starts, self.rtags):
+                    self.starts, self.orig_starts, self.rtags, self.actuals):
             total += len(arr) * arr.itemsize
         total += len(self.dirs)
         total += sum(len(s) for s in self.link_targets)

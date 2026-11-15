@@ -639,3 +639,94 @@ def test_delete_error_message_names_busy_file():
     denied = winmsgs._delete_error_message("denied:03_docx.zip")  # noqa: SLF001
     assert "03_docx.zip" in denied
     assert "WinError" not in denied
+
+
+def test_delete_guarded_user_channel(tmp_path: Path):
+    """用户通道：对比根自身、范围外、黑名单三种拒绝，正常项放行。"""
+    root = tmp_path / "scan"
+    root.mkdir()
+    keep = root / "keep"
+    keep.mkdir()
+    inside = keep / "a.txt"
+    inside.write_text("a", encoding="utf-8")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("o", encoding="utf-8")
+
+    with pytest.raises(fs_delete.DeleteError) as ei:
+        fs_delete.delete_guarded(
+            str(root), channel=fs_delete.CHANNEL_USER, root=str(root)
+        )
+    assert ei.value.message == "root"
+
+    with pytest.raises(fs_delete.DeleteError) as ei:
+        fs_delete.delete_guarded(
+            str(outside), channel=fs_delete.CHANNEL_USER, root=str(root)
+        )
+    assert ei.value.message == "outside"
+
+    bl = fs_delete.normalize_delete_blacklist([{"path": str(keep), "mode": "prefix"}])
+    with pytest.raises(fs_delete.DeleteError) as ei:
+        fs_delete.delete_guarded(
+            str(inside),
+            channel=fs_delete.CHANNEL_USER,
+            root=str(root),
+            blacklist=bl,
+        )
+    assert ei.value.message == "blacklist"
+    assert inside.exists()
+
+    fs_delete.delete_guarded(
+        str(inside), channel=fs_delete.CHANNEL_USER, root=str(root), permanent=True
+    )
+    assert not inside.exists()
+
+
+def test_delete_guarded_program_channel(tmp_path: Path):
+    """程序通道不再限制数据目录与系统目录，只剩盘符根一条底线。"""
+    f = tmp_path / "x.txt"
+    f.write_text("x", encoding="utf-8")
+    fs_delete.delete_guarded(
+        str(f), channel=fs_delete.CHANNEL_PROGRAM, permanent=True
+    )
+    assert not f.exists()
+
+    if os.name == "nt":
+        with pytest.raises(fs_delete.DeleteError) as ei:
+            fs_delete.delete_guarded(
+                "C:\\", channel=fs_delete.CHANNEL_PROGRAM, permanent=True
+            )
+        assert ei.value.message == "drive_root"
+
+
+def test_blacklist_follows_real_path(tmp_path: Path):
+    """目录联接的别名路径不能绕过黑名单：真实路径命中同样拦下。"""
+    protected = tmp_path / "protected"
+    protected.mkdir()
+    inner = protected / "f.txt"
+    inner.write_text("x", encoding="utf-8")
+    alias = tmp_path / "alias"
+
+    if os.name == "nt":
+        made = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(alias), str(protected)],
+            capture_output=True,
+            text=True,
+        )
+        if made.returncode != 0:
+            pytest.skip("无法创建目录联接，跳过这条用例")
+    else:
+        os.symlink(protected, alias, target_is_directory=True)
+
+    bl = fs_delete.normalize_delete_blacklist(
+        [{"path": str(protected), "mode": "prefix"}]
+    )
+    with pytest.raises(fs_delete.DeleteError) as ei:
+        fs_delete.delete_guarded(
+            str(alias / "f.txt"),
+            channel=fs_delete.CHANNEL_USER,
+            root=str(tmp_path),
+            blacklist=bl,
+            permanent=True,
+        )
+    assert ei.value.message == "blacklist"
+    assert inner.exists()

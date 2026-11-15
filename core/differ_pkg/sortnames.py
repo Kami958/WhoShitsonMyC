@@ -4,25 +4,23 @@ from __future__ import annotations
 
 
 
-from .classify import _SearchEntry, _child_path
+from .classify import _SearchEntry, _child_path, _size_of
 
-def _entry_delta(entry: _SearchEntry) -> int:
+def _entry_delta(entry: _SearchEntry, source: str = "actual") -> int:
     _parent, _name, o, n = entry
-    return (n[1] if n else 0) - (o[1] if o else 0)
+    return (_size_of(n, source) or 0) - (_size_of(o, source) or 0)
 
 
-def _entry_old_size(entry: _SearchEntry) -> int:
-    o = entry[2]
-    return o[1] if o else 0
+def _entry_old_size(entry: _SearchEntry, source: str = "actual") -> int:
+    return _size_of(entry[2], source) or 0
 
 
-def _entry_new_size(entry: _SearchEntry) -> int:
+def _entry_new_size(entry: _SearchEntry, source: str = "actual") -> int:
     """当前侧大小；展开/同快照浏览时就是占用。"""
     n = entry[3]
     if n is not None:
-        return n[1]
-    o = entry[2]
-    return o[1] if o else 0
+        return _size_of(n, source) or 0
+    return _size_of(entry[2], source) or 0
 
 
 def _entry_mtime(entry: _SearchEntry) -> int:
@@ -34,17 +32,17 @@ def _entry_mtime(entry: _SearchEntry) -> int:
     return 0
 
 
-def _entry_pct(entry: _SearchEntry) -> float:
+def _entry_pct(entry: _SearchEntry, source: str = "actual") -> float:
     """|delta| / 旧大小；旧不存在且有变化视为无穷大（与前端 deltaPct 一致）。"""
-    delta = _entry_delta(entry)
-    old = _entry_old_size(entry)
+    delta = _entry_delta(entry, source)
+    old = _entry_old_size(entry, source)
     if old > 0:
         return abs(delta) / old
     return float("inf") if delta != 0 else 0.0
 
 
 def _sort_search_entries(
-    entries: list[_SearchEntry], sort: str
+    entries: list[_SearchEntry], sort: str, source: str = "actual"
 ) -> list[_SearchEntry]:
     """按与变化树相同的规则排序搜索候选（稳定次键用路径）。"""
     if not entries:
@@ -66,8 +64,8 @@ def _sort_search_entries(
         return sorted(
             entries,
             key=lambda e: (
-                -_entry_pct(e),
-                -abs(_entry_delta(e)),
+                -_entry_pct(e, source),
+                -abs(_entry_delta(e, source)),
                 _child_path(e[0], e[1]),
             ),
         )
@@ -75,7 +73,7 @@ def _sort_search_entries(
         return sorted(
             entries,
             key=lambda e: (
-                -_entry_new_size(e),
+                -_entry_new_size(e, source),
                 e[1].casefold(),
                 _child_path(e[0], e[1]),
             ),
@@ -83,7 +81,7 @@ def _sort_search_entries(
     # delta-desc 默认
     return sorted(
         entries,
-        key=lambda e: (-abs(_entry_delta(e)), _child_path(e[0], e[1])),
+        key=lambda e: (-abs(_entry_delta(e, source)), _child_path(e[0], e[1])),
     )
 
 

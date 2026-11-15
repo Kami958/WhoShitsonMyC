@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import os
+# 用下划线别名：这个模块的公开名会被 core.store 的兼容再导出检查逐项比对，
+# 多一个本模块专用的模块名会让那条检查失败。
+import tempfile as _tempfile
+import threading
 from . import wingeom
 from .store_values import (
     _AI_DEFAULTS,
@@ -15,6 +19,7 @@ from .store_values import (
     _normalize_lang,
     _normalize_log_level,
     _normalize_theme,
+    _normalize_size_source,
     _normalize_ui_hover_group_min,
     _pinned_snapshots_to_yaml,
     _put_raw_pair,
@@ -24,6 +29,10 @@ from .store_values import (
 
 # 自动写入的 settings.yaml 首行。文件以这一行开头时，缺少结尾换行视为截断。
 _SETTINGS_SIGNATURE = "# WhoShitsOnMyC settings"
+
+# 测试结果落盘与设置保存可能同时发生，两处都会重写整个配置文件，
+# 用同一把锁把它们排成先后，避免写出半截内容。
+_WRITE_LOCK = threading.Lock()
 
 
 def _parse_settings_text(text: str) -> dict:
@@ -143,18 +152,25 @@ def _write_settings_yaml(path: str, data: dict) -> None:
         "# Missing keys use built-in defaults on load.",
         "common:",
         f"  scan_workers: {int(data['scan_workers'])}",
+        f"  mft_procs: {int(data.get('mft_procs') or 0)}",
+        f"  drives: {_yaml_quote(str(data.get('drives') or ''))}",
+        f"  perf_tests: {_yaml_quote(str(data.get('perf_tests') or ''))}",
         f"  compress_snapshots: {'true' if data.get('compress_snapshots') else 'false'}",
         f"  use_mft: {'true' if data.get('use_mft') else 'false'}",
         f"  search_memory_index: {'true' if data.get('search_memory_index', True) else 'false'}",
         f"  temp_cleanup: {'true' if data.get('temp_cleanup', True) else 'false'}",
         f"  auto_check_updates: {'true' if data.get('auto_check_updates', True) else 'false'}",
+        f"  update_badge: {'true' if data.get('update_badge', True) else 'false'}",
+        f"  perf_prompt: {'true' if data.get('perf_prompt', True) else 'false'}",
         f"  remember_window_size: {'true' if data.get('remember_window_size', True) else 'false'}",
         f"  window_width: {int(data.get('window_width') or 0)}",
         f"  window_height: {int(data.get('window_height') or 0)}",
         f"  log_sanitize: {'true' if data.get('log_sanitize', True) else 'false'}",
         f"  log_level: {_normalize_log_level(data.get('log_level', 'INFO'))}",
+        f"  dev_tools: {'true' if data.get('dev_tools', False) else 'false'}",
         f"  lang: {_normalize_lang(data.get('lang', 'en'))}",
         f"  theme: {_normalize_theme(data.get('theme', 'light'))}",
+        f"  size_source: {_normalize_size_source(data.get('size_source', 'actual'))}",
         f"  snapshot_dir: {_yaml_quote(snap)}",
         f"  delete_blacklist: {_yaml_quote(_delete_blacklist_to_yaml(data.get('delete_blacklist') or []))}",
         f"  pinned_snapshots: {_yaml_quote(_pinned_snapshots_to_yaml(data.get('pinned_snapshots') or []))}",
@@ -181,10 +197,24 @@ def _write_settings_yaml(path: str, data: dict) -> None:
         f"  enabled_tools: {_yaml_quote(_enabled_tools_to_yaml(ai.get('enabled_tools') if ai.get('enabled_tools') is not None else _default_enabled_tools()))}",
         "",
     ]
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
-        fh.write("\n".join(lines))
-    os.replace(tmp, path)
+    # 两个后台线程可能同时写配置（测试结果落盘与设置保存），
+    # 共用同一个临时文件名会互相截断，所以加锁并给每次写用独立的临时文件。
+    with _WRITE_LOCK:
+        fd, tmp = _tempfile.mkstemp(
+            prefix=os.path.basename(path) + ".",
+            suffix=".tmp",
+            dir=os.path.dirname(path) or ".",
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write("\n".join(lines))
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
 
 def _common_view(data: dict) -> dict:

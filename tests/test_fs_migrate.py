@@ -515,7 +515,11 @@ def test_restore_link_copies_back_and_recycles_backup(monkeypatch, tmp_path):
     fm = _registry_isolated(monkeypatch, tmp_path)
     # 备份/目标回收站用桩，避免真进回收站
     recycled = []
-    monkeypatch.setattr(fm.fs_delete, "delete_to_recycle", lambda p: recycled.append(p))
+    monkeypatch.setattr(
+        fm.fs_delete,
+        "delete_guarded",
+        lambda p, **kw: recycled.append(p),
+    )
 
     link = os.path.join(tmp_path, "link")
     target = os.path.join(tmp_path, "real", "target")
@@ -547,8 +551,10 @@ def test_restore_link_permanent_backup(monkeypatch, tmp_path):
     fm = _registry_isolated(monkeypatch, tmp_path)
     # 回收站与彻底删除都用桩，避免真删磁盘
     recycled, wiped = [], []
-    monkeypatch.setattr(fm.fs_delete, "delete_to_recycle", lambda p: recycled.append(p))
-    monkeypatch.setattr(fm.fs_delete, "delete_permanent", lambda p, **kw: wiped.append(p))
+    def _stub(p, *, permanent=False, **_kw):
+        (wiped if permanent else recycled).append(p)
+
+    monkeypatch.setattr(fm.fs_delete, "delete_guarded", _stub)
 
     link = os.path.join(tmp_path, "link")
     target = os.path.join(tmp_path, "real", "target")
@@ -683,7 +689,11 @@ def test_migrate_backup_recycle_goes_to_recycle_bin(tmp_path, monkeypatch):
 
     monkeypatch.setattr(fm, "_create_junction", lambda _d, _l: None)
     recycled = []
-    monkeypatch.setattr(fm.fs_delete, "delete_to_recycle", lambda p: recycled.append(p))
+    monkeypatch.setattr(
+        fm.fs_delete,
+        "delete_guarded",
+        lambda p, **kw: recycled.append(p),
+    )
 
     src = _tree(tmp_path, {"a.txt": 5, "sub": {"b.bin": 5}})
     dest = os.path.join(tmp_path, "real", "root")
@@ -706,12 +716,10 @@ def test_migrate_backup_purge_deletes_permanently(tmp_path, monkeypatch):
     monkeypatch.setattr(fm, "_create_junction", lambda _d, _l: None)
     recycled = []
     purged = []
-    monkeypatch.setattr(fm.fs_delete, "delete_to_recycle", lambda p: recycled.append(p))
-    monkeypatch.setattr(
-        fm.fs_delete,
-        "delete_path",
-        lambda p, permanent=False: purged.append((p, permanent)),
-    )
+    def _stub(p, *, permanent=False, **_kw):
+        (purged if permanent else recycled).append((p, permanent))
+
+    monkeypatch.setattr(fm.fs_delete, "delete_guarded", _stub)
 
     src = _tree(tmp_path, {"a.txt": 5})
     dest = os.path.join(tmp_path, "real", "root")
@@ -734,8 +742,8 @@ def test_migrate_backup_keep_when_settle_unquiet(tmp_path, monkeypatch):
     purged = []
     monkeypatch.setattr(
         fm.fs_delete,
-        "delete_path",
-        lambda p, permanent=False: purged.append(p),
+        "delete_guarded",
+        lambda p, **kw: purged.append(p),
     )
 
     src = _tree(tmp_path, {"a.txt": 5})
@@ -760,8 +768,8 @@ def test_migrate_backup_keep_when_monitor_overflowed(tmp_path, monkeypatch):
     purged = []
     monkeypatch.setattr(
         fm.fs_delete,
-        "delete_path",
-        lambda p, permanent=False: purged.append(p),
+        "delete_guarded",
+        lambda p, **kw: purged.append(p),
     )
 
     src = _tree(tmp_path, {"a.txt": 5})
@@ -782,12 +790,10 @@ def test_migrate_backup_unknown_action_keeps(tmp_path, monkeypatch):
     monkeypatch.setattr(fm, "_create_junction", lambda _d, _l: None)
     purged = []
     recycled = []
-    monkeypatch.setattr(fm.fs_delete, "delete_to_recycle", lambda p: recycled.append(p))
-    monkeypatch.setattr(
-        fm.fs_delete,
-        "delete_path",
-        lambda p, permanent=False: purged.append(p),
-    )
+    def _stub(p, *, permanent=False, **_kw):
+        (purged if permanent else recycled).append(p)
+
+    monkeypatch.setattr(fm.fs_delete, "delete_guarded", _stub)
 
     src = _tree(tmp_path, {"a.txt": 5})
     dest = os.path.join(tmp_path, "real", "root")
@@ -805,10 +811,10 @@ def test_migrate_backup_delete_failure_reports_uncleaned(tmp_path, monkeypatch):
 
     monkeypatch.setattr(fm, "_create_junction", lambda _d, _l: None)
 
-    def _boom(_p, permanent=False):
+    def _boom(_p, **_kw):
         raise fs_delete.DeleteError("busy")
 
-    monkeypatch.setattr(fm.fs_delete, "delete_path", _boom)
+    monkeypatch.setattr(fm.fs_delete, "delete_guarded", _boom)
 
     src = _tree(tmp_path, {"a.txt": 5})
     dest = os.path.join(tmp_path, "real", "root")
@@ -841,7 +847,7 @@ def test_restore_link_reports_progress(monkeypatch, tmp_path):
     import _winapi
 
     fm = _registry_isolated(monkeypatch, tmp_path)
-    monkeypatch.setattr(fm.fs_delete, "delete_to_recycle", lambda p: None)
+    monkeypatch.setattr(fm.fs_delete, "delete_guarded", lambda p, **kw: None)
 
     link = os.path.join(tmp_path, "link")
     target = os.path.join(tmp_path, "real", "target")

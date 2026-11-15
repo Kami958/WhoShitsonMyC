@@ -1246,7 +1246,10 @@ function _aiRenderSnapPickList(snaps, listEl) {
     try {
       if (s.scanned_at) parts.push(fmtTime(s.scanned_at));
     } catch (e) {}
-    if (s.total_size != null) parts.push(fmtBytes(s.total_size || 0));
+    // 跟当前口径走：同一份快照在这里和卡片上要显示同一个数
+    if (s.total_size != null || s.actual_size_total != null) {
+      parts.push(fmtBytes(snapshotDisplaySize(s)));
+    }
     if (s.note) parts.push(String(s.note));
     meta.textContent = parts.join(" · ");
     btn.appendChild(root);
@@ -1292,12 +1295,14 @@ async function startDiskCleanupFromSnapshot(snap) {
     toast(t("aiModuleMissing"), true);
     return;
   }
-  // 单快照：同一路径作 old/new，metric 走 new_size
+  // 单快照：同一路径作 old/new，metric 走 new_size。
+  // 根规模跟着当前口径走，否则清理建议会拿逻辑总量去和实际占用的子项比。
+  const rootSize = snapshotDisplaySize(snap);
   await _aiStartCleanupWithPaths({
     old_path: snap.path,
     new_path: snap.path,
     root: snap.root || "",
-    total_size: snap.total_size || 0,
+    total_size: rootSize,
     seed: {
       path: "",
       rel: "",
@@ -1305,8 +1310,8 @@ async function startDiskCleanupFromSnapshot(snap) {
       is_dir: true,
       kind: "",
       old_size: 0,
-      new_size: Number(snap.total_size) || 0,
-      delta: Number(snap.total_size) || 0,
+      new_size: rootSize,
+      delta: rootSize,
     },
   });
 }

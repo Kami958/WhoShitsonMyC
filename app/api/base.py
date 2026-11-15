@@ -27,6 +27,12 @@ class ApiBase:
         self._window: webview.Window | None = None
         self._scan_thread: threading.Thread | None = None
         self._cancel = threading.Event()
+        # 解析进程数的本机测试：只跑读取与解析，不落盘
+        self._mft_test_thread: threading.Thread | None = None
+        self._mft_test_cancel = threading.Event()
+        # 超时收尾要区分「用户点的取消」与「跑满时限自动停」，并把已量到的数据留下
+        self._mft_test_timed_out = False
+        self._mft_test_partial: dict = {}
         # 目录迁移类作业（迁移 / 再次迁移 / 还原）一次只跑一个，进度经事件推送。
         # 占位记的是「作业有没有在动文件」，不是「后台线程有没有退出」：
         # 线程把终态推给界面之前先放开，界面收到结果就能接着开下一项。
@@ -49,7 +55,7 @@ class ApiBase:
         # pywebview 的每次 JS-API 调用可能在不同线程执行，
         # SQLite 连接跨线程复用必须串行化，故加锁。
         self._diff: Diff | None = None
-        self._diff_key: tuple[str, str] | None = None
+        self._diff_key: tuple[str, str, str] | None = None
         self._diff_lock = threading.Lock()
         self._window_size_timer: threading.Timer | None = None
         self._window_size_lock = threading.Lock()
@@ -90,6 +96,40 @@ class ApiBase:
         self._window.evaluate_js(
             f"window.__onPyEvent && window.__onPyEvent({json.dumps(event)}, {data})"
         )
+
+    def _open_devtools(self) -> bool:
+        """在当前窗口打开开发者工具面板；拿不到内核控件时返回 False。
+
+        只在设置页勾选该开关并保存时调用，不参与启动流程（启动那条走
+        ``webview.start(debug=True)``）。内核控件只能在界面线程访问，直接
+        从后台线程取 ``CoreWebView2`` 会抛 InvalidOperationException，因此
+        经表单的 BeginInvoke 排过去再取，不阻塞保存流程。
+        """
+        window = self._window
+        form = getattr(window, "native", None) if window is not None else None
+        if form is None:
+            return False
+
+        def _run() -> None:
+            try:
+                for ctrl in form.Controls:
+                    core = getattr(ctrl, "CoreWebView2", None)
+                    if core is not None:
+                        core.OpenDevToolsWindow()
+                        return None
+            except Exception as exc:  # noqa: BLE001 - 打不开面板不影响设置保存
+                applog.exception("open devtools failed", exc)
+            return None
+
+        try:
+            # 延迟导入：此处 .NET 运行与 WinForms 已由界面库加载
+            from System import Func, Type
+
+            form.BeginInvoke(Func[Type](_run))
+        except Exception as exc:  # noqa: BLE001
+            applog.exception("open devtools failed", exc)
+            return False
+        return True
 
     # ---- 迁移过程中问用户 -------------------------------------------------
 

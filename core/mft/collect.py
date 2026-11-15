@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 import time
 from multiprocessing import Pool, shared_memory
-from .pack import CompactMftTable, NameRow, _META_SIZE, _chunk_ranges
+from .pack import CompactMftTable, CompactNames, _META_SIZE, _chunk_ranges
 from .procs import _MAX_PROCS, choose_mft_procs
 from .worker import Cancel, Progress, _serial_to_compact, _worker_parse_range, close_parse_pool
 
@@ -58,6 +58,7 @@ class StreamingCompactCollector:
         "_shm_name",
         "_shm_size",
         "_bps",
+        "_cluster_size",
         "_pool",
         "_own_pool",
         "_ranges",
@@ -81,6 +82,7 @@ class StreamingCompactCollector:
         workers: int,
         pool: Pool | None = None,
         bytes_per_sector: int = 0,
+        cluster_size: int = 4096,
         progress: Progress | None = None,
         cancel: Cancel | None = None,
         timer: object | None = None,
@@ -90,6 +92,7 @@ class StreamingCompactCollector:
         self._shm_name = shm.name
         self._shm_size = shm_size
         self._bps = max(0, int(bytes_per_sector))
+        self._cluster_size = int(cluster_size)
         self._progress = progress
         self._cancel = cancel
         self._timer = timer
@@ -144,6 +147,7 @@ class StreamingCompactCollector:
                     end,
                     rs,
                     self._bps,
+                    self._cluster_size,
                 )
                 try:
                     ar = self._pool.apply_async(_worker_parse_range, (args,))
@@ -156,7 +160,7 @@ class StreamingCompactCollector:
         """确保全部派发并收齐结果。串行回退时直接解析整表。"""
         n = self.n
         if n <= 0:
-            return CompactMftTable(n_records=0, meta=b"", names=[])
+            return CompactMftTable(n_records=0, meta=b"", names=CompactNames())
 
         _span_start = getattr(self._timer, "span_start", None)
         _span_end = getattr(self._timer, "span_end", None)
@@ -176,8 +180,9 @@ class StreamingCompactCollector:
             raise self._err
 
         full_meta = bytearray(n * _META_SIZE)
-        all_names: list[NameRow] = []
+        all_names = CompactNames()
         all_link_targets: list[tuple[int, str]] = []
+        all_tags: list[tuple[int, int]] = []
         done = 0
         gather_s = 0.0
 
@@ -188,7 +193,7 @@ class StreamingCompactCollector:
                 if self._cancel and self._cancel():
                     raise InterruptedError("cancelled")
                 try:
-                    start, meta, names, link_targets = ar.get()
+                    start, meta, names, link_targets, tags = ar.get()
                 except Exception:
                     if self._own_pool:
                         close_parse_pool(self._pool, terminate=True)
@@ -202,6 +207,8 @@ class StreamingCompactCollector:
                     all_names.extend(names)
                 if link_targets:
                     all_link_targets.extend(link_targets)
+                if tags:
+                    all_tags.extend(tags)
                 gather_s += time.perf_counter() - t_g0
                 done += count
                 if self._progress is not None:
@@ -223,6 +230,7 @@ class StreamingCompactCollector:
             meta=bytes(full_meta),
             names=all_names,
             link_targets=all_link_targets,
+            reparse_tags=all_tags,
         )
 
 
@@ -236,6 +244,7 @@ def collect_compact_from_shared_memory(
     cancel: Cancel | None = None,
     pool: Pool | None = None,
     bytes_per_sector: int = 0,
+    cluster_size: int = 4096,
     timer: object | None = None,
 ) -> CompactMftTable:
     """从 SharedMemory 解析为紧凑表（**不**还原 ParsedRecord）。
@@ -249,7 +258,7 @@ def collect_compact_from_shared_memory(
 
     n = shm_size // rec_size
     if n <= 0:
-        return CompactMftTable(n_records=0, meta=b"", names=[])
+        return CompactMftTable(n_records=0, meta=b"", names=CompactNames())
 
     if workers is not None:
         nw = max(1, min(_MAX_PROCS, int(workers)))
@@ -266,6 +275,7 @@ def collect_compact_from_shared_memory(
                     progress=progress,
                     cancel=cancel,
                     bytes_per_sector=bytes_per_sector,
+                    cluster_size=cluster_size,
                 )
             finally:
                 mv.release()
@@ -281,6 +291,7 @@ def collect_compact_from_shared_memory(
                     progress=progress,
                     cancel=cancel,
                     bytes_per_sector=bytes_per_sector,
+                    cluster_size=cluster_size,
                 )
             finally:
                 mv.release()
@@ -290,22 +301,23 @@ def collect_compact_from_shared_memory(
     bps = max(0, int(bytes_per_sector))
     try:
         tasks = [
-            (shm.name, shm_size, start, end, rec_size, bps)
+            (shm.name, shm_size, start, end, rec_size, bps, cluster_size)
             for start, end in ranges
         ]
         if active is None:
             active = Pool(processes=nw)
 
         full_meta = bytearray(n * _META_SIZE)
-        all_names: list[NameRow] = []
+        all_names = CompactNames()
         all_link_targets: list[tuple[int, str]] = []
+        all_tags: list[tuple[int, int]] = []
         done = 0
         gather_s = 0.0
         # wait：imap 墙钟（含 worker CPU + IPC + 主进程 gather）
         if _span_start:
             _span_start("mft_parse_wait")
         try:
-            for start, meta, names, link_targets in active.imap_unordered(
+            for start, meta, names, link_targets, tags in active.imap_unordered(
                 _worker_parse_range, tasks, chunksize=1
             ):
                 if cancel and cancel():
@@ -319,6 +331,8 @@ def collect_compact_from_shared_memory(
                     all_names.extend(names)
                 if link_targets:
                     all_link_targets.extend(link_targets)
+                if tags:
+                    all_tags.extend(tags)
                 gather_s += time.perf_counter() - t_g0
                 done += count
                 if progress is not None:
@@ -337,6 +351,7 @@ def collect_compact_from_shared_memory(
             meta=bytes(full_meta),
             names=all_names,
             link_targets=all_link_targets,
+            reparse_tags=all_tags,
         )
     except InterruptedError:
         if active is not None and own_pool:

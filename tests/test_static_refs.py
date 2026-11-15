@@ -22,6 +22,7 @@ import ast
 import builtins
 import importlib
 import pathlib
+import re
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 ROOTS = ("core", "app", "modules", "tests")
@@ -237,3 +238,89 @@ def test_module_attribute_references_exist():
                     break
                 owner = submodule
     assert not problems, "存在指不到东西的模块属性：\n" + "\n".join(sorted(set(problems)))
+
+
+_DIRECT_DELETE_NAMES = frozenset({"delete_path", "delete_permanent", "delete_to_recycle"})
+
+
+def test_delete_only_through_guard():
+    """产品代码里只允许统一删除口调用底层删除。"""
+    problems = []
+    guard = REPO_ROOT / "core" / "fs_delete.py"
+    for path in source_files():
+        if path == guard or "tests" in path.relative_to(REPO_ROOT).parts:
+            continue
+        tree = parse(path)
+        if tree is None:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            parts = _dotted(node.func)
+            if not parts or parts[-1] not in _DIRECT_DELETE_NAMES:
+                continue
+            if len(parts) == 1 or (len(parts) >= 2 and parts[-2] == "fs_delete"):
+                problems.append(
+                    f"{path.relative_to(REPO_ROOT)}:{node.lineno} 直接调用了 "
+                    f"{'.'.join(parts)}，删除必须经过统一入口"
+                )
+    assert not problems, "存在绕过统一删除口的调用：\n" + "\n".join(problems)
+
+# ---- 界面文案键：代码引用的键必须在两份语言里都存在 ----
+
+_I18N_JS = REPO_ROOT / "web" / "js" / "i18n.js"
+_INDEX_HTML = REPO_ROOT / "web" / "index.html"
+_WEB_JS = REPO_ROOT / "web" / "js"
+
+
+def _i18n_keys() -> tuple[set[str], set[str]]:
+    """读出中英两段的键集合。
+
+    文案表的结构是 ``const I18N = { zh: {...}, en: {...} }``，两段各占一半，
+    因此按 ``en: {`` 的位置切开分别取键。
+    """
+    text = _I18N_JS.read_text(encoding="utf-8")
+    split = text.index("  en: {")
+    zh = set(re.findall(r"^    ([A-Za-z0-9_]+):", text[:split], re.M))
+    en = set(re.findall(r"^    ([A-Za-z0-9_]+):", text[split:], re.M))
+    return zh, en
+
+
+def _used_i18n_keys() -> dict[str, set[str]]:
+    """收集界面上用到的文案键，按来源分组，方便报错时指出是哪个文件。"""
+    used: dict[str, set[str]] = {}
+    html = _INDEX_HTML.read_text(encoding="utf-8")
+    keys: set[str] = set()
+    for attr in ("data-i18n", "data-i18n-title", "data-i18n-placeholder"):
+        keys |= set(re.findall(r'%s="([^"]+)"' % attr, html))
+    used["index.html"] = keys
+    for path in sorted(_WEB_JS.glob("*.js")):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        keys = set(re.findall(r't\(\s*"([A-Za-z0-9_]+)"', text))
+        if keys:
+            used[path.name] = keys
+    return used
+
+
+def test_language_tables_have_same_keys():
+    """中文与英文必须一一对应，少一条那一侧就会把键名直接显示到界面上。"""
+    zh, en = _i18n_keys()
+    assert zh, "中文文案表没读到任何键"
+    assert en, "英文文案表没读到任何键"
+    assert not (zh - en), "只在中文里有：%s" % sorted(zh - en)[:10]
+    assert not (en - zh), "只在英文里有：%s" % sorted(en - zh)[:10]
+
+
+def test_used_i18n_keys_exist():
+    """界面引用的每个键都要有译文。
+
+    真实事故：一次批量删文案的脚本按行首键名匹配，把后面一整片键连带删掉，
+    语法检查与全部测试都通过，但界面上那一片文字全变成了键名。
+    """
+    zh, _en = _i18n_keys()
+    missing: list[str] = []
+    for source, keys in _used_i18n_keys().items():
+        for key in sorted(keys):
+            if key not in zh:
+                missing.append("%s 用到 %s" % (source, key))
+    assert not missing, "文案表里没有这些键：" + "、".join(missing)
